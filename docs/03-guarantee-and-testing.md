@@ -62,6 +62,33 @@ layer is fallible.
 - This is tested: vectors embedded in random binary, in truncated-UTF-8, and in
   overlong/continuation-byte soup.
 
+## Test taxonomy — five tiers, split cleanly
+
+Every test in the repo belongs to exactly one tier; the tier decides where it
+lives, what tooling drives it, and when it runs.
+
+| Tier | Lives in | Tooling | Exercises | Runs |
+|---|---|---|---|---|
+| **Unit** | `#[cfg(test)]` modules beside the code | libtest | one unit in isolation: a confirmer regex, Luhn, carry-over arithmetic, digest formatting, overlap resolution, config deserialization | every build |
+| **Integration** | `crates/cloak-core/tests/` | libtest + `proptest` | the assembled engine through its **public API**: per-rule vector suites, property invariants, differential engine ≡ reference | every PR, all 3 targets |
+| **E2E** | `crates/cloak-cli/tests/` | `assert_cmd` | the **real binary** through the process boundary: pipe stdin→stdout, file args, `--config` loading, stderr stats (text + JSON), exit codes | every PR, all 3 targets |
+| **Fuzz** | `crates/cloak-core/fuzz/` | `cargo-fuzz` | adversarial robustness: the three targets below | smoke + corpus replay every PR; long runs nightly |
+| **Smoke** | tagged subset of the above | — | cheapest always-green signal: build + unit + one golden e2e pipe test (vector corpus in → redacted golden out, byte-compared) | first CI stage, every push |
+
+Rules of the split:
+
+- The **strategy layers** below (vectors, property, differential, fuzz) are the
+  *what*; this table is the *where and when*. Vector data is defined once
+  (`cloak-core/src/rules/vectors/`) and consumed by unit, integration, e2e (via the
+  golden pipe test), and fuzz seeds — never duplicated per tier.
+- Anything touching process I/O, flags, or exit codes is e2e — the engine never
+  gets tested through the CLI, and the CLI never re-tests engine logic.
+- v0.2 binding parity suites ([06-embedding.md](06-embedding.md#api-parity-contract))
+  are the e2e tier of each host language: same vectors, real artifact, per-host CI.
+- Coverage is **measured and published** (`cargo-llvm-cov`, per-PR report), but not
+  %-gated in v0.1: vectors + properties + differential + fuzz enforce correctness
+  better than a line-percentage ever will. Revisit once the code stabilizes.
+
 ## Test strategy (all of this is v0.1, not aspirational)
 
 The guarantee makes testing a *feature*. Four layers:
@@ -104,10 +131,15 @@ CI runs each target time-boxed (smoke, minutes) per PR; the committed corpus
 Long-running fuzz sessions are manual/scheduled, with new findings committed to the
 corpus.
 
-### CI gates (blocking)
+### CI staging (all blocking at their stage)
 
-- fmt + clippy `-D warnings`, tests, doc build — on linux x86-64, linux aarch64,
-  macos aarch64.
-- Differential suite green on all targets.
-- Fuzz smoke + corpus replay green.
-- Bench floor gate per [04-performance.md](04-performance.md).
+| Stage | When | Contents |
+|---|---|---|
+| **0 — Smoke** | every push, fail-fast, all 3 targets | fmt, clippy `-D warnings`, build, unit tests, golden e2e pipe test |
+| **1 — Full** | every PR, all 3 targets | integration (vectors, property invariants, differential engine ≡ reference — cross-target divergence asserted absent), full e2e suite, doc build, fuzz smoke (time-boxed minutes) + committed-corpus regression replay, coverage report published |
+| **2 — Nightly** | scheduled | extended fuzz (≥ 1 h/target, new findings committed to corpus), full criterion suite: [≥ 500 MB/s floor + 10 % regression gate](04-performance.md#the-floor-ci-enforced), chunk-size sweep |
+| **3 — Release** | tag | everything above + receipts table refresh + released-artifact golden smoke |
+
+Bench gates live in nightly/release rather than per-PR — criterion on shared PR
+runners is noise, and a perf regression can't hide longer than a day. A PR that
+lands a suspected perf change can trigger the bench stage manually.

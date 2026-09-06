@@ -8,8 +8,11 @@ Eight implementation sessions, each sized **2–3 h**, each ending in a shippabl
 CI-green state. Sessions are strictly ordered (each builds on the previous).
 
 ### S1 — Workspace skeleton + core types
-Workspace (`crates/cloak-core`, `crates/cloak-cli`); CI matrix (linux x86-64,
-linux aarch64, macos aarch64: fmt, clippy `-D warnings`, test, doc); core types
+Workspace (`crates/cloak-core`, `crates/cloak-cli`); staged CI per
+[03 §CI staging](03-guarantee-and-testing.md#ci-staging-all-blocking-at-their-stage)
+— smoke stage (fmt, clippy `-D warnings`, build, unit, golden e2e pipe test via
+`assert_cmd`) on the 3-target matrix, full stage scaffolded; test-tier layout
+(`#[cfg(test)]` / `core/tests/` / `cli/tests/` / `fuzz/`); core types
 (`Engine`, `Session`, `RuleId`, `MatchEvent`, `Stats`); redaction writer with
 `[CLOAK:<rule>:<digest4>]` tag + keyed BLAKE3 digest (env key, ephemeral fallback).
 Decide & record the deliberately-open stack choices (arg parsing, error crates,
@@ -46,15 +49,17 @@ payloads, bare 10-digit strings) produces zero matches.
 ### S5 — Config + CLI surface
 Serde-first config structs; TOML frontend; per-rule `enabled`; digest-key env
 indirection; CLI: `--config`, file args, `--stats-format {text,json}`; stderr
-end-of-stream per-rule counts; exit codes.
+end-of-stream per-rule counts; exit codes. **Full e2e suite** (`cloak-cli/tests/`,
+`assert_cmd`): pipe, file args, config loading, stats text + JSON, exit codes.
 **Done when:** `cloak --config cloak.toml < in > out` honors enable/disable; stats
-match planted-vector counts exactly; config fuzz target parses arbitrary TOML
-without panic.
+match planted-vector counts exactly (asserted end-to-end through the binary);
+config fuzz target parses arbitrary TOML without panic.
 
 ### S6 — Guarantee hardening
 cargo-fuzz targets (`fuzz_engine_stream`, `fuzz_pem_state`, `fuzz_config`);
 invalid-UTF-8/binary corpora; differential suite (engine ≡ reference) wired into CI
-on all three targets; fuzz smoke + corpus replay as CI gates.
+on all three targets; fuzz smoke + corpus replay as PR gates; nightly stage
+(extended fuzz ≥ 1 h/target); coverage reporting (`cargo-llvm-cov`) published per PR.
 **Done when:** all [03-guarantee-and-testing.md](03-guarantee-and-testing.md) CI
 gates exist and are blocking; initial fuzz session (≥ 1 h/target locally) finds
 nothing outstanding.
