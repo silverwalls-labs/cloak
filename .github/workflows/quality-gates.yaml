@@ -1,6 +1,9 @@
 name: Quality Gates
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
     branches:
       - main
@@ -99,7 +102,7 @@ jobs:
 
       - name: Unit Tests
         run: |
-          cargo test --workspace --lib
+          cargo test --workspace --lib --doc
 
   integration-tests:
     name: Integration Tests
@@ -142,7 +145,7 @@ jobs:
           cargo test -p cloak-cli --test pipe
 
   fuzz:
-    name: Fuzz
+    name: Fuzz (placeholder — S6)
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -175,6 +178,8 @@ jobs:
           echo "hello world" | ./target/debug/cloak | diff - <(echo "hello world")
 
   # ── Coverage (single platform, instrumented) ─────────────────────
+  # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
+  # main.rs coverage via instrumented binary + inherited LLVM_PROFILE_FILE).
 
   coverage-unit:
     name: Coverage — Unit
@@ -195,7 +200,7 @@ jobs:
 
       - name: Install cargo-llvm-cov
         run: |
-          cargo install cargo-llvm-cov --locked
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
 
       - name: Unit Tests with Coverage
         run: |
@@ -228,7 +233,7 @@ jobs:
 
       - name: Install cargo-llvm-cov
         run: |
-          cargo install cargo-llvm-cov --locked
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
 
       - name: Integration Tests with Coverage
         run: |
@@ -261,7 +266,7 @@ jobs:
 
       - name: Install cargo-llvm-cov
         run: |
-          cargo install cargo-llvm-cov --locked
+          cargo install cargo-llvm-cov --version 0.9.1 --locked
 
       - name: E2E Tests with Coverage
         run: |
@@ -276,7 +281,7 @@ jobs:
           path: coverage/e2e.lcov
 
   coverage-smoke:
-    name: Coverage — Smoke
+    name: Coverage — Smoke (placeholder)
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -288,7 +293,7 @@ jobs:
           echo "smoke: coverage not applicable — golden pipe check only"
 
   coverage-fuzz:
-    name: Coverage — Fuzz
+    name: Coverage — Fuzz (placeholder — S6)
     runs-on: ubuntu-24.04-arm
 
     steps:
@@ -323,7 +328,7 @@ jobs:
           merge-multiple: true
           path: coverage
 
-      - name: Generate coverage report
+      - name: Generate coverage report and enforce thresholds
         run: |
           # ── Coverage thresholds (line coverage %) ──
           THRESHOLD_UNIT=95
@@ -332,7 +337,6 @@ jobs:
           THRESHOLD_TOTAL=92
 
           # Parse an LCOV file → "lines% funcs% branches% lines_raw"
-          # lines_raw is the unformatted float for threshold checks.
           parse_lcov() {
             local file="$1"
             local lf=0 lh=0 fnf=0 fnh=0 brf=0 brh=0
@@ -388,23 +392,22 @@ jobs:
           [ "$total_fnf" -gt 0 ] && total_fpct=$(awk "BEGIN { printf \"%.1f%%\", ($total_fnh/$total_fnf)*100 }")
           [ "$total_brf" -gt 0 ] && total_bpct=$(awk "BEGIN { printf \"%.1f%%\", ($total_brh/$total_brf)*100 }")
 
-          # ── Threshold check ──
+          # ── Threshold check (exit code, not subshell) ──
+          FAILED=0
           check_threshold() {
             local name="$1" actual="$2" required="$3"
-            local pass
-            pass=$(awk "BEGIN { print ($actual >= $required) ? 1 : 0 }")
-            if [ "$pass" -eq 1 ]; then
+            if awk "BEGIN { exit ($actual >= $required) ? 0 : 1 }"; then
               echo "✅"
             else
               echo "❌"
-              FAILED=1
+              return 1
             fi
           }
-          FAILED=0
-          unit_status=$(check_threshold "unit" "$unit_raw" "$THRESHOLD_UNIT")
-          integ_status=$(check_threshold "integration" "$integ_raw" "$THRESHOLD_INTEGRATION")
-          e2e_status=$(check_threshold "e2e" "$e2e_raw" "$THRESHOLD_E2E")
-          total_status=$(check_threshold "total" "$total_raw" "$THRESHOLD_TOTAL")
+
+          unit_status=$(check_threshold "unit" "$unit_raw" "$THRESHOLD_UNIT") || FAILED=1
+          integ_status=$(check_threshold "integration" "$integ_raw" "$THRESHOLD_INTEGRATION") || FAILED=1
+          e2e_status=$(check_threshold "e2e" "$e2e_raw" "$THRESHOLD_E2E") || FAILED=1
+          total_status=$(check_threshold "total" "$total_raw" "$THRESHOLD_TOTAL") || FAILED=1
 
           # ── Build markdown report ──
           {
@@ -431,6 +434,7 @@ jobs:
           fi
 
       - name: Post coverage comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -445,13 +449,11 @@ jobs:
             2>/dev/null | head -1)
 
           if [ -n "$COMMENT_ID" ]; then
-            # Update existing comment
             gh api \
               "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
               -X PATCH \
               -f body="$REPORT"
           else
-            # Create new comment
             gh api \
               "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
               -f body="$REPORT"
@@ -477,8 +479,8 @@ jobs:
 
       - name: Install cargo-deny
         run: |
-          cargo install cargo-deny --locked
+          cargo install cargo-deny --version 0.20.2 --locked
 
       - name: cargo-deny
         run: |
-          cargo deny check advisories licenses bans
+          cargo deny check advisories licenses bans sources

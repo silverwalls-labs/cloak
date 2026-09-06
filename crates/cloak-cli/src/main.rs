@@ -42,9 +42,14 @@ fn run() -> anyhow::Result<()> {
 
 fn main() {
     if let Err(e) = run() {
-        if let Some(io_err) = e.downcast_ref::<io::Error>()
-            && io_err.kind() == io::ErrorKind::BrokenPipe
-        {
+        // Walk the full error chain — a .context() wrapper must not break
+        // SIGPIPE handling.
+        let is_broken_pipe = e.chain().any(|cause| {
+            cause
+                .downcast_ref::<io::Error>()
+                .is_some_and(|io_err| io_err.kind() == io::ErrorKind::BrokenPipe)
+        });
+        if is_broken_pipe {
             std::process::exit(0);
         }
         eprintln!("cloak: {e:#}");

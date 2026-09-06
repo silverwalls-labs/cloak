@@ -10,6 +10,9 @@ use crate::types::Stats;
 pub enum BuildError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+
+    #[error("failed to obtain entropy for digest key: {0}")]
+    Entropy(#[from] config::DigestKeyError),
 }
 
 /// Compiled engine holding the resolved digest key and (in later sessions)
@@ -27,7 +30,7 @@ pub struct Engine {
 impl Engine {
     /// Build an engine from the given configuration.
     pub fn new(config: &Config) -> Result<Self, BuildError> {
-        let digest_key = config::resolve_digest_key(config.digest_key_env.as_deref());
+        let digest_key = config::resolve_digest_key(config.digest_key_env.as_deref())?;
         Ok(Self {
             digest_key,
             _config: config.clone(),
@@ -47,8 +50,15 @@ impl Engine {
 /// Per-stream scanning state.
 ///
 /// `Session` is **not** [`Send`] or [`Sync`] — it is bound to the thread
-/// that created it. In later sessions it will hold mutable carry-over state
-/// and PEM detector state.
+/// that created it.
+///
+/// **Why `!Send` (not just `!Sync`):** S3 will add carry-over buffers whose
+/// correctness depends on push/finish being called from the same thread that
+/// created the session (position-dependent mutable state). Allowing `Send`
+/// now and restricting it in S3 would be a breaking API change for any
+/// consumer that moves sessions between threads. The conservative choice is
+/// `!Send + !Sync` from day one. Revisit for v0.2 bindings if cross-thread
+/// move semantics are needed (`docs/06-embedding.md`).
 pub struct Session<'e> {
     #[allow(dead_code)]
     engine: &'e Engine,
@@ -57,6 +67,16 @@ pub struct Session<'e> {
     /// so PhantomData<*const ()> infects the parent struct.
     _not_send: PhantomData<*const ()>,
 }
+
+/// Compile-time assertion: `Engine` must be `Send + Sync`.
+/// Lives outside `#[cfg(test)]` so regressions are caught by `cargo check`.
+#[allow(dead_code)]
+const _: () = {
+    fn assert_send_sync<T: Send + Sync>() {}
+    fn _assert() {
+        assert_send_sync::<Engine>();
+    }
+};
 
 impl Session<'_> {
     /// Push a chunk of bytes through the engine.
@@ -93,16 +113,6 @@ mod tests {
         };
         Engine::new(&config).unwrap()
     }
-
-    /// Compile-time assertion: Engine must be Send + Sync.
-    #[allow(dead_code)]
-    const _: () = {
-        fn assert_send_sync<T: Send + Sync>() {}
-        #[allow(clippy::no_effect)]
-        fn _assert() {
-            assert_send_sync::<Engine>();
-        }
-    };
 
     #[test]
     fn push_passthrough() {

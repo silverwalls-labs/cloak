@@ -1,4 +1,4 @@
-use cloak_core::{Config, Engine};
+use cloak_core::{Config, Digest, Engine, RuleId, Stats, compute_digest, format_tag, write_tag};
 
 fn engine() -> Engine {
     let config = Config {
@@ -90,4 +90,78 @@ fn bytes_processed_accuracy() {
     session.push(b"c", &mut output).unwrap();
     let stats = session.finish(&mut output).unwrap();
     assert_eq!(stats.bytes_processed, 6);
+}
+
+// ── Redaction writer (public API) ──────────────────────────────────
+
+#[test]
+fn redaction_tag_format() {
+    let rule = RuleId::new("aws-access-key");
+    let digest = Digest::new([0x9f, 0x3a]);
+    assert_eq!(format_tag(&rule, &digest), "[CLOAK:aws-access-key:9f3a]");
+}
+
+#[test]
+fn redaction_write_tag_matches_format() {
+    let rule = RuleId::new("email");
+    let digest = Digest::new([0x00, 0xff]);
+    let mut buf = Vec::new();
+    write_tag(&rule, &digest, &mut buf).unwrap();
+    assert_eq!(String::from_utf8(buf).unwrap(), format_tag(&rule, &digest));
+}
+
+#[test]
+fn compute_digest_deterministic() {
+    let key = blake3::derive_key("integration test key", b"test-material");
+    let d1 = compute_digest(b"some-secret-value", &key);
+    let d2 = compute_digest(b"some-secret-value", &key);
+    assert_eq!(d1, d2);
+}
+
+#[test]
+fn compute_digest_varies_with_input() {
+    let key = blake3::derive_key("integration test key", b"test-material");
+    let d1 = compute_digest(b"secret-a", &key);
+    let d2 = compute_digest(b"secret-b", &key);
+    assert_ne!(d1, d2);
+}
+
+// ── Config + Engine construction ──────────────────────────────────
+
+#[test]
+fn default_config_constructs_engine() {
+    // Uses CLOAK_DIGEST_KEY env var (likely unset → ephemeral).
+    let config = Config::default();
+    let engine = Engine::new(&config);
+    assert!(engine.is_ok());
+}
+
+#[test]
+fn explicit_ephemeral_config() {
+    let config = Config {
+        digest_key_env: None,
+    };
+    let engine = Engine::new(&config);
+    assert!(engine.is_ok());
+}
+
+// ── Stats ─────────────────────────────────────────────────────────
+
+#[test]
+fn stats_total_matches_through_api() {
+    let stats = Stats::default();
+    assert_eq!(stats.total_matches(), 0);
+    assert_eq!(stats.bytes_processed, 0);
+}
+
+// ── RuleId ordering ───────────────────────────────────────────────
+
+#[test]
+fn rule_id_ordering_is_deterministic() {
+    let a = RuleId::new("aws-access-key");
+    let b = RuleId::new("github-token");
+    let c = RuleId::new("email");
+    let mut rules = vec![b.clone(), c.clone(), a.clone()];
+    rules.sort();
+    assert_eq!(rules, vec![a, c, b]);
 }
