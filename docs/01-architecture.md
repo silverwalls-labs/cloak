@@ -180,9 +180,11 @@ payload, so the pipe contract stays pure.
 - Runtime CPU-feature detection comes free from the matching crates (AVX2/NEON
   picked at runtime); no per-target build flags needed in v0.1.
 
-### Deliberately left open — decided in S1
+### Decided in S1
 
-CLI arg-parsing crate (`clap` vs lighter), error-handling crates (`thiserror` /
-`anyhow` split), CI provider naming, and MSRV policy are intentionally not pinned
-here; the S1 session decides and records them. Everything else in this doc is
-settled.
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| CLI arg-parsing | **clap** (derive) | Industry standard, derive macro reduces boilerplate, excellent error messages |
+| Error handling | **thiserror** (cloak-core) + **anyhow** (cloak-cli) | Typed library errors (binding-friendly); ergonomic CLI error chains |
+| CI provider | **GitHub Actions** | Native to the GitHub repo, free ARM runners for public repos |
+| MSRV | **1.98.1** (edition 2024) | Latest stable at time of implementation (2026-09-06) |

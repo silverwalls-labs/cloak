@@ -1,0 +1,20 @@
+[package]
+name = "cloak-cli"
+description = "CLI frontend for cloak — redact secrets and PII from streams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cloak"
+path = "src/main.rs"
+
+[dependencies]
+cloak-core = { path = "../cloak-core" }
+anyhow = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = "2"

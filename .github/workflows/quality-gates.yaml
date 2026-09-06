@@ -1,0 +1,484 @@
+name: Quality Gates
+
+on:
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Static analysis ──────────────────────────────────────────────
+
+  format:
+    name: Format
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+          components: rustfmt
+
+      - name: Format
+        run: |
+          cargo fmt --all -- --check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+          components: clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Clippy
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Build ────────────────────────────────────────────────────────
+
+  build:
+    name: Build
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build
+        run: |
+          cargo build --workspace
+
+  # ── Tests ─────────────────────────────────────────────────────────
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Unit Tests
+        run: |
+          cargo test --workspace --lib
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Integration Tests
+        run: |
+          cargo test -p cloak-core --test passthrough
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: E2E Tests
+        run: |
+          cargo test -p cloak-cli --test pipe
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fuzz
+        run: |
+          echo "fuzz: no targets yet — lands in S6"
+
+  smoke:
+    name: Smoke
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Smoke — golden pipe
+        run: |
+          cargo build --bin cloak
+          echo "hello world" | ./target/debug/cloak | diff - <(echo "hello world")
+
+  # ── Coverage (single platform, instrumented) ─────────────────────
+
+  coverage-unit:
+    name: Coverage — Unit
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+          components: llvm-tools
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-llvm-cov
+        run: |
+          cargo install cargo-llvm-cov --locked
+
+      - name: Unit Tests with Coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --workspace --lib --lcov --output-path coverage/unit.lcov
+
+      - name: Upload Coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-unit
+          path: coverage/unit.lcov
+
+  coverage-integration:
+    name: Coverage — Integration
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+          components: llvm-tools
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-llvm-cov
+        run: |
+          cargo install cargo-llvm-cov --locked
+
+      - name: Integration Tests with Coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p cloak-core --test passthrough --lcov --output-path coverage/integration.lcov
+
+      - name: Upload Coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-integration
+          path: coverage/integration.lcov
+
+  coverage-e2e:
+    name: Coverage — E2E
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+          components: llvm-tools
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-llvm-cov
+        run: |
+          cargo install cargo-llvm-cov --locked
+
+      - name: E2E Tests with Coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p cloak-cli --test pipe --lcov --output-path coverage/e2e.lcov
+
+      - name: Upload Coverage
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-e2e
+          path: coverage/e2e.lcov
+
+  coverage-smoke:
+    name: Coverage — Smoke
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Coverage — Smoke
+        run: |
+          echo "smoke: coverage not applicable — golden pipe check only"
+
+  coverage-fuzz:
+    name: Coverage — Fuzz
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Coverage — Fuzz
+        run: |
+          echo "fuzz: no targets yet — lands in S6"
+
+  # ── Coverage aggregation ─────────────────────────────────────────
+
+  coverage-report:
+    name: Coverage Report
+    needs:
+      - coverage-unit
+      - coverage-integration
+      - coverage-e2e
+      - coverage-smoke
+      - coverage-fuzz
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Download coverage artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: coverage-*
+          merge-multiple: true
+          path: coverage
+
+      - name: Generate coverage report
+        run: |
+          # ── Coverage thresholds (line coverage %) ──
+          THRESHOLD_UNIT=95
+          THRESHOLD_INTEGRATION=70
+          THRESHOLD_E2E=50
+          THRESHOLD_TOTAL=92
+
+          # Parse an LCOV file → "lines% funcs% branches% lines_raw"
+          # lines_raw is the unformatted float for threshold checks.
+          parse_lcov() {
+            local file="$1"
+            local lf=0 lh=0 fnf=0 fnh=0 brf=0 brh=0
+            if [ ! -f "$file" ]; then
+              echo "- - - 0"
+              return
+            fi
+            while IFS= read -r line; do
+              case "$line" in
+                LF:*) lf=$((lf + ${line#LF:})) ;;
+                LH:*) lh=$((lh + ${line#LH:})) ;;
+                FNF:*) fnf=$((fnf + ${line#FNF:})) ;;
+                FNH:*) fnh=$((fnh + ${line#FNH:})) ;;
+                BRF:*) brf=$((brf + ${line#BRF:})) ;;
+                BRH:*) brh=$((brh + ${line#BRH:})) ;;
+              esac
+            done < "$file"
+            local lpct="-" fpct="-" bpct="-" lraw="0"
+            if [ "$lf" -gt 0 ]; then
+              lraw=$(awk "BEGIN { printf \"%.1f\", ($lh/$lf)*100 }")
+              lpct="${lraw}%"
+            fi
+            [ "$fnf" -gt 0 ] && fpct=$(awk "BEGIN { printf \"%.1f%%\", ($fnh/$fnf)*100 }")
+            [ "$brf" -gt 0 ] && bpct=$(awk "BEGIN { printf \"%.1f%%\", ($brh/$brf)*100 }")
+            echo "$lpct $fpct $bpct $lraw"
+          }
+
+          # ── Per-tier parsing ──
+          read -r unit_l unit_f unit_b unit_raw <<< "$(parse_lcov coverage/unit.lcov)"
+          read -r integ_l integ_f integ_b integ_raw <<< "$(parse_lcov coverage/integration.lcov)"
+          read -r e2e_l e2e_f e2e_b e2e_raw <<< "$(parse_lcov coverage/e2e.lcov)"
+
+          # ── Total (merge all LCOV files) ──
+          total_lf=0 total_lh=0 total_fnf=0 total_fnh=0 total_brf=0 total_brh=0
+          for f in coverage/*.lcov; do
+            [ -f "$f" ] || continue
+            while IFS= read -r line; do
+              case "$line" in
+                LF:*) total_lf=$((total_lf + ${line#LF:})) ;;
+                LH:*) total_lh=$((total_lh + ${line#LH:})) ;;
+                FNF:*) total_fnf=$((total_fnf + ${line#FNF:})) ;;
+                FNH:*) total_fnh=$((total_fnh + ${line#FNH:})) ;;
+                BRF:*) total_brf=$((total_brf + ${line#BRF:})) ;;
+                BRH:*) total_brh=$((total_brh + ${line#BRH:})) ;;
+              esac
+            done < "$f"
+          done
+          total_lpct="-"; total_fpct="-"; total_bpct="-"; total_raw="0"
+          if [ "$total_lf" -gt 0 ]; then
+            total_raw=$(awk "BEGIN { printf \"%.1f\", ($total_lh/$total_lf)*100 }")
+            total_lpct="${total_raw}%"
+          fi
+          [ "$total_fnf" -gt 0 ] && total_fpct=$(awk "BEGIN { printf \"%.1f%%\", ($total_fnh/$total_fnf)*100 }")
+          [ "$total_brf" -gt 0 ] && total_bpct=$(awk "BEGIN { printf \"%.1f%%\", ($total_brh/$total_brf)*100 }")
+
+          # ── Threshold check ──
+          check_threshold() {
+            local name="$1" actual="$2" required="$3"
+            local pass
+            pass=$(awk "BEGIN { print ($actual >= $required) ? 1 : 0 }")
+            if [ "$pass" -eq 1 ]; then
+              echo "✅"
+            else
+              echo "❌"
+              FAILED=1
+            fi
+          }
+          FAILED=0
+          unit_status=$(check_threshold "unit" "$unit_raw" "$THRESHOLD_UNIT")
+          integ_status=$(check_threshold "integration" "$integ_raw" "$THRESHOLD_INTEGRATION")
+          e2e_status=$(check_threshold "e2e" "$e2e_raw" "$THRESHOLD_E2E")
+          total_status=$(check_threshold "total" "$total_raw" "$THRESHOLD_TOTAL")
+
+          # ── Build markdown report ──
+          {
+            echo "<!-- cloak-coverage-report -->"
+            echo "## Coverage Report"
+            echo ""
+            echo "| Category | Lines | Functions | Branches | Threshold | Status |"
+            echo "|----------|-------|-----------|----------|-----------|--------|"
+            echo "| unit | ${unit_l} | ${unit_f} | ${unit_b} | ≥${THRESHOLD_UNIT}% | ${unit_status} |"
+            echo "| integration | ${integ_l} | ${integ_f} | ${integ_b} | ≥${THRESHOLD_INTEGRATION}% | ${integ_status} |"
+            echo "| e2e | ${e2e_l} | ${e2e_f} | ${e2e_b} | ≥${THRESHOLD_E2E}% | ${e2e_status} |"
+            echo "| smoke | - | - | - | — | — |"
+            echo "| fuzz | - | - | - | — | — |"
+            echo "| **Total** | **${total_lpct}** | **${total_fpct}** | **${total_bpct}** | **≥${THRESHOLD_TOTAL}%** | **${total_status}** |"
+          } > coverage/report.md
+
+          cat coverage/report.md
+
+          # ── Fail if any threshold breached ──
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "::error::Coverage below threshold. See table above."
+            exit 1
+          fi
+
+      - name: Post coverage comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPORT=$(cat coverage/report.md)
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          COMMENT_TAG="<!-- cloak-coverage-report -->"
+
+          # Find existing coverage comment
+          COMMENT_ID=$(gh api \
+            "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            --jq ".[] | select(.body | startswith(\"${COMMENT_TAG}\")) | .id" \
+            2>/dev/null | head -1)
+
+          if [ -n "$COMMENT_ID" ]; then
+            # Update existing comment
+            gh api \
+              "repos/${{ github.repository }}/issues/comments/${COMMENT_ID}" \
+              -X PATCH \
+              -f body="$REPORT"
+          else
+            # Create new comment
+            gh api \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              -f body="$REPORT"
+          fi
+
+  # ── Supply chain ─────────────────────────────────────────────────
+
+  supply-chain:
+    name: Supply Chain
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-deny
+        run: |
+          cargo install cargo-deny --locked
+
+      - name: cargo-deny
+        run: |
+          cargo deny check advisories licenses bans

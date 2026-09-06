@@ -1,0 +1,58 @@
+name: SAST
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 8 * * 1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Semgrep scan
+        env:
+          # Pin semgrep by image digest rather than installing via pipx: one
+          # digest covers the entire stack (Python runtime + semgrep + all
+          # transitive deps) so nothing can be substituted without the digest
+          # changing. Mirrors the SHA-pinning we apply to every GitHub Action
+          # in these workflows.
+          #
+          # Upgrading: resolve the new tag to an arm64 digest and replace both
+          # the tag comment and the digest below.
+          #   semgrep/semgrep:1.175.1 (linux/arm64)
+          SEMGREP_IMAGE: semgrep/semgrep@sha256:1ca52de715c7f692568d26a9d56e12b5577584a88737f1e5581d177a3f636fa4
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            -w /src \
+            "$SEMGREP_IMAGE" \
+            semgrep scan --error \
+              --sarif-output=semgrep.sarif \
+              --config p/rust \
+              --config p/owasp-top-ten
+
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          if-no-files-found: warn
+          retention-days: 30
