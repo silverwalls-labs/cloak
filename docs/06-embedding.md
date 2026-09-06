@@ -27,18 +27,34 @@ the v0.2 milestone is derivable.
                cloak-go (cgo wrapper module over cloak-ffi)
 ```
 
-| Language | Binding | Mechanism | Distribution |
+| Language | First coverage (WASM wave) | Native upgrade (perf wave) | Distribution |
 |---|---|---|---|
-| Rust | `cloak-core` | native crate, direct | crates.io |
-| Go | `cloak-go` | cgo over the C ABI (`cloak-ffi`) | Go module vendoring `libcloak` |
-| Python | `cloak-py` | **pyo3** + maturin, abi3 wheels (one wheel per platform, not per Python version) | PyPI |
-| Node.js | `cloak-node` | napi-rs, prebuilt `.node` binaries | npm |
-| Anything else | `cloak-ffi` | C ABI + header, via ctypes/cffi/FFI-of-choice | release artifacts |
-| Sandboxed pipelines | `cloak-wasm` | wasm32 build of core | release artifacts |
+| Rust | `cloak-core` directly (v0.1) | — already native | crates.io |
+| Go | `cloak-wasm` via **wazero** (pure Go, no cgo) | `cloak-go`: cgo over `cloak-ffi` C ABI | Go module |
+| Python | `cloak-wasm` via **wasmtime-py** | `cloak-py`: **pyo3** + maturin, abi3 wheels (one per platform, not per Python version) | PyPI |
+| Node.js | `cloak-wasm` via built-in WebAssembly/WASI | `cloak-node`: napi-rs, prebuilt `.node` | npm |
+| Anything else | `cloak-wasm` via any WASM runtime | `cloak-ffi` C ABI + header (ctypes/cffi/FFI-of-choice) | release artifacts |
+| Sandboxed pipelines | `cloak-wasm` natively | — | release artifacts |
 
-`cloak-ffi` (C ABI) is both the Go path **and** the universal fallback. pyo3 and
-napi-rs bind `cloak-core` directly (better ergonomics, real types, GIL/event-loop
-awareness) rather than stacking on the C ABI.
+## Rollout strategy: WASM first, native second
+
+Agreed 2026-09-06 (third scoping pass):
+
+1. **`cloak-wasm` ships first** — one portable artifact gives day-one embedding in
+   all four app languages plus sandboxed pipelines. No per-language build matrix,
+   no cgo, no wheel/npm infrastructure yet.
+2. **Native bindings follow, one dedicated session each, for performance** —
+   pyo3 and napi-rs bind `cloak-core` directly (no WASM runtime overhead, no
+   linear-memory copies, real host types, GIL release / event-loop awareness).
+3. **C ABI + cgo last, on demand** — wazero already covers Go without cgo pain;
+   `cloak-ffi`/`cloak-go` land when Go-native throughput is needed or the Alloy
+   integration (F8) requires that boundary.
+
+The [receipts protocol](04-performance.md#the-receipts-protocol-simd-powered-proven)
+extends here: **each native binding must publish benchmarks vs the WASM path in its
+own language** — a native binding that doesn't beat WASM-in-that-host doesn't ship.
+WASM perf note: `simd128` is enabled at build; whether the matching crates use it is
+measured, not assumed — the E1 receipts entry records native-vs-WASM throughput.
 
 ## API parity contract
 
@@ -92,13 +108,46 @@ correctness lives in core.
   test, parity vector suite per binding. This is real surface — the reason
   embedding is its own milestone and not a v0.1 stowaway.
 
-## Milestone placement
+## Milestone placement & session split
 
 - **v0.1**: CLI only (unchanged). Core API is already binding-shaped
-  (bytes in/out, no host types) — S1/S3 must not introduce anything a C ABI
-  cannot express.
-- **v0.2 = embedding milestone**: `cloak-ffi` + `cloak-go` + `cloak-py` (pyo3) +
-  `cloak-node` (napi-rs), parity CI. Supersedes ledger items F1/F2's vague framing —
+  (bytes in/out, no host types) — S1/S3 must not introduce anything a C ABI or a
+  WASM linear-memory interface cannot express.
+- **v0.2 = embedding milestone**, split into five 2–3h sessions (same rule as v0.1:
+  each ends CI-green/shippable). Supersedes ledger items F1/F2's original framing —
   see updated [ledger](05-roadmap.md#follow-ups-ledger).
-- `cloak-wasm` rides along where cheap; required no later than the Alloy work (F8)
-  if the FFI route doesn't fit Alloy's plugin model.
+
+### E1 — `cloak-wasm` build + buffer ABI
+`cloak-wasm` crate exporting a linear-memory API over core (`engine_new(config
+ptr/len)`, `session_new`, `push(ptr,len) → (ptr,len)`, `finish`); build
+`wasm32-wasip1` with `+simd128`; parity vector runner executing the module
+(wasmtime) in CI; first native-vs-WASM receipts entry.
+**Done when:** the `.wasm` artifact passes the full vector parity suite + a
+chunk-boundary proptest subset; CI builds and gates it.
+
+### E2 — WASM host adapters + examples
+Thin host-side glue + a stdout/stderr-hook example per language over the same
+artifact: Node (WebAssembly/WASI), Python (wasmtime-py), Go (wazero). Docs for the
+"embed cloak today" path.
+**Done when:** three example apps redact through one `.wasm` file; parity vectors
+green per host in CI.
+
+### E3 — `cloak-py` (pyo3, dedicated)
+Native module via pyo3 + maturin; abi3 wheels (linux x86-64/aarch64, macos
+aarch64); `bytes` in/out API + file-like wrapper and `logging` handler hooks; GIL
+released during scans; wheel CI matrix; parity suite.
+**Done when:** wheels install from CI artifacts; parity green; receipts show
+`cloak-py` ≥ WASM-in-Python (no receipts, no ship).
+
+### E4 — `cloak-node` (napi-rs, dedicated)
+Prebuilt `.node` binaries for the three targets; `Buffer` in/out API + `Transform`
+stream hook; npm packaging; parity suite.
+**Done when:** package installs with prebuilds; parity green; receipts show
+`cloak-node` ≥ WASM-in-Node.
+
+### E5 — `cloak-ffi` (C ABI) + `cloak-go` (cgo) — on demand
+cbindgen header, single-owner ownership rules, `cloak_abi_version()`; cgo wrapper
+with `io.Writer` hook; parity suite.
+**Trigger:** Go-native throughput need or Alloy integration (F8) start — until
+then wazero is the supported Go path.
+**Done when:** parity green; receipts show `cloak-go` ≥ WASM-via-wazero.

@@ -25,9 +25,11 @@ cloak is deployed **defense in depth** at three points of the log pipeline:
 
 A single engine serves all three layers. **v0.1 ships the CLI pipe form**
 (`app | cloak | collector`), which covers layers 1–2 via pipe wrappers/sidecars in
-the interim. Native embedding — Rust crate, Go (cgo/C ABI), Python (pyo3),
-Node.js (napi-rs), WASM — is the **v0.2 embedding milestone**, designed in
-[06-embedding.md](06-embedding.md); layer 3 (Alloy) builds on the same boundary.
+the interim. Embedding is the **v0.2 milestone**, designed in
+[06-embedding.md](06-embedding.md): **WASM first** (one artifact embeds in all four
+app languages via wazero / wasmtime-py / Node WASI), then dedicated native bindings
+for performance — Python (pyo3), Node.js (napi-rs), Go (C ABI/cgo) on demand.
+Layer 3 (Alloy) builds on the same boundary.
 
 ## What cloak hunts (v0.1)
 

@@ -30,9 +30,10 @@ cloak is one engine deployed at three points of the pipeline:
   Rust · Go · Node · Python
 ```
 
-One engine (`cloak-core`), many frontends: the v0.1 CLI, then native bindings —
-Rust crate, Go (C ABI/cgo), Python (pyo3), Node.js (napi-rs), WASM — as the v0.2
-embedding milestone ([design](docs/06-embedding.md)).
+One engine (`cloak-core`), many frontends: the v0.1 CLI, then the v0.2 embedding
+milestone ([design](docs/06-embedding.md)) — **WASM first** (one artifact, runs in
+Go/wazero, Python/wasmtime, Node/WASI), then dedicated native bindings for
+performance: Python (pyo3), Node.js (napi-rs), Go (C ABI/cgo) on demand.
 
 ## The contract
 
@@ -57,7 +58,7 @@ heuristics eating your trace IDs.
 | [03-guarantee-and-testing](docs/03-guarantee-and-testing.md) | The contract, threat model, property tests, fuzzing |
 | [04-performance](docs/04-performance.md) | ≥ 500 MB/s floor, benchmark methodology, SIMD receipts protocol |
 | [05-roadmap](docs/05-roadmap.md) | 8-session v0.1 plan, follow-ups ledger |
-| [06-embedding](docs/06-embedding.md) | v0.2 bindings: C ABI, Go, Python (pyo3), Node.js (napi-rs), WASM — parity contract |
+| [06-embedding](docs/06-embedding.md) | v0.2 bindings: WASM-first rollout, then pyo3 / napi-rs / C ABI — parity contract, 5-session split |
 
 ## License
 

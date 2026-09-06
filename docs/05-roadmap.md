@@ -82,8 +82,8 @@ issue when its milestone opens.
 
 | # | Follow-up | Origin of deferral | Earliest milestone |
 |---|---|---|---|
-| F1 | **Embedding milestone** — native bindings for the layer-1 app languages (Rust crate is v0.1; Go via `cloak-ffi` C ABI + cgo, Python via pyo3, Node.js via napi-rs) with cross-binding parity CI. Full design: [06-embedding.md](06-embedding.md) | Integration scoping: CLI first; second pass confirmed apps are Rust/Go/Node/Python | v0.2 |
-| F2 | **WASM build** (`cloak-wasm`) — sandboxed pipeline embedding | Same; required no later than F8 if FFI doesn't fit Alloy | v0.2+ |
+| F1 | **Embedding milestone** — layer-1 apps are Rust/Go/Node/Python. Split into 5 sessions (E1–E5): **WASM first** (one artifact covers all hosts: wazero/wasmtime-py/Node WASI), then dedicated native sessions — pyo3 (E3), napi-rs (E4) — each gated on receipts vs the WASM path; C ABI + cgo (E5) on demand. Full design: [06-embedding.md](06-embedding.md#milestone-placement--session-split) | Integration scoping: CLI first; later passes confirmed app languages and WASM-first rollout | v0.2 |
+| F2 | ~~WASM build~~ — **folded into F1 as sessions E1–E2** (WASM is the first embedding wave, not a side quest) | Superseded 2026-09-06 | v0.2 |
 | F3 | **YAML + JSON config frontends + `cloak config convert`** — serde-first core makes this cheap; YAML crate choice open (`serde_yaml` unmaintained) | Config scoping: TOML-only v0.1 | v0.2 |
 | F4 | **Entropy detector, opt-in, off by default** — catches unknown secret shapes at FP cost | Precision scoping: recall-first tuned rules | v0.2+ |
 | F5 | **Configurable redaction templates per rule** (mask-only, custom formats) | Redaction scoping: fixed tag+digest v0.1 | v0.2 |
