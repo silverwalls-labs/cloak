@@ -44,6 +44,9 @@ Notes:
   and scheme are debugging signal.
 - `pem-private-key` is the reason the engine has carry-over + a stateful mode; only
   the key material between BEGIN/END is replaced (single tag), markers stay visible.
+  **Known v0.1 limitation:** a PEM key inside a JSON string field carries `\n`
+  escapes and is not matched ([03 §threat model](03-guarantee-and-testing.md#threat-model),
+  ledger F11 — opt-in decode layer).
 - `aws-secret-key` and `azure-style-token` are **context-keyed** (value shape alone
   is just base64): anchor on the key name, redact the value. This is the agreed
   precision trade — a bare 40-char base64 string without context is NOT matched.

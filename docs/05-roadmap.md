@@ -18,7 +18,7 @@ Workspace (`crates/cloak-core`, `crates/cloak-cli`); staged CI per
 `[CLOAK:<rule>:<digest4>]` tag + keyed BLAKE3 digest (env key, ephemeral fallback).
 Decide & record the deliberately-open stack choices (arg parsing, error crates,
 CI provider, MSRV — [01-architecture](01-architecture.md#deliberately-left-open--decided-in-s1));
-keep the core API binding-shaped ([06-embedding](06-embedding.md#milestone-placement)).
+keep the core API binding-shaped ([06-embedding](06-embedding.md#milestone-placement--session-split)).
 **Done when:** `app | cloak` pipes stdin→stdout byte-identical through full engine
 plumbing (zero rules compiled in); CI green on all targets.
 
@@ -82,8 +82,9 @@ benchmark-traceable.
 README rewrite (what/why, 3-layer pipeline diagram, quickstart, guarantee statement
 linking [03 §"What the guarantee is NOT"](03-guarantee-and-testing.md#what-the-guarantee-is-not));
 examples: pipe usage + k8s sidecar/log-processor snippet; API docs pass
-(`#![warn(missing_docs)]` on `cloak-core`); CHANGELOG; `v0.1.0` tag + release;
-close issue #2 with pointer to docs.
+(`#![warn(missing_docs)]` on `cloak-core`); **SECURITY.md** (vulnerability
+disclosure policy — table stakes for a security tool); CHANGELOG; `v0.1.0` tag +
+release; close issue #2 with pointer to docs.
 **Done when:** `v0.1.0` tagged; all [00-scope.md acceptance criteria](00-scope.md#acceptance-criteria-v01-is-done-when) checked.
 
 ## Follow-ups ledger
@@ -103,6 +104,7 @@ issue when its milestone opens.
 | F8 | **Grafana Alloy integration** (via F1/F2 boundary) + Grafana stack docs | Deployment layer 3 | post-embedding |
 | F9 | **k8s log-processor packaging** — container image, DaemonSet/sidecar manifests | Deployment layer 2 hardening | v0.2 |
 | F10 | **Match-heavy throughput gate** (v0.1 tracks, doesn't gate) | Perf scoping | v0.2 |
+| F11 | **Escaped-content decode layer, opt-in** — JSON-string unescape pass (later: base64 spans) so multi-line/escaped-char patterns (PEM!) match inside structured log fields. Must preserve the guarantee (decode is a defined transform, not a heuristic) and byte-exact passthrough of non-matching input | Full-setup review 2026-09-06: JSON logs are the norm in the k8s/Grafana stack, PEM-in-JSON is missed by byte patterns ([03 §threat model](03-guarantee-and-testing.md#threat-model)) | v0.2+ |
 
 ## Versioning & policy
 

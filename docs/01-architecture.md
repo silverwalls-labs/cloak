@@ -173,9 +173,10 @@ payload, so the pipe contract stays pure.
 
 - **Stable Rust, edition 2024.** No nightly in v0.1; `std::simd` enters only with
   the feature-gated kernel milestone.
-- CI matrix: **linux x86-64, linux aarch64, macos aarch64** — fmt, clippy
-  (`-D warnings`), tests, doc build on all three; fuzz smoke + bench floor gates per
-  [03](03-guarantee-and-testing.md)/[04](04-performance.md).
+- CI matrix: **linux x86-64, linux aarch64, macos aarch64**, run as the staged
+  pipeline (smoke → full → nightly → release) defined in
+  [03 §CI staging](03-guarantee-and-testing.md#ci-staging-all-blocking-at-their-stage);
+  bench gates per [04](04-performance.md).
 - Runtime CPU-feature detection comes free from the matching crates (AVX2/NEON
   picked at runtime); no per-target build flags needed in v0.1.
 

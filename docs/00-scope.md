@@ -68,8 +68,11 @@ A Rust workspace producing:
 3. TOML configuration: per-rule enable/disable.
 4. Redaction output: typed tag + short deterministic digest — `[CLOAK:aws-key:9f3a]` —
    correlatable without exposure.
-5. Test suite proving the guarantee: property tests (chunk-boundary invariant),
-   fuzzing, differential testing against a scalar reference implementation.
+5. Test suite proving the guarantee, organized in the five-tier taxonomy
+   (unit / integration / e2e / fuzz / smoke — [03](03-guarantee-and-testing.md#test-taxonomy--five-tiers-split-cleanly)):
+   property tests (chunk-boundary invariant), fuzzing, differential testing against
+   a scalar reference implementation, plus the adopted cross-cutting classes
+   (mutation, soak, digest-stability goldens, CLI robustness, `cargo-deny`).
 6. Benchmark suite with a CI-enforced floor: **≥ 500 MB/s single-core** on the
    match-free reference corpus.
 
@@ -82,10 +85,17 @@ A Rust workspace producing:
 - [ ] Fuzz targets run clean (time-boxed) in CI; invalid UTF-8 and binary input
       have defined, tested behavior.
 - [ ] Differential tests: engine output ≡ scalar reference output on all corpora.
+- [ ] Full e2e suite through the real binary (incl. I/O robustness: broken pipe,
+      closed stdout) and `insta` snapshots of output contracts.
+- [ ] Digest-stability goldens committed (correlation promise across releases).
+- [ ] Staged CI complete per [03 §CI staging](03-guarantee-and-testing.md#ci-staging-all-blocking-at-their-stage):
+      smoke → full (incl. `cargo-deny`) → nightly (extended fuzz, `cargo-mutants`,
+      soak, bench gates) → release.
 - [ ] Criterion benches recorded; clean-path throughput ≥ 500 MB/s single-core;
       scalar-vs-engine comparison published (the "SIMD-powered" receipts).
 - [ ] CI green on linux x86-64, linux aarch64, macos aarch64 (stable Rust).
-- [ ] README, API docs, pipe + k8s sidecar examples, CHANGELOG, tag `v0.1.0`.
+- [ ] README, API docs, pipe + k8s sidecar examples, SECURITY.md (disclosure
+      policy), CHANGELOG, tag `v0.1.0`.
 
 ## Non-goals for v0.1
 

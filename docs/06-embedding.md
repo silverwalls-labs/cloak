@@ -1,6 +1,6 @@
 # Embedding & Language Bindings — cloak
 
-> Prev: [roadmap](05-roadmap.md) · This doc designs the **v0.2 embedding milestone** (agreed 2026-09-06, second scoping pass)
+> Prev: [roadmap](05-roadmap.md) · This doc designs the **v0.2 embedding milestone** (agreed 2026-09-06, scoping passes 2–6)
 
 ## Why this doc exists
 

@@ -26,11 +26,15 @@ Stated here so nobody oversells it (README must link this section):
 
 - **Not** "no secret ever leaks." A secret whose shape no enabled rule expresses
   passes through untouched. The guarantee is ruleset-relative by construction.
-- **Not** resistance to adversarial encoding. A secret that is base64-wrapped,
-  hex-dumped, split by the *emitting application* across two log records, or
-  otherwise transformed before reaching cloak does not match the rule's byte
-  pattern and is not caught. cloak guards against accidental leakage, not against
-  an adversary inside the emitting process.
+- **Not** resistance to encoding transforms — adversarial *or routine*. A secret
+  that is base64-wrapped, hex-dumped, or split by the *emitting application* across
+  two log records does not match the rule's byte pattern and is not caught. This
+  includes the mundane case: **JSON structured logging escapes `\n`**, so a
+  multi-line PEM key inside a JSON string field is missed in v0.1 (single-line
+  anchored tokens are unaffected — their bytes survive JSON escaping). Opt-in
+  decode layer tracked as [ledger F11](05-roadmap.md#follow-ups-ledger). cloak
+  guards against accidental leakage, not against an adversary inside the emitting
+  process.
 - **Not** a substitute for secret rotation. A caught leak is still a leak; cloak
   buys time and containment, not absolution.
 - Digests are correlation hints (16 bits, keyed), not commitments.
@@ -47,6 +51,7 @@ layer is fallible.
 | Framework/exception serializer dumps config | ✅ | Same |
 | Secret split across stream *chunks* (transport-level) | ✅ guaranteed | Carry-over buffer |
 | Secret split across *log records* by the emitter | ❌ | Out of scope (cloak sees two non-matching fragments) |
+| Secret transformed by **routine escaping** (JSON-string `\n`, `\"` in structured logs) | ⚠️ partial | Single-line anchored tokens (`AKIA…`, `ghp_…`, `eyJ…`, emails) still match inside JSON strings — their bytes are unchanged. Patterns *containing* escaped chars — multi-line PEM (`\n`), some connection strings — do **not** match in escaped form. Known v0.1 limitation, tracked as [ledger F11](05-roadmap.md#follow-ups-ledger) (opt-in decode layer). |
 | Malicious app tries to smuggle a secret past cloak (encoding games) | ❌ | Out of scope; documented |
 | Malicious input tries to crash/hang/OOM cloak | ✅ robustness | Bounded memory by design; fuzzing |
 | Malicious input tries to make cloak *emit* secret bytes it buffered | ✅ | Carry-over only ever flushed redacted-or-clean; fuzz-asserted |
@@ -108,7 +113,7 @@ Rules of the split:
 - **Miri + sanitizers (ASAN/LSAN)** — near-zero value while the workspace is 100 %
   safe Rust on maintained crates. Becomes a **blocking gate** the day `unsafe`
   enters: hand-rolled SIMD kernels ([ledger F7](05-roadmap.md#follow-ups-ledger))
-  and `cloak-ffi` ([E5](06-embedding.md#e5--cloak-ffi-c-abi--cloak-go-cgo--on-demand)).
+  and `cloak-ffi` ([E7](06-embedding.md#e7--cloak-ffi-c-abi--on-demand)).
 - **MSRV build check** — lands automatically once S1 pins the MSRV policy.
 - **Loom / model checking** — only if lock-free concurrency ever appears in core.
   Not currently planned.
