@@ -92,9 +92,11 @@ Rules of the split:
   `cargo test`, listed here so they're not forgotten.
 - v0.2 binding parity suites ([06-embedding.md](06-embedding.md#api-parity-contract))
   are the e2e tier of each host language: same vectors, real artifact, per-host CI.
-- Coverage is **measured and published** (`cargo-llvm-cov`, per-PR report), but not
-  %-gated in v0.1: vectors + properties + differential + fuzz enforce correctness
-  better than a line-percentage ever will. Revisit once the code stabilizes.
+- Coverage is **measured, published, and %-gated per tier** (`cargo-llvm-cov`,
+  per-PR report with sticky comment). Thresholds: unit ≥95%, integration ≥70%,
+  e2e ≥50%, total ≥92%. These complement — not replace — vectors, properties,
+  differential, and fuzz, which enforce correctness better than a line-percentage
+  alone. Thresholds are enforced from S1; adjust as the codebase stabilizes.
 
 ### Cross-cutting test classes (adopted, v0.1)
 
