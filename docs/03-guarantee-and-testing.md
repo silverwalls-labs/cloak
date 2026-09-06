@@ -83,11 +83,35 @@ Rules of the split:
   golden pipe test), and fuzz seeds — never duplicated per tier.
 - Anything touching process I/O, flags, or exit codes is e2e — the engine never
   gets tested through the CLI, and the CLI never re-tests engine logic.
+- Doc tests (rustdoc examples) count as unit tier and must compile/run — free with
+  `cargo test`, listed here so they're not forgotten.
 - v0.2 binding parity suites ([06-embedding.md](06-embedding.md#api-parity-contract))
   are the e2e tier of each host language: same vectors, real artifact, per-host CI.
 - Coverage is **measured and published** (`cargo-llvm-cov`, per-PR report), but not
   %-gated in v0.1: vectors + properties + differential + fuzz enforce correctness
   better than a line-percentage ever will. Revisit once the code stabilizes.
+
+### Cross-cutting test classes (adopted, v0.1)
+
+| Class | Tier / stage | What it protects |
+|---|---|---|
+| **Mutation testing** (`cargo-mutants`) | nightly, over `cloak-core` | The tests themselves. Coverage says a line *ran*; a killed mutant says it's *asserted*. A surviving mutant in engine or rules code is an actionable finding (triage: add test or annotate why-not). From S6. |
+| **CLI I/O robustness** | e2e cases (S5) | Production pipe reality: SIGPIPE/broken pipe when the collector restarts (clean exit, no panic), closed stdout mid-stream, partial writes, one enormous line. |
+| **Snapshot tests** (`insta`) | e2e tooling (S5) | Output contracts: stats JSON (machine-consumed — drift must be a reviewed diff, never silent), `--help`, error messages. |
+| **Soak test** | nightly (S7) | Bounded memory as an *observed fact*: stream tens of GB (looped bench corpora) through one `Session`, assert flat RSS. The proptest invariant, made empirical. |
+| **Digest-stability goldens** | integration (S4) | The correlation promise. Committed golden digests: same input + same key ⇒ same `[CLOAK:rule:xxxx]` across releases. Digests live in stored logs and dashboards — changing them is a breaking change and must fail a test, not slip through. |
+| **Thread-share test** | integration | `Engine` shared across threads (Send/Sync contract) with concurrent `Session`s — plain test, no loom (no lock-free code planned). |
+| **Supply-chain gates** (`cargo-deny`) | stage 1 CI (S1) | RustSec advisories, license compliance, duplicate deps. A security tool with a compromised dependency is a punchline. |
+
+### Deferred, with triggers (recorded, not forgotten)
+
+- **Miri + sanitizers (ASAN/LSAN)** — near-zero value while the workspace is 100 %
+  safe Rust on maintained crates. Becomes a **blocking gate** the day `unsafe`
+  enters: hand-rolled SIMD kernels ([ledger F7](05-roadmap.md#follow-ups-ledger))
+  and `cloak-ffi` ([E5](06-embedding.md#e5--cloak-ffi-c-abi--cloak-go-cgo--on-demand)).
+- **MSRV build check** — lands automatically once S1 pins the MSRV policy.
+- **Loom / model checking** — only if lock-free concurrency ever appears in core.
+  Not currently planned.
 
 ## Test strategy (all of this is v0.1, not aspirational)
 
@@ -136,8 +160,8 @@ corpus.
 | Stage | When | Contents |
 |---|---|---|
 | **0 — Smoke** | every push, fail-fast, all 3 targets | fmt, clippy `-D warnings`, build, unit tests, golden e2e pipe test |
-| **1 — Full** | every PR, all 3 targets | integration (vectors, property invariants, differential engine ≡ reference — cross-target divergence asserted absent), full e2e suite, doc build, fuzz smoke (time-boxed minutes) + committed-corpus regression replay, coverage report published |
-| **2 — Nightly** | scheduled | extended fuzz (≥ 1 h/target, new findings committed to corpus), full criterion suite: [≥ 500 MB/s floor + 10 % regression gate](04-performance.md#the-floor-ci-enforced), chunk-size sweep |
+| **1 — Full** | every PR, all 3 targets | integration (vectors, property invariants, differential engine ≡ reference — cross-target divergence asserted absent, digest-stability goldens, thread-share), full e2e suite (incl. I/O robustness + `insta` snapshots), doc build + doc tests, fuzz smoke (time-boxed minutes) + committed-corpus regression replay, `cargo-deny` (advisories/licenses/dupes), coverage report published |
+| **2 — Nightly** | scheduled | extended fuzz (≥ 1 h/target, new findings committed to corpus), `cargo-mutants` over `cloak-core` (surviving mutants filed as findings), multi-GB soak with flat-RSS assertion, full criterion suite: [≥ 500 MB/s floor + 10 % regression gate](04-performance.md#the-floor-ci-enforced), chunk-size sweep |
 | **3 — Release** | tag | everything above + receipts table refresh + released-artifact golden smoke |
 
 Bench gates live in nightly/release rather than per-PR — criterion on shared PR

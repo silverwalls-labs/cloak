@@ -147,7 +147,9 @@ stream hook; npm packaging; parity suite.
 
 ### E5 — `cloak-ffi` (C ABI) + `cloak-go` (cgo) — on demand
 cbindgen header, single-owner ownership rules, `cloak_abi_version()`; cgo wrapper
-with `io.Writer` hook; parity suite.
+with `io.Writer` hook; parity suite. **Unsafe enters here → Miri/ASAN/LSAN become
+blocking gates on the FFI boundary tests**
+([03 §deferred](03-guarantee-and-testing.md#deferred-with-triggers-recorded-not-forgotten)).
 **Trigger:** Go-native throughput need or Alloy integration (F8) start — until
 then wazero is the supported Go path.
 **Done when:** parity green; receipts show `cloak-go` ≥ WASM-via-wazero.

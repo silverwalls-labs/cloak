@@ -11,7 +11,8 @@ CI-green state. Sessions are strictly ordered (each builds on the previous).
 Workspace (`crates/cloak-core`, `crates/cloak-cli`); staged CI per
 [03 §CI staging](03-guarantee-and-testing.md#ci-staging-all-blocking-at-their-stage)
 — smoke stage (fmt, clippy `-D warnings`, build, unit, golden e2e pipe test via
-`assert_cmd`) on the 3-target matrix, full stage scaffolded; test-tier layout
+`assert_cmd`) on the 3-target matrix, full stage scaffolded incl. `cargo-deny`
+(advisories/licenses/dupes); test-tier layout
 (`#[cfg(test)]` / `core/tests/` / `cli/tests/` / `fuzz/`); core types
 (`Engine`, `Session`, `RuleId`, `MatchEvent`, `Stats`); redaction writer with
 `[CLOAK:<rule>:<digest4>]` tag + keyed BLAKE3 digest (env key, ephemeral fallback).
@@ -41,7 +42,8 @@ Remaining secret rules (`aws-access-key`, `aws-secret-key`, `gcp-api-key`,
 `azure-style-token`, `pypi-token`, `jwt`, `connection-string`) + PII rules
 (`email`, `ipv4`, `ipv6`, `credit-card` with Luhn, `phone-intl` — `+`-anchored
 only). Positive/negative vector suites per rule, incl. binary-embedded and
-boundary-split variants.
+boundary-split variants. Digest-stability goldens committed (correlation promise:
+same input + key ⇒ same tag across releases).
 **Done when:** catalog in [02-rules.md](02-rules.md) fully implemented; all vectors
 green through engine *and* reference; FP suite (trace IDs, order numbers, base64
 payloads, bare 10-digit strings) produces zero matches.
@@ -50,7 +52,9 @@ payloads, bare 10-digit strings) produces zero matches.
 Serde-first config structs; TOML frontend; per-rule `enabled`; digest-key env
 indirection; CLI: `--config`, file args, `--stats-format {text,json}`; stderr
 end-of-stream per-rule counts; exit codes. **Full e2e suite** (`cloak-cli/tests/`,
-`assert_cmd`): pipe, file args, config loading, stats text + JSON, exit codes.
+`assert_cmd`): pipe, file args, config loading, stats text + JSON, exit codes;
+I/O robustness cases (SIGPIPE/broken pipe → clean exit, closed stdout, huge line);
+`insta` snapshots of stats JSON, `--help`, error messages.
 **Done when:** `cloak --config cloak.toml < in > out` honors enable/disable; stats
 match planted-vector counts exactly (asserted end-to-end through the binary);
 config fuzz target parses arbitrary TOML without panic.
@@ -59,7 +63,8 @@ config fuzz target parses arbitrary TOML without panic.
 cargo-fuzz targets (`fuzz_engine_stream`, `fuzz_pem_state`, `fuzz_config`);
 invalid-UTF-8/binary corpora; differential suite (engine ≡ reference) wired into CI
 on all three targets; fuzz smoke + corpus replay as PR gates; nightly stage
-(extended fuzz ≥ 1 h/target); coverage reporting (`cargo-llvm-cov`) published per PR.
+(extended fuzz ≥ 1 h/target, `cargo-mutants` over cloak-core); thread-share test
+(Engine across threads); coverage reporting (`cargo-llvm-cov`) published per PR.
 **Done when:** all [03-guarantee-and-testing.md](03-guarantee-and-testing.md) CI
 gates exist and are blocking; initial fuzz session (≥ 1 h/target locally) finds
 nothing outstanding.
@@ -68,7 +73,8 @@ nothing outstanding.
 Criterion suites (`push` end-to-end, prefilter-only, chunk-size sweep); five
 reference corpora ([04](04-performance.md#reference-corpora-committed-versioned));
 scalar-vs-engine receipts table (first entry in `docs/benchmarks/`); ≥ 500 MB/s
-clean-path CI gate + 10 % regression gate against stored baselines.
+clean-path CI gate + 10 % regression gate against stored baselines; nightly soak
+(tens of GB looped through one `Session`, flat-RSS assertion).
 **Done when:** floor gate green on CI; receipts committed; numbers in README are
 benchmark-traceable.
 
@@ -93,7 +99,7 @@ issue when its milestone opens.
 | F4 | **Entropy detector, opt-in, off by default** — catches unknown secret shapes at FP cost | Precision scoping: recall-first tuned rules | v0.2+ |
 | F5 | **Configurable redaction templates per rule** (mask-only, custom formats) | Redaction scoping: fixed tag+digest v0.1 | v0.2 |
 | F6 | **Prometheus / OTel metrics export** — "aws-keys redacted today" as an alertable signal | Telemetry scoping: stderr+JSON v0.1 | Alloy milestone |
-| F7 | **Hand-rolled SIMD kernels** (`std::simd`/intrinsics, feature-gated nightly) behind `Scanner` trait — ships only with [receipts](04-performance.md#the-receipts-protocol-simd-powered-proven) | SIMD scoping: crates first, kernels with benchmarks later | v0.3 |
+| F7 | **Hand-rolled SIMD kernels** (`std::simd`/intrinsics, feature-gated nightly) behind `Scanner` trait — ships only with [receipts](04-performance.md#the-receipts-protocol-simd-powered-proven); **Miri + sanitizers become blocking gates** when this unsafe lands ([03 §deferred](03-guarantee-and-testing.md#deferred-with-triggers-recorded-not-forgotten)) | SIMD scoping: crates first, kernels with benchmarks later | v0.3 |
 | F8 | **Grafana Alloy integration** (via F1/F2 boundary) + Grafana stack docs | Deployment layer 3 | post-embedding |
 | F9 | **k8s log-processor packaging** — container image, DaemonSet/sidecar manifests | Deployment layer 2 hardening | v0.2 |
 | F10 | **Match-heavy throughput gate** (v0.1 tracks, doesn't gate) | Perf scoping | v0.2 |
