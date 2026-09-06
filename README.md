@@ -58,7 +58,7 @@ heuristics eating your trace IDs.
 | [03-guarantee-and-testing](docs/03-guarantee-and-testing.md) | The contract, threat model, property tests, fuzzing |
 | [04-performance](docs/04-performance.md) | ≥ 500 MB/s floor, benchmark methodology, SIMD receipts protocol |
 | [05-roadmap](docs/05-roadmap.md) | 8-session v0.1 plan, follow-ups ledger |
-| [06-embedding](docs/06-embedding.md) | v0.2 bindings: WASM-first rollout, then pyo3 / napi-rs / C ABI — parity contract, 5-session split |
+| [06-embedding](docs/06-embedding.md) | v0.2 bindings: WASM-first rollout, then pyo3 / napi-rs / C ABI — parity contract, 8-session split (one artifact each) |
 
 ## License
 

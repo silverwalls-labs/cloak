@@ -113,9 +113,20 @@ correctness lives in core.
 - **v0.1**: CLI only (unchanged). Core API is already binding-shaped
   (bytes in/out, no host types) — S1/S3 must not introduce anything a C ABI or a
   WASM linear-memory interface cannot express.
-- **v0.2 = embedding milestone**, split into five 2–3h sessions (same rule as v0.1:
-  each ends CI-green/shippable). Supersedes ledger items F1/F2's original framing —
-  see updated [ledger](05-roadmap.md#follow-ups-ledger).
+- **v0.2 = embedding milestone**, split into eight 2–3h sessions — **strictly one
+  artifact per session** (same rule as v0.1: each ends CI-green/shippable).
+  Supersedes ledger items F1/F2's original framing — see updated
+  [ledger](05-roadmap.md#follow-ups-ledger).
+
+Dependency graph (E2–E4 are independent once E1 lands; native sessions depend on
+their own host's WASM baseline for receipts):
+
+```
+E1 wasm build ─┬─ E2 Node adapter ──── E6 cloak-node (napi-rs)
+               ├─ E3 Python adapter ── E5 cloak-py (pyo3)
+               └─ E4 Go adapter ────── E8 cloak-go (cgo) ── after E7
+                                       E7 cloak-ffi (C ABI, on demand)
+```
 
 ### E1 — `cloak-wasm` build + buffer ABI
 `cloak-wasm` crate exporting a linear-memory API over core (`engine_new(config
@@ -125,31 +136,46 @@ ptr/len)`, `session_new`, `push(ptr,len) → (ptr,len)`, `finish`); build
 **Done when:** the `.wasm` artifact passes the full vector parity suite + a
 chunk-boundary proptest subset; CI builds and gates it.
 
-### E2 — WASM host adapters + examples
-Thin host-side glue + a stdout/stderr-hook example per language over the same
-artifact: Node (WebAssembly/WASI), Python (wasmtime-py), Go (wazero). Docs for the
-"embed cloak today" path.
-**Done when:** three example apps redact through one `.wasm` file; parity vectors
-green per host in CI.
+### E2 — WASM host adapter: Node.js
+Thin glue over the E1 artifact via built-in WebAssembly/WASI; `Transform`-stream
+stdout/stderr-hook example; per-host parity vectors in CI; "embed cloak today"
+docs for Node.
+**Done when:** example app redacts through the `.wasm` artifact; Node parity green
+in CI.
 
-### E3 — `cloak-py` (pyo3, dedicated)
+### E3 — WASM host adapter: Python
+Same shape via `wasmtime-py`; file-like wrapper / `logging`-handler hook example;
+Python parity vectors in CI; docs.
+**Done when:** example app redacts through the same `.wasm`; Python parity green.
+
+### E4 — WASM host adapter: Go
+Same shape via `wazero` (pure Go, no cgo); `io.Writer` hook example; Go parity
+vectors in CI; docs. This is the supported Go path until E7/E8.
+**Done when:** example app redacts through the same `.wasm`; Go parity green.
+
+### E5 — `cloak-py` (pyo3, dedicated) — depends on E3
 Native module via pyo3 + maturin; abi3 wheels (linux x86-64/aarch64, macos
 aarch64); `bytes` in/out API + file-like wrapper and `logging` handler hooks; GIL
 released during scans; wheel CI matrix; parity suite.
 **Done when:** wheels install from CI artifacts; parity green; receipts show
-`cloak-py` ≥ WASM-in-Python (no receipts, no ship).
+`cloak-py` ≥ WASM-in-Python (E3 baseline) — no receipts, no ship.
 
-### E4 — `cloak-node` (napi-rs, dedicated)
+### E6 — `cloak-node` (napi-rs, dedicated) — depends on E2
 Prebuilt `.node` binaries for the three targets; `Buffer` in/out API + `Transform`
 stream hook; npm packaging; parity suite.
 **Done when:** package installs with prebuilds; parity green; receipts show
-`cloak-node` ≥ WASM-in-Node.
+`cloak-node` ≥ WASM-in-Node (E2 baseline).
 
-### E5 — `cloak-ffi` (C ABI) + `cloak-go` (cgo) — on demand
-cbindgen header, single-owner ownership rules, `cloak_abi_version()`; cgo wrapper
-with `io.Writer` hook; parity suite. **Unsafe enters here → Miri/ASAN/LSAN become
-blocking gates on the FFI boundary tests**
+### E7 — `cloak-ffi` (C ABI) — on demand
+cbindgen header, single-owner ownership rules, thread-safety contract,
+`cloak_abi_version()`, no panic across the boundary. **Unsafe enters here →
+Miri/ASAN/LSAN become blocking gates on the FFI boundary tests**
 ([03 §deferred](03-guarantee-and-testing.md#deferred-with-triggers-recorded-not-forgotten)).
-**Trigger:** Go-native throughput need or Alloy integration (F8) start — until
-then wazero is the supported Go path.
-**Done when:** parity green; receipts show `cloak-go` ≥ WASM-via-wazero.
+**Trigger:** Go-native throughput need or Alloy integration (F8) start.
+**Done when:** header + cdylib published; boundary tests green under sanitizers;
+parity via a minimal C harness.
+
+### E8 — `cloak-go` (cgo, dedicated) — depends on E7 + E4
+cgo wrapper module over `cloak-ffi` with `io.Writer` hook; parity suite.
+**Done when:** parity green; receipts show `cloak-go` ≥ WASM-via-wazero
+(E4 baseline).
