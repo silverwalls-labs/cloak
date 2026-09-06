@@ -26,7 +26,13 @@ cloak is one engine deployed at three points of the pipeline:
 │ code → cloak → out │ →  │ k8s log processor  │ →  │ Grafana Alloy /    │
 │ (catch at source)  │    │ (catch the missed) │    │ stack (last line)  │
 └────────────────────┘    └────────────────────┘    └────────────────────┘
+  embeds natively in         pipe / sidecar            FFI / WASM
+  Rust · Go · Node · Python
 ```
+
+One engine (`cloak-core`), many frontends: the v0.1 CLI, then native bindings —
+Rust crate, Go (C ABI/cgo), Python (pyo3), Node.js (napi-rs), WASM — as the v0.2
+embedding milestone ([design](docs/06-embedding.md)).
 
 ## The contract
 
@@ -51,6 +57,7 @@ heuristics eating your trace IDs.
 | [03-guarantee-and-testing](docs/03-guarantee-and-testing.md) | The contract, threat model, property tests, fuzzing |
 | [04-performance](docs/04-performance.md) | ≥ 500 MB/s floor, benchmark methodology, SIMD receipts protocol |
 | [05-roadmap](docs/05-roadmap.md) | 8-session v0.1 plan, follow-ups ledger |
+| [06-embedding](docs/06-embedding.md) | v0.2 bindings: C ABI, Go, Python (pyo3), Node.js (napi-rs), WASM — parity contract |
 
 ## License
 

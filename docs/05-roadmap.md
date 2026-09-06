@@ -1,6 +1,6 @@
 # Roadmap — cloak
 
-> Prev: [performance](04-performance.md) · Derived from [issue #2](https://github.com/silverwalls-labs/cloak/issues/2)
+> Prev: [performance](04-performance.md) · Next: [embedding](06-embedding.md) · Derived from [issue #2](https://github.com/silverwalls-labs/cloak/issues/2)
 
 ## v0.1 — session plan
 
@@ -12,6 +12,9 @@ Workspace (`crates/cloak-core`, `crates/cloak-cli`); CI matrix (linux x86-64,
 linux aarch64, macos aarch64: fmt, clippy `-D warnings`, test, doc); core types
 (`Engine`, `Session`, `RuleId`, `MatchEvent`, `Stats`); redaction writer with
 `[CLOAK:<rule>:<digest4>]` tag + keyed BLAKE3 digest (env key, ephemeral fallback).
+Decide & record the deliberately-open stack choices (arg parsing, error crates,
+CI provider, MSRV — [01-architecture](01-architecture.md#deliberately-left-open--decided-in-s1));
+keep the core API binding-shaped ([06-embedding](06-embedding.md#milestone-placement)).
 **Done when:** `app | cloak` pipes stdin→stdout byte-identical through full engine
 plumbing (zero rules compiled in); CI green on all targets.
 
@@ -79,14 +82,14 @@ issue when its milestone opens.
 
 | # | Follow-up | Origin of deferral | Earliest milestone |
 |---|---|---|---|
-| F1 | **FFI (C ABI) cdylib** — Go/cgo embedding for apps & Alloy | Integration scoping: CLI first | v0.2 |
-| F2 | **WASM build** — sandboxed pipeline embedding | Same | v0.2+ |
+| F1 | **Embedding milestone** — native bindings for the layer-1 app languages (Rust crate is v0.1; Go via `cloak-ffi` C ABI + cgo, Python via pyo3, Node.js via napi-rs) with cross-binding parity CI. Full design: [06-embedding.md](06-embedding.md) | Integration scoping: CLI first; second pass confirmed apps are Rust/Go/Node/Python | v0.2 |
+| F2 | **WASM build** (`cloak-wasm`) — sandboxed pipeline embedding | Same; required no later than F8 if FFI doesn't fit Alloy | v0.2+ |
 | F3 | **YAML + JSON config frontends + `cloak config convert`** — serde-first core makes this cheap; YAML crate choice open (`serde_yaml` unmaintained) | Config scoping: TOML-only v0.1 | v0.2 |
 | F4 | **Entropy detector, opt-in, off by default** — catches unknown secret shapes at FP cost | Precision scoping: recall-first tuned rules | v0.2+ |
 | F5 | **Configurable redaction templates per rule** (mask-only, custom formats) | Redaction scoping: fixed tag+digest v0.1 | v0.2 |
 | F6 | **Prometheus / OTel metrics export** — "aws-keys redacted today" as an alertable signal | Telemetry scoping: stderr+JSON v0.1 | Alloy milestone |
 | F7 | **Hand-rolled SIMD kernels** (`std::simd`/intrinsics, feature-gated nightly) behind `Scanner` trait — ships only with [receipts](04-performance.md#the-receipts-protocol-simd-powered-proven) | SIMD scoping: crates first, kernels with benchmarks later | v0.3 |
-| F8 | **Grafana Alloy integration** (via F1/F2) + Grafana stack docs | Deployment layer 3 | post-FFI |
+| F8 | **Grafana Alloy integration** (via F1/F2 boundary) + Grafana stack docs | Deployment layer 3 | post-embedding |
 | F9 | **k8s log-processor packaging** — container image, DaemonSet/sidecar manifests | Deployment layer 2 hardening | v0.2 |
 | F10 | **Match-heavy throughput gate** (v0.1 tracks, doesn't gate) | Perf scoping | v0.2 |
 

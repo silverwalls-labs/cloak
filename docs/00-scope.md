@@ -1,7 +1,7 @@
 # Scope — cloak v0.1
 
 > Status: agreed 2026-09-06 · Source: [issue #2](https://github.com/silverwalls-labs/cloak/issues/2) scoping interview
-> Reading order: this file → [architecture](01-architecture.md) → [rules](02-rules.md) → [guarantee & testing](03-guarantee-and-testing.md) → [performance](04-performance.md) → [roadmap](05-roadmap.md)
+> Reading order: this file → [architecture](01-architecture.md) → [rules](02-rules.md) → [guarantee & testing](03-guarantee-and-testing.md) → [performance](04-performance.md) → [roadmap](05-roadmap.md) → [embedding](06-embedding.md)
 
 ## Problem
 
@@ -19,14 +19,15 @@ cloak is deployed **defense in depth** at three points of the log pipeline:
 
 | Layer | Deployment | Catches |
 |-------|------------|---------|
-| 1. Application | Hook between code and stdout/stderr | Most leaks, at the source |
+| 1. Application | In-process hook between code and stdout/stderr — apps are written in **Rust, Go, Node.js, and Python**, so cloak embeds natively in all four | Most leaks, at the source |
 | 2. Node | Kubernetes log processor (pre-processing) | What layer 1 missed or couldn't see |
 | 3. Ingestion | Grafana Alloy / Grafana stack integration | Last line of defense before storage |
 
 A single engine serves all three layers. **v0.1 ships the CLI pipe form**
-(`app | cloak | collector`), which covers layers 1–2 via wrappers/sidecars.
-Layer 3 (embedding into Go-based Alloy) requires an FFI or WASM boundary and is an
-explicit follow-up — see [roadmap](05-roadmap.md#follow-ups-ledger).
+(`app | cloak | collector`), which covers layers 1–2 via pipe wrappers/sidecars in
+the interim. Native embedding — Rust crate, Go (cgo/C ABI), Python (pyo3),
+Node.js (napi-rs), WASM — is the **v0.2 embedding milestone**, designed in
+[06-embedding.md](06-embedding.md); layer 3 (Alloy) builds on the same boundary.
 
 ## What cloak hunts (v0.1)
 
@@ -89,7 +90,9 @@ A Rust workspace producing:
 Explicitly out of scope (several are tracked follow-ups — see the
 [ledger](05-roadmap.md#follow-ups-ledger)):
 
-- FFI (C ABI) and WASM builds
+- Language bindings & embedding — FFI (C ABI), Go, Python (pyo3), Node.js
+  (napi-rs), WASM — designed in [06-embedding.md](06-embedding.md), shipped as the
+  v0.2 milestone
 - Generic entropy / high-randomness detector
 - YAML/JSON config and format conversion
 - Per-rule configurable redaction templates

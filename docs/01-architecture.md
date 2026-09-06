@@ -23,7 +23,11 @@ cloak/
 
 Two crates, one workspace. `cloak-core` has **no CLI, no I/O policy** — it consumes
 byte chunks and emits redacted bytes + match events. Everything the three deployment
-layers share lives here; future FFI/WASM crates wrap this same core.
+layers share lives here; the v0.2 binding crates (`cloak-ffi`, `cloak-py`,
+`cloak-node`, `cloak-go`, `cloak-wasm` — see [06-embedding.md](06-embedding.md))
+wrap this same core. **Binding-shaped API is a v0.1 constraint**: the core surface
+must stay expressible over a C ABI — bytes in/out, no host-language types, no
+callbacks richer than a writer — so embedding lands without core rework.
 
 ## Engine model: bytes + bounded carry-over
 
@@ -174,3 +178,10 @@ payload, so the pipe contract stays pure.
   [03](03-guarantee-and-testing.md)/[04](04-performance.md).
 - Runtime CPU-feature detection comes free from the matching crates (AVX2/NEON
   picked at runtime); no per-target build flags needed in v0.1.
+
+### Deliberately left open — decided in S1
+
+CLI arg-parsing crate (`clap` vs lighter), error-handling crates (`thiserror` /
+`anyhow` split), CI provider naming, and MSRV policy are intentionally not pinned
+here; the S1 session decides and records them. Everything else in this doc is
+settled.
