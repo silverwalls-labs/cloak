@@ -3,9 +3,6 @@ use std::io::{self, BufWriter, Read, Write};
 use anyhow::Context;
 use clap::Parser;
 
-/// Default read buffer size (64 KiB), per docs/04-performance.md.
-const READ_BUF_SIZE: usize = 64 * 1024;
-
 /// Redact secrets and PII from streams.
 #[derive(Parser)]
 #[command(name = "cloak", version, about)]
@@ -25,14 +22,14 @@ fn run() -> anyhow::Result<()> {
     let mut reader = stdin.lock();
     let mut out = BufWriter::new(stdout.lock());
 
-    let mut buf = vec![0u8; READ_BUF_SIZE];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        session.push(&buf[..n], &mut out)?;
-    }
+    // S2: slurp the whole stream and scan it as one buffer — Session::push
+    // treats each chunk as self-contained until S3 lands bounded carry-over.
+    // S3 restores 64 KiB streaming reads (docs/04-performance.md).
+    let mut input = Vec::new();
+    reader
+        .read_to_end(&mut input)
+        .context("failed to read stdin")?;
+    session.push(&input, &mut out)?;
 
     let _stats = session.finish(&mut out)?;
     out.flush()?;

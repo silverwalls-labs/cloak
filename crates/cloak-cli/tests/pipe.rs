@@ -57,3 +57,48 @@ fn large_pipe() {
         .success()
         .stdout(input);
 }
+
+#[test]
+fn pipe_redacts_github_token_with_keyed_digest() {
+    // Deterministic end-to-end: with CLOAK_DIGEST_KEY set, the digest is
+    // reproducible, so the exact output can be asserted. The key derivation
+    // must mirror cloak-core's resolve_digest_key.
+    let secret = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let input = format!("deploy: token={secret} done\n");
+    let key = blake3::derive_key("cloak digest key", b"e2e-test-key");
+    let digest = cloak_core::compute_digest(secret.as_bytes(), &key);
+    let tag = cloak_core::format_tag(&cloak_core::RuleId::new("github-token"), &digest);
+    let expected = format!("deploy: token={tag} done\n");
+
+    Command::cargo_bin("cloak")
+        .unwrap()
+        .env("CLOAK_DIGEST_KEY", "e2e-test-key")
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+#[test]
+fn pipe_never_emits_secret_without_key() {
+    // No key configured → ephemeral key: digest is nondeterministic, but the
+    // secret bytes must be gone and the tag structure present.
+    let secret = "glpat-abcdefghij0123456789";
+    let input = format!("ci: {secret} pushed\n");
+
+    let assert = Command::cargo_bin("cloak")
+        .unwrap()
+        .env_remove("CLOAK_DIGEST_KEY")
+        .write_stdin(input)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains(secret),
+        "secret leaked to stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("[CLOAK:gitlab-token:"),
+        "missing redaction tag: {stdout}"
+    );
+}
