@@ -13,7 +13,17 @@
 mod config;
 mod engine;
 mod redact;
+mod rules;
 mod types;
+
+// Test-support surface — NOT part of the public API contract. Re-exported
+// `#[doc(hidden)]` so integration tests (and later fuzz/bench tiers) can
+// reach the oracle and the vector corpora (docs/03: defined once, reused
+// verbatim per tier).
+#[doc(hidden)]
+pub mod reference;
+#[doc(hidden)]
+pub use rules::vectors;
 
 pub use config::Config;
 pub use engine::{BuildError, Engine, Session};

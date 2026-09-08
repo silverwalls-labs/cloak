@@ -1,0 +1,114 @@
+//! Integration tier: per-rule vector suites through the public Engine API
+//! (docs/03, "Test taxonomy"). Vector data lives beside the rules and is
+//! reused verbatim — never duplicated here.
+
+use std::sync::Once;
+
+use cloak_core::{Config, Engine};
+
+const KEY_VAR: &str = "CLOAK_ITEST_DIGEST_KEY";
+const KEY_MATERIAL: &str = "integration-test-key";
+
+static INIT: Once = Once::new();
+
+/// Engine with a deterministic digest key, plus the raw key bytes for
+/// computing expected outputs. `Once` removes the set_var race (integration
+/// tests run multi-threaded).
+fn engine_and_key() -> (Engine, [u8; 32]) {
+    INIT.call_once(|| {
+        // SAFETY: test-only; single dedicated var, set exactly once before
+        // any engine is built, never removed.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { std::env::set_var(KEY_VAR, KEY_MATERIAL) };
+    });
+    let engine = Engine::new(&Config {
+        digest_key_env: Some(KEY_VAR.into()),
+    })
+    .unwrap();
+    // Must mirror config::resolve_digest_key's KDF (context string pinned by
+    // the `known_vector_stability` golden in cloak-core).
+    let key = blake3::derive_key("cloak digest key", KEY_MATERIAL.as_bytes());
+    (engine, key)
+}
+
+fn redact_one_push(engine: &Engine, input: &[u8]) -> (Vec<u8>, cloak_core::Stats) {
+    let mut session = engine.session();
+    let mut out = Vec::new();
+    session.push(input, &mut out).unwrap();
+    let stats = session.finish(&mut out).unwrap();
+    (out, stats)
+}
+
+#[test]
+fn every_vector_through_public_api() {
+    let (engine, key) = engine_and_key();
+    for v in cloak_core::vectors::all_vectors() {
+        let (out, stats) = redact_one_push(&engine, v.input);
+        assert_eq!(
+            out,
+            cloak_core::vectors::expected_output(v, &key),
+            "engine output mismatch on vector {}",
+            v.name
+        );
+        assert_eq!(stats.bytes_processed, v.input.len() as u64, "{}", v.name);
+        assert_eq!(
+            stats.total_matches(),
+            v.spans.len() as u64,
+            "match count mismatch on vector {}",
+            v.name
+        );
+        // Per-rule attribution matches the expected spans exactly.
+        for span in v.spans {
+            let expected = v.spans.iter().filter(|s| s.rule == span.rule).count() as u64;
+            let rule_id = cloak_core::RuleId::new(span.rule);
+            assert_eq!(
+                stats.matches[&rule_id], expected,
+                "{}: rule {}",
+                v.name, span.rule
+            );
+        }
+    }
+}
+
+#[test]
+fn digest_correlation_same_secret_same_tag() {
+    let (engine, _) = engine_and_key();
+    let token = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let mut input = token.to_vec();
+    input.push(b'\n');
+    input.extend_from_slice(token);
+    let (out, stats) = redact_one_push(&engine, &input);
+
+    let text = String::from_utf8(out).expect("tags and separator are ASCII");
+    let lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[0], lines[1],
+        "same secret + same key must produce identical tags"
+    );
+    assert!(lines[0].starts_with("[CLOAK:github-token:"));
+    assert_eq!(stats.total_matches(), 2);
+}
+
+#[test]
+fn smoke_golden_redaction() {
+    // Pins the golden used by CI's "Smoke — golden redaction" step
+    // (.github/workflows/quality-gates.yaml). If a digest or tag change
+    // breaks that step, this test must break first, with a better message.
+    let key = blake3::derive_key("cloak digest key", b"smoke-test-key");
+    let secret = b"ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let digest = cloak_core::compute_digest(secret, &key);
+    let tag = cloak_core::format_tag(&cloak_core::RuleId::new("github-token"), &digest);
+    assert_eq!(tag, "[CLOAK:github-token:cae2]");
+}
+
+#[test]
+fn deterministic_key_is_stable_across_engines() {
+    // Two engines built from the same env var must correlate.
+    let (engine_a, _) = engine_and_key();
+    let (engine_b, _) = engine_and_key();
+    let token = b"glpat-abcdefghij0123456789";
+    let (out_a, _) = redact_one_push(&engine_a, token);
+    let (out_b, _) = redact_one_push(&engine_b, token);
+    assert_eq!(out_a, out_b);
+}

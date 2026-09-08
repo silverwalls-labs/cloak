@@ -3,6 +3,11 @@
 #   Error handling:   thiserror (core) + anyhow (CLI) — typed lib errors, ergonomic CLI
 #   CI provider:      GitHub Actions — native to repo, free ARM runners for public repos
 #   MSRV:             1.98.1 — latest stable at time of implementation, edition 2024
+# Stack decisions (S2 — 2026-09-07):
+#   Prefilter:        aho-corasick — one automaton over all rules' anchors, SIMD inside
+#   Confirm:          regex-automata dense DFA — anchored, byte-oriented, minimal features
+#                     (unicode/meta/hybrid/perf OFF: confirm runs rarely over ≤266-byte
+#                     windows; revisit perf-inline with bench receipts in S7)
 
 [workspace]
 resolver = "3"
@@ -16,6 +21,8 @@ license = "MIT"
 repository = "https://github.com/silverwalls-labs/cloak"
 
 [workspace.dependencies]
+aho-corasick = "1.1"
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "dfa-build"] }
 blake3 = "1"
 thiserror = "2"
 anyhow = "1"

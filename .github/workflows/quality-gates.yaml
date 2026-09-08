@@ -123,7 +123,9 @@ jobs:
 
       - name: Integration Tests
         run: |
-          cargo test -p cloak-core --test passthrough
+          # Glob (quoted, cargo-side) runs every integration test target —
+          # new test files are picked up without editing this workflow.
+          cargo test -p cloak-core --test '*'
 
   e2e-tests:
     name: E2E Tests
@@ -177,6 +179,15 @@ jobs:
         run: |
           cargo build --bin cloak
           echo "hello world" | ./target/debug/cloak | diff - <(echo "hello world")
+
+      - name: Smoke — golden redaction
+        run: |
+          # Golden pinned by `smoke_golden_redaction` in cloak-core's
+          # tests/rules.rs — digest drift fails tests before it fails here.
+          in='token=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA done'
+          want='token=[CLOAK:github-token:cae2] done'
+          out=$(printf '%s\n' "$in" | CLOAK_DIGEST_KEY=smoke-test-key ./target/debug/cloak)
+          [ "$out" = "$want" ]
 
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
@@ -239,7 +250,7 @@ jobs:
       - name: Integration Tests with Coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p cloak-core --test passthrough --lcov --output-path coverage/integration.lcov
+          cargo llvm-cov -p cloak-core --test '*' --lcov --output-path coverage/integration.lcov
 
       - name: Upload Coverage
         if: ${{ !cancelled() }}

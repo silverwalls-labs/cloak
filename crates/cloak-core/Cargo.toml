@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+aho-corasick = { workspace = true }
+regex-automata = { workspace = true }
 blake3 = { workspace = true }
 thiserror = { workspace = true }
 getrandom = { workspace = true }

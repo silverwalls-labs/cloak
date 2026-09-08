@@ -31,8 +31,8 @@ operators which ones to consider disabling per environment.
 | `aws-secret-key` | `aws_secret`, `SecretAccessKey` (context-keyed) | key-context + 40-char base64 value | Low-med |
 | `gcp-api-key` | `AIza` | `AIza[0-9A-Za-z_-]{35}` | Low |
 | `azure-style-token` | context keys (`accountkey=`, `sig=` in SAS) | context + base64/urlenc value shape | Med |
-| `github-token` | `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_` | prefix + `[0-9A-Za-z_]{36,}` (+ checksum where format defines one) | Low |
-| `gitlab-token` | `glpat-`, `glrt-`, `gldt-` | prefix + `[0-9A-Za-z_-]{20,}` | Low |
+| `github-token` | `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_` | prefix + `[0-9A-Za-z_]{36,255}` ¹ | Low |
+| `gitlab-token` | `glpat-`, `glrt-`, `gldt-` | prefix + `[0-9A-Za-z_-]{20,255}` | Low |
 | `npm-token` | `npm_` | `npm_[0-9A-Za-z]{36}` | Low |
 | `pypi-token` | `pypi-` | `pypi-AgEIcHlwaS5vcmc…` (macaroon prefix) | Low |
 | `jwt` | `eyJ` | three dot-separated base64url segments, first two decode-shaped as JSON (`{"` prefix after decode of header) | Low-med |
@@ -50,6 +50,31 @@ Notes:
 - `aws-secret-key` and `azure-style-token` are **context-keyed** (value shape alone
   is just base64): anchor on the key name, redact the value. This is the agreed
   precision trade — a bare 40-char base64 string without context is NOT matched.
+- ¹ GitHub classic tokens embed a CRC32 checksum; validation is **deferred to S4**
+  (ledger [F12](05-roadmap.md#follow-ups-ledger), S2 decision 2026-09-07) — S2 ships
+  shape-only confirm. Decided semantics: checksum-fail ⇒ reject (pass through);
+  `npm-token` gets the same validator; `github_pat_` stays shape-only.
+
+### Implemented in S2 — windows & caps
+
+Open-ended body quantifiers are capped at **255 chars** so every rule can declare a
+finite `W` (rule requirement 3). A body longer than the cap redacts its first 255
+chars; the remainder passes through (spec-literal).
+
+| Rule id | `W` | As implemented | Notes |
+|---|---|---|---|
+| `github-token` | 266 (11 + 255) | `(?:ghp_\|gho_\|ghs_\|ghu_\|ghr_\|github_pat_)[0-9A-Za-z_]{36,255}` | Checksum deferred (see ¹). |
+| `gitlab-token` | 261 (6 + 255) | `(?:glpat-\|glrt-\|gldt-)[0-9A-Za-z_-]{20,255}` | `-` and `_` valid in body. |
+| `npm-token` | 40 (4 + 36) | `npm_[0-9A-Za-z]{36}` | Spec-literal: exactly 36, no trailing-boundary check — a longer alnum run matches its first 36. |
+
+### Overlap resolution (implemented S2)
+
+Confirmed matches that **strictly overlap** union into one redaction span,
+transitively. Exactly-touching spans (zero gap) stay separate — two adjacent
+secrets keep two tags with per-rule attribution. Winner per merged span is
+**longest-leftmost**: leftmost start wins; same start → longer wins; exact tie →
+catalog registration order. The digest covers the full merged bytes; one tag per
+merged span; `Stats.matches` counts the winning rule once per merged span.
 
 ## Structured-PII detectors
 

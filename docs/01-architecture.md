@@ -188,3 +188,13 @@ payload, so the pipe contract stays pure.
 | Error handling | **thiserror** (cloak-core) + **anyhow** (cloak-cli) | Typed library errors (binding-friendly); ergonomic CLI error chains |
 | CI provider | **GitHub Actions** | Native to the GitHub repo, free ARM runners for public repos |
 | MSRV | **1.98.1** (edition 2024) | Latest stable at time of implementation (2026-09-06) |
+
+### Decided in S2
+
+| Decision | Choice | Rationale |
+|----------|--------|-----------|
+| Prefilter | **aho-corasick 1.1**, `MatchKind::Standard` + overlapping iteration | Structurally cannot miss an anchor occurrence, even when future anchors nest/overlap |
+| Confirm | **regex-automata 0.4 dense DFA**, anchored starts, byte-oriented (unicode off) | Half-match at a known start with zero per-search allocation; minimal feature footprint (`std`, `syntax`, `dfa-build`) |
+| Longest-at-anchor | Greedy repetition + `LeftmostFirst` (no `LeftmostLongest` in regex-automata 0.4) | Holds for prefix-alternation + single-greedy-class patterns; constraint documented in `engine/confirm.rs`, pinned by unit tests |
+| Oracle | Fully independent `reference/` pipeline (hand-rolled search/confirm/merge, no regex) | Shared confirm/overlap code would hide its own bugs from the differential test |
+| Interim CLI I/O | Slurp stdin until S3 lands carry-over | A redaction tool must not probabilistically leak secrets at chunk boundaries |
