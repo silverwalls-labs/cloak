@@ -9,6 +9,7 @@ pub mod github_token;
 pub mod gitlab_token;
 pub mod npm_token;
 pub mod overlap;
+pub mod pem;
 
 use crate::redact;
 use crate::types::RuleId;
@@ -57,6 +58,8 @@ pub fn all_vectors() -> Vec<&'static Vector> {
     all.extend(npm_token::POSITIVE);
     all.extend(npm_token::NEGATIVE);
     all.extend(overlap::VECTORS);
+    all.extend(pem::POSITIVE);
+    all.extend(pem::NEGATIVE);
     all
 }
 
@@ -123,7 +126,8 @@ mod tests {
         // Executed over ALL vectors: spans strictly ascending, non-overlapping
         // (touching allowed — strict-overlap merge semantics), in-bounds, and
         // attributed to a real catalog rule.
-        let catalog_ids: Vec<&str> = crate::rules::CATALOG.iter().map(|r| r.id).collect();
+        let mut known_ids: Vec<&str> = crate::rules::CATALOG.iter().map(|r| r.id).collect();
+        known_ids.push(crate::engine::pem::PEM_RULE_ID);
         for v in all_vectors() {
             let mut prev_end = 0;
             for span in v.spans {
@@ -135,7 +139,7 @@ mod tests {
                 );
                 assert!(span.end <= v.input.len(), "{}: span out of bounds", v.name);
                 assert!(
-                    catalog_ids.contains(&span.rule),
+                    known_ids.contains(&span.rule),
                     "{}: unknown rule id {}",
                     v.name,
                     span.rule

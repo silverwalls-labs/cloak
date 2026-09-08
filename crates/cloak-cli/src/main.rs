@@ -22,14 +22,16 @@ fn run() -> anyhow::Result<()> {
     let mut reader = stdin.lock();
     let mut out = BufWriter::new(stdout.lock());
 
-    // S2: slurp the whole stream and scan it as one buffer — Session::push
-    // treats each chunk as self-contained until S3 lands bounded carry-over.
-    // S3 restores 64 KiB streaming reads (docs/04-performance.md).
-    let mut input = Vec::new();
-    reader
-        .read_to_end(&mut input)
-        .context("failed to read stdin")?;
-    session.push(&input, &mut out)?;
+    // S3: 64 KiB streaming reads — bounded carry-over makes chunk
+    // boundaries invisible (docs/03-guarantee-and-testing.md).
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).context("failed to read stdin")?;
+        if n == 0 {
+            break;
+        }
+        session.push(&buf[..n], &mut out)?;
+    }
 
     let _stats = session.finish(&mut out)?;
     out.flush()?;

@@ -20,8 +20,15 @@ use crate::types::{RuleId, Stats};
 const GITHUB: usize = 0;
 const GITLAB: usize = 1;
 const NPM: usize = 2;
+/// PEM is a separate layer, not in CATALOG — lives after catalog indices.
+const PEM: usize = 3;
 
-const RULE_IDS: [&str; 3] = ["github-token", "gitlab-token", "npm-token"];
+const RULE_IDS: [&str; 4] = [
+    "github-token",
+    "gitlab-token",
+    "npm-token",
+    "pem-private-key",
+];
 
 const GITHUB_PREFIXES: [&[u8]; 6] = [b"ghp_", b"gho_", b"ghs_", b"ghu_", b"ghr_", b"github_pat_"];
 const GITLAB_PREFIXES: [&[u8]; 3] = [b"glpat-", b"glrt-", b"gldt-"];
@@ -87,10 +94,118 @@ fn confirm_npm(input: &[u8], start: usize) -> Option<usize> {
     (taken == NPM_EXACT).then_some(start + NPM_PREFIX.len() + taken)
 }
 
+// PEM constants (oracle-independent re-declarations, cross-checked by test).
+const PEM_BEGIN: &[u8] = b"-----BEGIN ";
+const PEM_DASHES: &[u8] = b"-----";
+const PEM_BAIL_OUT: usize = 16_384;
+const PEM_KEY_TYPES: [&[u8]; 6] = [
+    b"RSA PRIVATE KEY",
+    b"EC PRIVATE KEY",
+    b"DSA PRIVATE KEY",
+    b"OPENSSH PRIVATE KEY",
+    b"ENCRYPTED PRIVATE KEY",
+    b"PRIVATE KEY",
+];
+
+/// Find all PEM private-key blocks. Returns body spans (between BEGIN and
+/// END markers). Enforces bail-out at `PEM_BAIL_OUT` bytes.
+fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
+    let mut blocks = Vec::new();
+    let mut pos = 0;
+    while pos < input.len() {
+        // Look for -----BEGIN
+        if let Some(offset) = find_bytes(&input[pos..], PEM_BEGIN) {
+            let begin_start = pos + offset;
+            let after_begin = begin_start + PEM_BEGIN.len();
+            // Check if it's a private key type.
+            if let Some((begin_line_end, key_type)) = confirm_pem_begin_ref(input, after_begin) {
+                // Body starts after the BEGIN line.
+                let body_start = begin_line_end;
+                // Look for the matching END marker.
+                let mut end_marker = b"-----END ".to_vec();
+                end_marker.extend_from_slice(key_type);
+                end_marker.extend_from_slice(PEM_DASHES);
+
+                if let Some(end_offset) = find_bytes(&input[body_start..], &end_marker) {
+                    let body_end = body_start + end_offset;
+                    let actual_body_len = body_end - body_start;
+                    if actual_body_len <= PEM_BAIL_OUT {
+                        blocks.push(RefMatch {
+                            start: body_start,
+                            end: body_end,
+                            rule: PEM,
+                        });
+                        pos = body_end + end_marker.len();
+                        continue;
+                    } else {
+                        // Bail-out: redact first PEM_BAIL_OUT bytes of body.
+                        let bail_end = body_start + PEM_BAIL_OUT;
+                        blocks.push(RefMatch {
+                            start: body_start,
+                            end: bail_end,
+                            rule: PEM,
+                        });
+                        pos = bail_end;
+                        continue;
+                    }
+                } else {
+                    // No END marker: bail-out the entire remaining body.
+                    let bail_end = (body_start + PEM_BAIL_OUT).min(input.len());
+                    blocks.push(RefMatch {
+                        start: body_start,
+                        end: bail_end,
+                        rule: PEM,
+                    });
+                    pos = bail_end;
+                    continue;
+                }
+            }
+            pos = after_begin;
+        } else {
+            break;
+        }
+    }
+    blocks
+}
+
+fn confirm_pem_begin_ref(input: &[u8], after_begin: usize) -> Option<(usize, &'static [u8])> {
+    let rest = input.get(after_begin..)?;
+    for &key_type in &PEM_KEY_TYPES {
+        if rest.starts_with(key_type) {
+            let after_type = rest.get(key_type.len()..)?;
+            if after_type.starts_with(PEM_DASHES) {
+                let begin_line_end = after_begin + key_type.len() + PEM_DASHES.len();
+                // Idempotence: skip already-redacted PEM blocks.
+                if input
+                    .get(begin_line_end..)
+                    .is_some_and(|b| b.starts_with(b"[CLOAK:"))
+                {
+                    return None;
+                }
+                return Some((begin_line_end, key_type));
+            }
+        }
+    }
+    None
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Check if a position falls inside any PEM body span.
+fn is_in_pem_region(pos: usize, pem_blocks: &[RefMatch]) -> bool {
+    pem_blocks.iter().any(|b| pos >= b.start && pos < b.end)
+}
+
 /// Try every offset × every rule. Deliberately naive — oracle.
-fn find_all_matches(input: &[u8]) -> Vec<RefMatch> {
+/// Skips positions inside PEM body regions (atomic suppression).
+fn find_all_matches(input: &[u8], pem_blocks: &[RefMatch]) -> Vec<RefMatch> {
     let mut matches = Vec::new();
     for start in 0..input.len() {
+        if is_in_pem_region(start, pem_blocks) {
+            continue; // PEM body is atomic — no other rules run here
+        }
         for (rule, confirm) in [
             (GITHUB, confirm_github as fn(&[u8], usize) -> Option<usize>),
             (GITLAB, confirm_gitlab),
@@ -173,7 +288,13 @@ fn merge_matches(matches: &[RefMatch]) -> Vec<RefMatch> {
 
 /// Redact `input` as one whole buffer. Returns the redacted bytes and stats.
 pub fn redact(input: &[u8], digest_key: &[u8; 32]) -> (Vec<u8>, Stats) {
-    let merged = merge_matches(&find_all_matches(input));
+    // 1. Find PEM blocks first (they suppress regular rules inside them).
+    let pem_blocks = find_pem_blocks(input);
+    // 2. Find regular matches, skipping PEM body regions.
+    let mut all_matches = find_all_matches(input, &pem_blocks);
+    // 3. Add PEM body spans to the match set.
+    all_matches.extend_from_slice(&pem_blocks);
+    let merged = merge_matches(&all_matches);
 
     let mut out = Vec::new();
     let mut match_counts: BTreeMap<RuleId, u64> = BTreeMap::new();
@@ -210,10 +331,12 @@ mod tests {
     fn constants_cross_check_catalog() {
         // The oracle re-declares rule constants on purpose; this test is the
         // tripwire for drift between the two declarations.
-        assert_eq!(RULE_IDS.len(), CATALOG.len());
+        // First 3 RULE_IDS match catalog; the 4th is PEM (separate layer).
+        assert_eq!(RULE_IDS.len(), CATALOG.len() + 1);
         for (idx, rule) in CATALOG.iter().enumerate() {
             assert_eq!(RULE_IDS[idx], rule.id);
         }
+        assert_eq!(RULE_IDS[PEM], crate::engine::pem::PEM_RULE_ID);
         let github_anchors: Vec<&[u8]> = GITHUB_PREFIXES.to_vec();
         assert_eq!(github_anchors, CATALOG[GITHUB].anchors);
         let gitlab_anchors: Vec<&[u8]> = GITLAB_PREFIXES.to_vec();
@@ -223,6 +346,13 @@ mod tests {
         assert_eq!(CATALOG[GITHUB].window, 11 + BODY_CAP);
         assert_eq!(CATALOG[GITLAB].window, 6 + BODY_CAP);
         assert_eq!(CATALOG[NPM].window, NPM_PREFIX.len() + NPM_EXACT);
+        // PEM constants cross-check.
+        assert_eq!(PEM_BEGIN, crate::engine::pem::PEM_ANCHOR);
+        assert_eq!(PEM_BAIL_OUT, crate::engine::pem::PEM_BAIL_OUT);
+        assert_eq!(PEM_KEY_TYPES.len(), crate::engine::pem::PEM_KEY_TYPES.len());
+        for (oracle, engine) in PEM_KEY_TYPES.iter().zip(crate::engine::pem::PEM_KEY_TYPES) {
+            assert_eq!(oracle, engine);
+        }
     }
 
     // --- confirmers -------------------------------------------------------
