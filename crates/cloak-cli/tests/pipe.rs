@@ -102,3 +102,43 @@ fn pipe_never_emits_secret_without_key() {
         "missing redaction tag: {stdout}"
     );
 }
+
+#[test]
+fn pipe_redacts_pem_block() {
+    // PEM private key piped through the real binary — markers stay visible,
+    // body replaced by tag.
+    let input = "log line\n\
+        -----BEGIN RSA PRIVATE KEY-----\n\
+        MIIBogIBAAJBALRiMLAH0123456789abcdefgABCDEFGH\n\
+        -----END RSA PRIVATE KEY-----\n\
+        more log\n";
+
+    let assert = Command::cargo_bin("cloak")
+        .unwrap()
+        .env_remove("CLOAK_DIGEST_KEY")
+        .write_stdin(input)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+
+    assert!(
+        stdout.contains("-----BEGIN RSA PRIVATE KEY-----"),
+        "BEGIN marker must be visible: {stdout}"
+    );
+    assert!(
+        stdout.contains("-----END RSA PRIVATE KEY-----"),
+        "END marker must be visible: {stdout}"
+    );
+    assert!(
+        stdout.contains("[CLOAK:pem-private-key:"),
+        "PEM tag must be present: {stdout}"
+    );
+    assert!(
+        !stdout.contains("MIIBogIBAAJ"),
+        "PEM body must not leak: {stdout}"
+    );
+    assert!(
+        stdout.contains("log line") && stdout.contains("more log"),
+        "surrounding text must pass through: {stdout}"
+    );
+}

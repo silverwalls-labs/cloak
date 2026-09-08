@@ -280,6 +280,19 @@ impl Session<'_> {
                         }
                         pem_block_extents.push((cand.start, end_line_end));
                         pem_scan_pos = end_line_end;
+                    } else if is_final {
+                        // No END in buffer and this is the final flush —
+                        // bail-out: redact the body from body_start to the
+                        // end of input (or PEM_BAIL_OUT, whichever is less).
+                        let bail_end = (body_start + pem::PEM_BAIL_OUT).min(combined_len);
+                        self.raw.push(RawMatch {
+                            start: body_start,
+                            end: bail_end,
+                            rule: self.engine.pem_rule_idx,
+                        });
+                        pem_body_regions.push((body_start, bail_end));
+                        pem_block_extents.push((cand.start, bail_end));
+                        pem_scan_pos = bail_end;
                     } else if pem_incomplete_anchor.is_none() {
                         // No END in buffer — hold the anchor in carry-over.
                         pem_incomplete_anchor = Some(cand.start);
@@ -661,5 +674,195 @@ mod tests {
                 v.name
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // PEM through the full Engine API
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn pem_rsa_single_push() {
+        // Dedicated PEM-through-engine test: markers stay visible, body
+        // replaced by tag.
+        let engine = test_engine();
+        let input = b"-----BEGIN RSA PRIVATE KEY-----\nBODY\n-----END RSA PRIVATE KEY-----";
+        let (output, stats) = push_all(&engine, input);
+        let out_str = String::from_utf8_lossy(&output);
+
+        // BEGIN and END markers visible.
+        assert!(
+            out_str.starts_with("-----BEGIN RSA PRIVATE KEY-----"),
+            "BEGIN marker must be visible: {out_str}"
+        );
+        assert!(
+            out_str.ends_with("-----END RSA PRIVATE KEY-----"),
+            "END marker must be visible: {out_str}"
+        );
+        // Body replaced by a CLOAK tag.
+        assert!(
+            out_str.contains("[CLOAK:pem-private-key:"),
+            "body must be redacted: {out_str}"
+        );
+        // No raw body leaked.
+        assert!(
+            !out_str.contains("BODY"),
+            "raw body must not appear: {out_str}"
+        );
+        assert_eq!(stats.matches[&RuleId::new("pem-private-key")], 1);
+    }
+
+    #[test]
+    fn pem_empty_body() {
+        // BEGIN immediately followed by END — zero body bytes.
+        let engine = test_engine();
+        let input = b"-----BEGIN RSA PRIVATE KEY----------END RSA PRIVATE KEY-----";
+        let (output, stats) = push_all(&engine, input);
+        let out_str = String::from_utf8_lossy(&output);
+        assert!(
+            out_str.contains("[CLOAK:pem-private-key:"),
+            "empty-body PEM must produce a tag: {out_str}"
+        );
+        assert_eq!(stats.matches[&RuleId::new("pem-private-key")], 1);
+    }
+
+    #[test]
+    fn pem_token_inside_body_suppressed() {
+        // A github token inside a PEM body must NOT be detected — the PEM
+        // body is atomic (no regular rules run inside it).
+        let engine = test_engine();
+        let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+        input.extend_from_slice(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n");
+        input.extend_from_slice(b"-----END RSA PRIVATE KEY-----");
+
+        let (output, stats) = push_all(&engine, &input);
+        let out_str = String::from_utf8_lossy(&output);
+
+        // PEM detected.
+        assert!(out_str.contains("[CLOAK:pem-private-key:"));
+        assert_eq!(stats.matches[&RuleId::new("pem-private-key")], 1);
+        // The github token inside the PEM body must NOT be matched.
+        assert!(
+            !stats.matches.contains_key(&RuleId::new("github-token")),
+            "token inside PEM body must be suppressed"
+        );
+        // The raw token bytes must not appear in output.
+        assert!(
+            !out_str.contains("ghp_"),
+            "token bytes must be redacted as part of PEM body"
+        );
+    }
+
+    #[test]
+    fn pem_multiple_blocks_in_one_push() {
+        // Two PEM blocks back-to-back in a single push — both must be
+        // detected independently.
+        let engine = test_engine();
+        let mut input = b"-----BEGIN RSA PRIVATE KEY-----\nRSABODY\n".to_vec();
+        input.extend_from_slice(b"-----END RSA PRIVATE KEY-----\n");
+        input.extend_from_slice(b"-----BEGIN EC PRIVATE KEY-----\nECBODY\n");
+        input.extend_from_slice(b"-----END EC PRIVATE KEY-----");
+
+        let (output, stats) = push_all(&engine, &input);
+        let out_str = String::from_utf8_lossy(&output);
+
+        assert_eq!(
+            stats.matches[&RuleId::new("pem-private-key")],
+            2,
+            "both PEM blocks must be detected"
+        );
+        // Both BEGIN/END pairs visible.
+        assert!(out_str.contains("-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(out_str.contains("-----END RSA PRIVATE KEY-----"));
+        assert!(out_str.contains("-----BEGIN EC PRIVATE KEY-----"));
+        assert!(out_str.contains("-----END EC PRIVATE KEY-----"));
+        // Neither raw body leaked.
+        assert!(!out_str.contains("RSABODY"));
+        assert!(!out_str.contains("ECBODY"));
+    }
+
+    #[test]
+    fn pem_at_stream_end_no_end_marker() {
+        // PEM BEGIN + body, but no END marker. On finish(), the engine
+        // should treat this as a bail-out / truncated PEM and NOT leak
+        // the body.
+        let engine = test_engine();
+        let input = b"-----BEGIN RSA PRIVATE KEY-----\nSECRETKEYDATA";
+
+        let (output, stats) = push_all(&engine, input);
+        let out_str = String::from_utf8_lossy(&output);
+
+        // The body must not leak in raw form.
+        assert!(
+            !out_str.contains("SECRETKEYDATA"),
+            "PEM body must not leak when END is missing: {out_str}"
+        );
+        // A PEM tag must be emitted (bail-out behavior).
+        assert!(
+            out_str.contains("[CLOAK:pem-private-key:"),
+            "bail-out must produce a tag: {out_str}"
+        );
+        assert_eq!(stats.matches[&RuleId::new("pem-private-key")], 1);
+    }
+
+    #[test]
+    fn pem_large_block_exceeding_max_window() {
+        // A PEM block whose total size exceeds max_window (266), forcing
+        // the carry-over to grow. The block must still be detected when
+        // pushed in small chunks.
+        let engine = test_engine();
+        let body = vec![b'A'; 300]; // 300-byte body > max_window
+        let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+        input.extend_from_slice(&body);
+        input.push(b'\n');
+        input.extend_from_slice(b"-----END RSA PRIVATE KEY-----");
+
+        // Whole-buffer.
+        let (whole, whole_stats) = push_all(&engine, &input);
+        assert_eq!(whole_stats.matches[&RuleId::new("pem-private-key")], 1);
+
+        // Small chunks (7 bytes).
+        let mut session = engine.session();
+        let mut chunked = Vec::new();
+        for chunk in input.chunks(7) {
+            session.push(chunk, &mut chunked).unwrap();
+        }
+        session.finish(&mut chunked).unwrap();
+
+        assert_eq!(
+            chunked, whole,
+            "large PEM block: chunked must equal whole-buffer"
+        );
+    }
+
+    #[test]
+    fn pem_greedy_body_overlaps_begin_anchor() {
+        // A gitlab-token body (charset includes '-') extends through the
+        // dashes of a following PEM BEGIN marker. Both the gitlab match
+        // and the PEM body must be detected.
+        let engine = test_engine();
+        let mut input = b"glpat-abcdefghij0123456789".to_vec(); // 26 bytes, valid gitlab
+        input.extend_from_slice(
+            b"-----BEGIN RSA PRIVATE KEY-----\nPEMBODY\n-----END RSA PRIVATE KEY-----",
+        );
+
+        let (output, stats) = push_all(&engine, &input);
+        let out_str = String::from_utf8_lossy(&output);
+
+        // Gitlab token detected (its body extends into the dashes but
+        // stops at the space in "-----BEGIN ").
+        assert!(
+            stats.matches.contains_key(&RuleId::new("gitlab-token")),
+            "gitlab match must be detected: {out_str}"
+        );
+        // PEM body detected.
+        assert!(
+            stats.matches.contains_key(&RuleId::new("pem-private-key")),
+            "PEM must be detected even when BEGIN dashes overlap gitlab body: {out_str}"
+        );
+        // PEM body must not leak.
+        assert!(
+            !out_str.contains("PEMBODY"),
+            "PEM body must be redacted: {out_str}"
+        );
     }
 }
