@@ -6,16 +6,23 @@
 //! the regular matching engine:
 //!
 //! - The `-----BEGIN ` anchor is included in the shared prefilter.
-//! - On a confirmed private-key BEGIN, the engine enters [`PemState::InBlock`],
-//!   writing the BEGIN marker to output and hashing the body incrementally.
-//! - Each subsequent push searches for the END marker; if not found, the body
-//!   is hashed and a bail-out counter ticks.
-//! - On END (or bail-out / finish), a single `[CLOAK:pem-private-key:<digest>]`
+//! - Blocks whose BEGIN and END both lie in the current buffer are redacted
+//!   by the regular pipeline (body span → overlap merge), exactly matching
+//!   the reference oracle.
+//! - On a confirmed private-key BEGIN whose END has not arrived yet, the
+//!   engine emits the BEGIN line, enters [`PemState::InBlock`], and hashes
+//!   the body incrementally as further pushes arrive.
+//! - On END (or bail-out / finish) a single `[CLOAK:pem-private-key:<digest>]`
 //!   tag replaces the body. The BEGIN and END markers stay visible in output.
+//! - Bail-out: at most `PEM_BAIL_OUT` body bytes are redacted. The digest
+//!   covers exactly `PEM_BAIL_OUT` bytes (identical to the whole-buffer
+//!   path), and everything past the truncation point goes back through
+//!   normal scanning — regular rules and nested BEGINs apply there,
+//!   matching the oracle's `pos = bail_end` resumption.
 
 use std::io;
 
-use crate::types::{Digest, RuleId};
+use crate::types::RuleId;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -34,16 +41,16 @@ pub(crate) const PEM_BAIL_OUT: usize = 16_384; // 16 KiB
 /// Suffix that closes both BEGIN and END lines.
 pub(crate) const PEM_DASHES: &[u8] = b"-----";
 
-/// Private-key type labels that trigger detection. Order does not matter;
-/// `PRIVATE KEY` (PKCS#8 generic) must be last so that more specific
-/// prefixes match first.
+/// Private-key type labels that trigger detection. Order does not matter:
+/// no label is a prefix of another, so `starts_with` matching is
+/// order-independent.
 pub(crate) const PEM_KEY_TYPES: &[&[u8]] = &[
     b"RSA PRIVATE KEY",
     b"EC PRIVATE KEY",
     b"DSA PRIVATE KEY",
     b"OPENSSH PRIVATE KEY",
     b"ENCRYPTED PRIVATE KEY",
-    b"PRIVATE KEY", // PKCS#8 generic — must be last
+    b"PRIVATE KEY", // PKCS#8 generic
 ];
 
 /// Maximum length of a BEGIN/END line across all key types.
@@ -54,17 +61,11 @@ pub(crate) const MAX_PEM_LINE: usize = 11 + 21 + 5; // "-----BEGIN " + "ENCRYPTE
 // State machine
 // ---------------------------------------------------------------------------
 
-/// PEM detector state, held in [`Session`](super::Session).
-///
-/// The `InBlock` variant is used by the streaming PEM path (large PEM blocks
-/// whose END marker is not yet in the carry-over buffer). For PEM blocks
-/// that fit in one carry-over window, the body span is added to the regular
-/// match pipeline and `InBlock` is never entered.
 /// Data for the [`PemState::InBlock`] variant — boxed to avoid a
 /// large size difference between enum variants (clippy::large_enum_variant).
-#[allow(dead_code)]
 pub(crate) struct PemBlockData {
-    /// Incremental BLAKE3 keyed hasher over the body bytes.
+    /// Incremental BLAKE3 keyed hasher over the body bytes (keyed with the
+    /// engine's digest key at entry).
     pub hasher: blake3::Hasher,
     /// Running count of body bytes hashed (for bail-out).
     pub body_bytes: usize,
@@ -76,15 +77,11 @@ pub(crate) struct PemBlockData {
 
 /// PEM detector state, held in [`Session`](super::Session).
 ///
-/// The `InBlock` variant is used by the streaming PEM path (large PEM blocks
-/// whose END marker is not yet in the carry-over buffer). For PEM blocks
-/// that fit in one carry-over window, the body span is added to the regular
-/// match pipeline and `InBlock` is never entered.
+/// `Idle` while no private-key block is open. The engine enters `InBlock`
+/// when a confirmed BEGIN's END marker has not yet arrived, and leaves it
+/// on END, bail-out, or finish.
 pub(crate) enum PemState {
-    /// Normal processing — no PEM block in progress.
     Idle,
-    /// Inside a PEM block: body is being hashed incrementally.
-    #[allow(dead_code)]
     InBlock(Box<PemBlockData>),
 }
 
@@ -164,27 +161,29 @@ pub(crate) fn pem_confirm_window() -> usize {
 pub(crate) enum PemBodyResult {
     /// Still accumulating — caller continues PEM mode on next push.
     Continuing,
-    /// Found the END marker. `remainder_start` is the byte offset in the
-    /// *provided data* (not the carry-prepended buffer) where normal
-    /// scanning should resume.
+    /// Found the END marker within the bail-out budget. The tag and the
+    /// END marker line have been written. `remainder_start` is the byte
+    /// offset in the *provided data* where normal scanning resumes.
     Closed {
         /// Byte offset in `data` where normal scanning resumes (after END).
         remainder_start: usize,
     },
-    /// Bail-out triggered (body exceeded 16 KiB). Tag was written.
-    /// `remainder_start` is where normal scanning resumes in `data`.
-    BailedOut { remainder_start: usize },
+    /// Bail-out: the body reached `PEM_BAIL_OUT` bytes (with or without an
+    /// END marker in this slice). The tag covers exactly `PEM_BAIL_OUT`
+    /// body bytes — identical to the whole-buffer path — and `remainder`
+    /// holds every byte past the truncation point (body tail, END line,
+    /// and beyond) for normal scanning.
+    BailedOut { remainder: Vec<u8> },
 }
 
 /// Process a data slice while in PEM `InBlock` state.
 ///
 /// Searches for the END marker, hashes body bytes incrementally, and
-/// checks the bail-out counter. Writes the tag (and END marker) to `out`
-/// when the block closes.
+/// enforces the bail-out. The hasher must already be keyed with the
+/// engine's digest key (see [`PemBlockData::hasher`]).
 pub(crate) fn process_pem_body(
     state: &mut PemState,
     data: &[u8],
-    _digest_key: &[u8; 32],
     out: &mut impl io::Write,
 ) -> io::Result<PemBodyResult> {
     let PemState::InBlock(ref mut block) = *state else {
@@ -199,7 +198,9 @@ pub(crate) fn process_pem_body(
 
     // Conceptually prepend pem_carry to data for searching. To avoid an
     // allocation on every push we search a combined view via a small
-    // temporary buffer only when pem_carry is non-empty.
+    // temporary buffer only when pem_carry is non-empty. pem_carry bytes
+    // have NOT been hashed yet (they were retained for straddling
+    // detection), so `body_bytes` counts only fully-hashed bytes.
     let carry_len = pem_carry.len();
     let mut combined: Vec<u8>;
     let search_buf: &[u8] = if carry_len == 0 {
@@ -213,77 +214,76 @@ pub(crate) fn process_pem_body(
 
     // Search for the END marker in the combined view.
     if let Some(found) = find_subsequence(search_buf, end_marker) {
-        // Hash body bytes up to the END marker (excluding pem_carry bytes
-        // that were already hashed in prior pushes — they haven't been
-        // hashed yet because pem_carry bytes are deferred).
-        // pem_carry bytes have NOT been hashed yet (they were retained
-        // for straddling detection). Hash them now.
-        let body_before_end = &search_buf[..found];
-        hasher.update(body_before_end);
-        *body_bytes += body_before_end.len();
+        // Total body bytes up to the END marker (hashed + unhashed).
+        let body_to_end = *body_bytes + found;
+        if body_to_end <= PEM_BAIL_OUT {
+            // Full redaction: hash the remaining body bytes up to END.
+            hasher.update(&search_buf[..found]);
+            *body_bytes += found;
+            let digest = crate::redact::digest_from_hasher(hasher);
+            let rule_id = RuleId::new(PEM_RULE_ID);
+            crate::redact::write_tag(&rule_id, &digest, out)?;
 
-        // Finalize digest and write tag.
-        let hash = hasher.finalize();
-        let digest = Digest::new([hash.as_bytes()[0], hash.as_bytes()[1]]);
-        let rule_id = RuleId::new(PEM_RULE_ID);
-        crate::redact::write_tag(&rule_id, &digest, out)?;
+            // Write the END marker line to output (markers stay visible).
+            let end_line_end = found + end_marker.len();
+            out.write_all(&search_buf[found..end_line_end])?;
 
-        // Write the END marker line to output (markers stay visible).
-        let end_line_end = found + end_marker.len();
-        out.write_all(&search_buf[found..end_line_end])?;
+            // Compute remainder_start relative to the original `data` slice.
+            // The END marker cannot lie entirely within pem_carry (the
+            // previous search would have found it), so this is ≥ 1.
+            let remainder_start = end_line_end.saturating_sub(carry_len);
 
-        // Compute remainder_start relative to the original `data` slice.
-        let remainder_in_search = end_line_end;
-        let remainder_start = remainder_in_search.saturating_sub(carry_len);
-
-        *state = PemState::Idle;
-        return Ok(PemBodyResult::Closed { remainder_start });
-    }
-
-    // No END found. Hash as much as we can, retaining the tail for
-    // straddling detection on the next push.
-    let retain = end_marker.len().saturating_sub(1).min(search_buf.len());
-    let hashable_end = search_buf.len() - retain;
-    if hashable_end > 0 {
-        hasher.update(&search_buf[..hashable_end]);
-        *body_bytes += hashable_end;
-    }
-
-    // Check bail-out.
-    if *body_bytes >= PEM_BAIL_OUT {
-        // Hash the retained tail too (it's body data we won't see again).
-        if retain > 0 {
-            hasher.update(&search_buf[hashable_end..]);
-            *body_bytes += retain;
+            *state = PemState::Idle;
+            return Ok(PemBodyResult::Closed { remainder_start });
         }
 
-        let hash = hasher.finalize();
-        let digest = Digest::new([hash.as_bytes()[0], hash.as_bytes()[1]]);
+        // Oversized body: truncate the redaction at PEM_BAIL_OUT — the
+        // same rule as the whole-buffer path. Hash exactly the budget,
+        // then hand everything past the truncation point (body tail, END
+        // line, and beyond) back for normal scanning.
+        let hash_more = PEM_BAIL_OUT - *body_bytes;
+        hasher.update(&search_buf[..hash_more]);
+        *body_bytes += hash_more;
+        let digest = crate::redact::digest_from_hasher(hasher);
         let rule_id = RuleId::new(PEM_RULE_ID);
         crate::redact::write_tag(&rule_id, &digest, out)?;
 
-        // Remainder: everything after what we consumed from `data`.
-        // We consumed all of data (no END found).
-        let remainder_start = data.len();
-
         *state = PemState::Idle;
-        return Ok(PemBodyResult::BailedOut { remainder_start });
+        return Ok(PemBodyResult::BailedOut {
+            remainder: search_buf[hash_more..].to_vec(),
+        });
     }
 
-    // Retain tail bytes for next push.
-    pem_carry.clear();
-    pem_carry.extend_from_slice(&search_buf[hashable_end..]);
+    // No END found. If the body would stay within the bail-out budget,
+    // hash everything except the tail retained for straddling detection.
+    if *body_bytes + search_buf.len() <= PEM_BAIL_OUT {
+        let retain = end_marker.len().saturating_sub(1).min(search_buf.len());
+        let hashable_end = search_buf.len() - retain;
+        hasher.update(&search_buf[..hashable_end]);
+        *body_bytes += hashable_end;
+        pem_carry.clear();
+        pem_carry.extend_from_slice(&search_buf[hashable_end..]);
+        return Ok(PemBodyResult::Continuing);
+    }
 
-    Ok(PemBodyResult::Continuing)
+    // Bail-out mid-stream: hash exactly the remaining budget, then hand
+    // everything past the truncation point back for normal scanning.
+    let hash_more = PEM_BAIL_OUT - *body_bytes;
+    hasher.update(&search_buf[..hash_more]);
+    *body_bytes += hash_more;
+    let digest = crate::redact::digest_from_hasher(hasher);
+    let rule_id = RuleId::new(PEM_RULE_ID);
+    crate::redact::write_tag(&rule_id, &digest, out)?;
+
+    *state = PemState::Idle;
+    Ok(PemBodyResult::BailedOut {
+        remainder: search_buf[hash_more..].to_vec(),
+    })
 }
 
 /// Finalize PEM state on session finish (stream ended without END marker).
 /// Writes the tag for whatever body was accumulated.
-pub(crate) fn finish_pem(
-    state: &mut PemState,
-    _digest_key: &[u8; 32],
-    out: &mut impl io::Write,
-) -> io::Result<()> {
+pub(crate) fn finish_pem(state: &mut PemState, out: &mut impl io::Write) -> io::Result<()> {
     let PemState::InBlock(ref mut block) = *state else {
         return Ok(());
     };
@@ -296,8 +296,7 @@ pub(crate) fn finish_pem(
         hasher.update(pem_carry);
     }
 
-    let hash = hasher.finalize();
-    let digest = Digest::new([hash.as_bytes()[0], hash.as_bytes()[1]]);
+    let digest = crate::redact::digest_from_hasher(hasher);
     let rule_id = RuleId::new(PEM_RULE_ID);
     crate::redact::write_tag(&rule_id, &digest, out)?;
 
@@ -424,7 +423,7 @@ mod tests {
             pem_carry: Vec::new(),
         }));
         let mut out = Vec::new();
-        let result = process_pem_body(&mut state, body, &key, &mut out).unwrap();
+        let result = process_pem_body(&mut state, body, &mut out).unwrap();
         match result {
             PemBodyResult::Closed { remainder_start } => {
                 // "rest" starts at position 34 in body.
@@ -450,7 +449,7 @@ mod tests {
             pem_carry: Vec::new(),
         }));
         let mut out = Vec::new();
-        let result = process_pem_body(&mut state, body, &key, &mut out).unwrap();
+        let result = process_pem_body(&mut state, body, &mut out).unwrap();
         assert!(matches!(result, PemBodyResult::Continuing));
         assert!(state.is_in_block());
         assert!(out.is_empty(), "no output until END or bail-out");
@@ -468,16 +467,97 @@ mod tests {
             pem_carry: Vec::new(),
         }));
         let mut out = Vec::new();
-        let result = process_pem_body(&mut state, &big_body, &key, &mut out).unwrap();
+        let result = process_pem_body(&mut state, &big_body, &mut out).unwrap();
         match result {
-            PemBodyResult::BailedOut { remainder_start } => {
-                assert_eq!(remainder_start, big_body.len());
+            // The tag covers exactly PEM_BAIL_OUT body bytes; the 100-byte
+            // excess goes back through normal scanning.
+            PemBodyResult::BailedOut { remainder } => {
+                assert_eq!(remainder, big_body[PEM_BAIL_OUT..].to_vec());
             }
             _ => panic!("expected BailedOut"),
         }
         assert!(matches!(state, PemState::Idle));
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("[CLOAK:pem-private-key:"));
+    }
+
+    #[test]
+    fn bail_out_digest_covers_exactly_16kib() {
+        // M4: the streaming bail-out digest must equal the whole-buffer
+        // digest — hash exactly PEM_BAIL_OUT bytes, no more.
+        let key = test_key();
+        let big_body = vec![b'A'; PEM_BAIL_OUT + 100];
+        let mut state = PemState::InBlock(Box::new(PemBlockData {
+            hasher: blake3::Hasher::new_keyed(&key),
+            body_bytes: 0,
+            end_marker: end_marker_for(0),
+            pem_carry: Vec::new(),
+        }));
+        let mut out = Vec::new();
+        process_pem_body(&mut state, &big_body, &mut out).unwrap();
+        let streaming_digest = out; // "[CLOAK:pem-private-key:xxxx]"
+
+        let expected_digest = crate::redact::compute_digest(&big_body[..PEM_BAIL_OUT], &key);
+        let expected_tag = crate::redact::format_tag(&RuleId::new(PEM_RULE_ID), &expected_digest);
+        assert_eq!(streaming_digest, expected_tag.as_bytes());
+    }
+
+    #[test]
+    fn oversized_body_with_end_truncates_at_16kib() {
+        // END present but the body exceeds the budget: the redaction is
+        // truncated at PEM_BAIL_OUT and the tail + END line go back for
+        // normal scanning (whole-buffer parity).
+        let key = test_key();
+        let end = b"-----END RSA PRIVATE KEY-----";
+        let mut body = vec![b'A'; PEM_BAIL_OUT + 50];
+        body.extend_from_slice(end);
+        body.extend_from_slice(b"after");
+        let mut state = PemState::InBlock(Box::new(PemBlockData {
+            hasher: blake3::Hasher::new_keyed(&key),
+            body_bytes: 0,
+            end_marker: end.to_vec(),
+            pem_carry: Vec::new(),
+        }));
+        let mut out = Vec::new();
+        let result = process_pem_body(&mut state, &body, &mut out).unwrap();
+        match result {
+            PemBodyResult::BailedOut { remainder } => {
+                assert_eq!(remainder, body[PEM_BAIL_OUT..].to_vec());
+                assert!(remainder.ends_with(b"after"));
+            }
+            _ => panic!("expected BailedOut"),
+        }
+        assert!(matches!(state, PemState::Idle));
+        // Only the tag — the END line is part of the remainder, not output.
+        let expected_digest = crate::redact::compute_digest(&body[..PEM_BAIL_OUT], &key);
+        let expected_tag = crate::redact::format_tag(&RuleId::new(PEM_RULE_ID), &expected_digest);
+        assert_eq!(out, expected_tag.as_bytes());
+    }
+
+    #[test]
+    fn empty_body_closes_with_tag() {
+        let key = test_key();
+        let body = b"-----END RSA PRIVATE KEY-----rest";
+        let mut state = PemState::InBlock(Box::new(PemBlockData {
+            hasher: blake3::Hasher::new_keyed(&key),
+            body_bytes: 0,
+            end_marker: end_marker_for(0),
+            pem_carry: Vec::new(),
+        }));
+        let mut out = Vec::new();
+        let result = process_pem_body(&mut state, body, &mut out).unwrap();
+        match result {
+            PemBodyResult::Closed { remainder_start } => {
+                assert_eq!(&body[remainder_start..], b"rest");
+            }
+            _ => panic!("expected Closed"),
+        }
+        // Zero body bytes → digest of the empty slice.
+        let expected_digest = crate::redact::compute_digest(b"", &key);
+        let expected_tag = crate::redact::format_tag(&RuleId::new(PEM_RULE_ID), &expected_digest);
+        let out_str = String::from_utf8_lossy(&out);
+        assert!(out_str.starts_with(&expected_tag));
+        assert!(out_str.ends_with("-----END RSA PRIVATE KEY-----"));
     }
 
     #[test]
@@ -496,11 +576,11 @@ mod tests {
         let mut out = Vec::new();
 
         // First push: END not found, retains tail in pem_carry.
-        let r1 = process_pem_body(&mut state, part1, &key, &mut out).unwrap();
+        let r1 = process_pem_body(&mut state, part1, &mut out).unwrap();
         assert!(matches!(r1, PemBodyResult::Continuing));
 
         // Second push: END found across the carry boundary.
-        let r2 = process_pem_body(&mut state, part2, &key, &mut out).unwrap();
+        let r2 = process_pem_body(&mut state, part2, &mut out).unwrap();
         match r2 {
             PemBodyResult::Closed { remainder_start } => {
                 assert_eq!(&part2[remainder_start..], b"after");
@@ -522,7 +602,7 @@ mod tests {
             pem_carry: b"tail".to_vec(),
         }));
         let mut out = Vec::new();
-        finish_pem(&mut state, &key, &mut out).unwrap();
+        finish_pem(&mut state, &mut out).unwrap();
         assert!(matches!(state, PemState::Idle));
         let out_str = String::from_utf8_lossy(&out);
         assert!(out_str.contains("[CLOAK:pem-private-key:"));

@@ -77,6 +77,16 @@ pub const POSITIVE: &[&Vector] = &[
             rule: "pem-private-key",
         }],
     },
+    // --- BEGIN line exactly at EOF, no body, no END --- empty span [31,31)
+    &Vector {
+        name: "pem-unterminated-eof",
+        input: b"-----BEGIN RSA PRIVATE KEY-----",
+        spans: &[ExpectedSpan {
+            start: 31,
+            end: 31,
+            rule: "pem-private-key",
+        }],
+    },
 ];
 
 pub const NEGATIVE: &[&Vector] = &[

@@ -52,12 +52,9 @@ pub struct Engine {
     /// instead of the regular confirm step.
     pem_rule_idx: usize,
     /// Maximum match window `W` across all compiled rules. Bounds the
-    /// worst-case carry-over for the smart-flush algorithm (S3).
+    /// carry-over retained between pushes (S3): after every push,
+    /// `carry_over.len() <= max_window`.
     max_window: usize,
-    /// Length of the longest anchor across all compiled rules (including
-    /// PEM). Reserved for the smart carry-over optimization (deferred).
-    #[allow(dead_code)]
-    max_anchor_len: usize,
     _config: Config,
 }
 
@@ -80,12 +77,6 @@ impl Engine {
         let scanner = AhoCorasickScanner::new(rules::CATALOG, pem_extra)?;
 
         let max_window = rules.iter().map(|r| r.window).max().unwrap_or(0);
-        let max_anchor_len = rules::CATALOG
-            .iter()
-            .flat_map(|r| r.anchors.iter().map(|a| a.len()))
-            .chain(std::iter::once(pem::PEM_ANCHOR.len()))
-            .max()
-            .unwrap_or(0);
 
         Ok(Self {
             digest_key,
@@ -93,7 +84,6 @@ impl Engine {
             rules,
             pem_rule_idx,
             max_window,
-            max_anchor_len,
             _config: config.clone(),
         })
     }
@@ -152,35 +142,67 @@ impl Session<'_> {
     /// Push a chunk of bytes through the engine.
     ///
     /// The engine retains trailing bytes (the carry-over) that might be part
-    /// of a match straddling the chunk boundary. Only bytes provably
-    /// match-free are flushed to `out`. Call [`finish`](Self::finish) to
-    /// flush remaining carry-over and obtain per-rule statistics.
+    /// of a match straddling the chunk boundary — never more than the
+    /// engine's max match window. Only bytes provably match-free are
+    /// flushed to `out`. A PEM private-key block whose END marker has not
+    /// arrived yet is hashed incrementally by the PEM state machine instead
+    /// of being retained. Call [`finish`](Self::finish) to flush remaining
+    /// carry-over and obtain per-rule statistics.
     pub fn push(&mut self, chunk: &[u8], out: &mut impl io::Write) -> io::Result<()> {
         self.bytes_processed += chunk.len() as u64;
 
-        // If inside a PEM block, route data to the PEM processor.
         if self.pem_state.is_in_block() {
-            return self.push_pem(chunk, out);
+            // Inside a PEM block: body bytes go straight to the incremental
+            // state machine. On close, unread bytes land in carry_over.
+            self.feed_pem(chunk, out)?;
+        } else {
+            self.carry_over.extend_from_slice(chunk);
         }
 
-        self.carry_over.extend_from_slice(chunk);
-        self.scan_and_emit(false, out)
+        // Scan until no new streaming PEM entry appears. Each entry hands
+        // the retained body to the state machine; a close (END or bail-out)
+        // puts unread bytes back into carry_over for the next iteration.
+        // Iterative, not recursive: a single large push can contain many
+        // oversized blocks.
+        while !self.pem_state.is_in_block() && !self.carry_over.is_empty() {
+            match self.scan_and_emit(false, out)? {
+                None => break,
+                Some((_, key_type_idx)) => {
+                    // scan_and_emit emitted through the BEGIN line and
+                    // drained carry_over to exactly the body so far.
+                    let body = std::mem::take(&mut self.carry_over);
+                    self.pem_state = pem::PemState::InBlock(Box::new(pem::PemBlockData {
+                        hasher: blake3::Hasher::new_keyed(&self.engine.digest_key),
+                        body_bytes: 0,
+                        end_marker: pem::end_marker_for(key_type_idx),
+                        pem_carry: Vec::new(),
+                    }));
+                    self.feed_pem(&body, out)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Flush carry-over, close open states, return per-rule statistics.
     ///
     /// Consumes the session — no further pushes are possible after this call.
     pub fn finish(mut self, out: &mut impl io::Write) -> io::Result<Stats> {
-        // If a PEM block is still open, finalize it (bail-out / stream end).
+        // An open PEM block at stream end: write the tag for whatever body
+        // was accumulated (truncated-bail-out semantics, matching the
+        // whole-buffer path). carry_over is empty while InBlock — the body
+        // was consumed by the state machine — so the final scan below
+        // cannot double-process the block.
         if self.pem_state.is_in_block() {
-            pem::finish_pem(&mut self.pem_state, &self.engine.digest_key, out)?;
+            pem::finish_pem(&mut self.pem_state, out)?;
             *self
                 .matches
                 .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
                 .or_insert(0) += 1;
         }
 
-        self.scan_and_emit(true, out)?;
+        let entry = self.scan_and_emit(true, out)?;
+        debug_assert!(entry.is_none(), "final flush never enters streaming PEM");
         debug_assert!(self.carry_over.is_empty(), "finish must drain carry-over");
         Ok(Stats {
             bytes_processed: self.bytes_processed,
@@ -188,35 +210,49 @@ impl Session<'_> {
         })
     }
 
-    /// Route data through the PEM state machine. If the PEM block closes
-    /// (END found or bail-out), push the remainder back through normal
-    /// processing.
-    fn push_pem(&mut self, data: &[u8], out: &mut impl io::Write) -> io::Result<()> {
-        match pem::process_pem_body(&mut self.pem_state, data, &self.engine.digest_key, out)? {
-            pem::PemBodyResult::Continuing => Ok(()),
-            pem::PemBodyResult::Closed { remainder_start }
-            | pem::PemBodyResult::BailedOut { remainder_start } => {
+    /// Feed data to the incremental PEM state machine (requires `InBlock`).
+    /// On close (END found or bail-out), bytes past the redacted body are
+    /// put back into carry_over for normal scanning.
+    fn feed_pem(&mut self, data: &[u8], out: &mut impl io::Write) -> io::Result<()> {
+        match pem::process_pem_body(&mut self.pem_state, data, out)? {
+            pem::PemBodyResult::Continuing => {}
+            pem::PemBodyResult::Closed { remainder_start } => {
                 *self
                     .matches
                     .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
                     .or_insert(0) += 1;
-                // Remainder goes back through normal processing.
                 if remainder_start < data.len() {
                     self.carry_over.extend_from_slice(&data[remainder_start..]);
-                    self.scan_and_emit(false, out)?;
                 }
-                Ok(())
+            }
+            pem::PemBodyResult::BailedOut { remainder } => {
+                *self
+                    .matches
+                    .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
+                    .or_insert(0) += 1;
+                self.carry_over.extend_from_slice(&remainder);
             }
         }
+        Ok(())
     }
 
     /// The shared scan→confirm→merge→emit pipeline used by both `push` and
     /// `finish`. When `is_final` is true every byte is flushed (no carry-over
     /// retained); otherwise only the provably match-free prefix is emitted.
-    fn scan_and_emit(&mut self, is_final: bool, out: &mut impl io::Write) -> io::Result<()> {
+    ///
+    /// Returns `Some((body_start, key_type_idx))` when a private-key BEGIN is
+    /// confirmed whose END marker is not yet in the buffer (streaming,
+    /// non-final only): the BEGIN line has been emitted, carry_over has been
+    /// drained to exactly the body so far, and the caller must enter the PEM
+    /// state machine with those bytes.
+    fn scan_and_emit(
+        &mut self,
+        is_final: bool,
+        out: &mut impl io::Write,
+    ) -> io::Result<Option<(usize, usize)>> {
         let combined_len = self.carry_over.len();
         if combined_len == 0 {
-            return Ok(());
+            return Ok(None);
         }
 
         // 1. Prefilter — find all anchor candidates in the combined buffer.
@@ -228,16 +264,18 @@ impl Session<'_> {
         // 2. Find complete PEM blocks in the buffer (BEGIN + END both present).
         //    Their body spans are added to the regular match pipeline so that
         //    overlap merge handles PEM and regular matches uniformly — matching
-        //    the reference oracle's behavior. Only if BEGIN is confirmed but
-        //    END is absent (streaming) do we enter the PEM state machine.
+        //    the reference oracle's behavior. A confirmed BEGIN without END
+        //    (streaming, non-final) becomes the returned entry instead.
         self.raw.clear();
         let pem_window = pem::pem_confirm_window();
         let mut pem_body_regions: Vec<(usize, usize)> = Vec::new();
-        // Full PEM block extents [anchor_start, end_line_end) — carry_start
-        // must not split these.
+        // PEM anchor→match extents [anchor_start, match_end) — carry_start
+        // must not split these: a PEM match starts at the body, not at the
+        // anchor, so retaining from the match start would lose the anchor.
+        // Ending at match_end (not the END line) bounds the hold by
+        // PEM_BAIL_OUT even for oversized bodies.
         let mut pem_block_extents: Vec<(usize, usize)> = Vec::new();
-        // First PEM BEGIN without END in the buffer (streaming).
-        let mut pem_incomplete_anchor: Option<usize> = None;
+        let mut pem_entry: Option<(usize, usize)> = None;
 
         {
             let mut pem_scan_pos = 0;
@@ -260,26 +298,28 @@ impl Session<'_> {
                         .position(|w| w == end_marker.as_slice())
                     {
                         let body_end = body_start + end_offset;
-                        let end_line_end = body_end + end_marker.len();
                         let body_len = body_end - body_start;
-                        if body_len <= pem::PEM_BAIL_OUT {
-                            self.raw.push(RawMatch {
-                                start: body_start,
-                                end: body_end,
-                                rule: self.engine.pem_rule_idx,
-                            });
-                            pem_body_regions.push((body_start, body_end));
+                        // Bail-out truncation: redact at most PEM_BAIL_OUT
+                        // bytes of the body. Everything past the truncation
+                        // point is clean text — regular rules and nested
+                        // BEGINs apply from there, matching the oracle's
+                        // `pos = bail_end` resumption.
+                        let match_end = (body_start + pem::PEM_BAIL_OUT).min(body_end);
+                        self.raw.push(RawMatch {
+                            start: body_start,
+                            end: match_end,
+                            rule: self.engine.pem_rule_idx,
+                        });
+                        pem_body_regions.push((body_start, match_end));
+                        pem_block_extents.push((cand.start, match_end));
+                        // Resume PEM scanning past the END line for full
+                        // blocks, at the truncation point for oversized
+                        // bodies (the tail is re-scanned).
+                        pem_scan_pos = if body_len <= pem::PEM_BAIL_OUT {
+                            body_end + end_marker.len()
                         } else {
-                            let bail_end = body_start + pem::PEM_BAIL_OUT;
-                            self.raw.push(RawMatch {
-                                start: body_start,
-                                end: bail_end,
-                                rule: self.engine.pem_rule_idx,
-                            });
-                            pem_body_regions.push((body_start, bail_end));
-                        }
-                        pem_block_extents.push((cand.start, end_line_end));
-                        pem_scan_pos = end_line_end;
+                            match_end
+                        };
                     } else if is_final {
                         // No END in buffer and this is the final flush —
                         // bail-out: redact the body from body_start to the
@@ -293,18 +333,26 @@ impl Session<'_> {
                         pem_body_regions.push((body_start, bail_end));
                         pem_block_extents.push((cand.start, bail_end));
                         pem_scan_pos = bail_end;
-                    } else if pem_incomplete_anchor.is_none() {
-                        // No END in buffer — hold the anchor in carry-over.
-                        pem_incomplete_anchor = Some(cand.start);
+                    } else {
+                        // Streaming: BEGIN confirmed, END not yet seen.
+                        // Emit the BEGIN line and hand the body to the
+                        // caller for the incremental PEM state machine.
+                        pem_entry = Some((body_start, pm.key_type_idx));
                         break;
                     }
                 }
             }
         }
 
-        // 3. Confirm resolvable REGULAR candidates, skipping PEM body regions.
+        // 3. Confirm resolvable REGULAR candidates, skipping PEM body regions
+        //    and the body of a streaming entry (it is hashed, not scanned).
         for cand in &self.candidates {
             if cand.rule == self.engine.pem_rule_idx {
+                continue;
+            }
+            if let Some((body_start, _)) = pem_entry
+                && cand.start >= body_start
+            {
                 continue;
             }
             // Skip candidates whose START is inside a PEM body region.
@@ -330,52 +378,84 @@ impl Session<'_> {
         self.merged.clear();
         overlap::merge(&mut self.raw, &mut self.merged);
 
-        // 5. Compute carry_start — the point beyond which bytes are retained
-        //    for the next push. Conservative: always retain max_window bytes
-        //    so every match window is fully available next time.
-        let mut carry_start = if is_final {
+        // 5. Compute the emission boundary — the point up to which confirmed
+        //    matches are provably complete. Conservative: the last max_window
+        //    bytes may still hide candidates whose windows are incomplete.
+        let mut emit_start = if is_final {
             combined_len
         } else {
             combined_len.saturating_sub(self.engine.max_window)
         };
 
-        // Hold carry_start before any incomplete PEM anchor so the full
-        // block accumulates in carry_over until END arrives. On finish,
-        // everything flushes — an incomplete PEM is treated as bail-out
-        // by the whole-buffer scan (no END found ⇒ no PEM match).
-        if !is_final && let Some(anchor_start) = pem_incomplete_anchor {
-            carry_start = carry_start.min(anchor_start);
-        }
-
-        // Ensure carry_start doesn't split a complete PEM block: the
-        // BEGIN marker and END marker must be emitted together with the
-        // body tag. If carry_start falls inside a PEM block extent,
-        // pull it back to the block's anchor.
+        // Ensure emit_start doesn't split a complete PEM block: the anchor
+        // must stay in the carry so the block can be re-confirmed next push.
+        // If emit_start falls inside a block extent, pull it back to the
+        // block's anchor.
         for &(block_start, block_end) in &pem_block_extents {
-            if carry_start > block_start && carry_start < block_end {
-                carry_start = block_start;
+            if emit_start > block_start && emit_start < block_end {
+                emit_start = block_start;
             }
         }
 
-        // 5b. Adjust carry_start so no confirmed match spans the boundary.
+        // Adjust emit_start so no confirmed match spans the boundary: a
+        // straddling match is retained and re-confirmed next push, by which
+        // time any overlapping candidates (possibly not yet resolvable now)
+        // will have been confirmed too.
         if !is_final {
             for m in self.merged.iter().rev() {
-                if m.start >= carry_start {
+                if m.start >= emit_start {
                     continue;
                 }
-                if m.end > carry_start {
-                    carry_start = m.start;
+                if m.end > emit_start {
+                    emit_start = m.start;
                 } else {
                     break;
                 }
             }
         }
 
-        // 6. Emit matches (regular + PEM body spans) and clean gaps.
+        // 6. Decide the flush point. A streaming PEM entry flushes through
+        //    the BEGIN line, so every candidate before it must be
+        //    resolvable NOW — an unresolvable candidate's bytes would be
+        //    flushed as clean text and its match lost. Conversely, when all
+        //    candidates before body_start are resolvable, every match
+        //    before body_start is final (its overlapping candidates have
+        //    been confirmed or rejected) and is emitted here. Otherwise the
+        //    entry is deferred and re-attempted next push.
+        let mut entry = None;
+        let carry_start = match pem_entry {
+            Some((body_start, key_type_idx)) => {
+                let blocked = self.candidates.iter().any(|c| {
+                    if c.start >= body_start {
+                        return false;
+                    }
+                    let window = if c.rule == self.engine.pem_rule_idx {
+                        pem_window
+                    } else {
+                        self.engine.rules[c.rule].window
+                    };
+                    c.start + window > combined_len
+                });
+                if blocked {
+                    emit_start
+                } else {
+                    entry = Some((body_start, key_type_idx));
+                    body_start
+                }
+            }
+            None => emit_start,
+        };
+
+        // 7. Emit matches (regular + PEM body spans) and clean gaps.
         let mut pos = 0;
         for m in &self.merged {
             if m.start >= carry_start {
-                break;
+                // Final flush emits a zero-length PEM span that starts
+                // exactly at EOF (BEGIN line with no body); non-final defers
+                // everything from carry_start onward.
+                if !(is_final && m.start == carry_start && m.end == carry_start) {
+                    break;
+                }
             }
             out.write_all(&self.carry_over[pos..m.start])?;
             if m.rule == self.engine.pem_rule_idx {
@@ -398,13 +478,13 @@ impl Session<'_> {
             pos = m.end;
         }
 
-        // 7. Flush clean bytes up to carry_start, retain the rest.
+        // 8. Flush clean bytes up to carry_start, retain the rest.
         if pos < carry_start {
             out.write_all(&self.carry_over[pos..carry_start])?;
         }
         self.carry_over.drain(..carry_start);
 
-        Ok(())
+        Ok(entry)
     }
 
     /// Return the current carry-over length (test-support only).
@@ -435,12 +515,11 @@ mod tests {
     }
 
     #[test]
-    fn engine_max_window_and_anchor_len() {
-        // Pinned to docs/02-rules.md spec. W_max = github-token (11 + 255 = 266),
-        // max_anchor_len = "github_pat_" (11 bytes).
+    fn engine_max_window() {
+        // Pinned to docs/02-rules.md spec. W_max = github-token (11 + 255 = 266).
+        // This is also the hard bound on carry-over after every push.
         let engine = test_engine();
         assert_eq!(engine.max_window, 266);
-        assert_eq!(engine.max_anchor_len, 11);
     }
 
     #[test]
@@ -631,21 +710,143 @@ mod tests {
 
     #[test]
     fn carry_over_bounded_by_max_window() {
-        // With an anchor near the end, carry-over can grow up to the rule's
-        // window but never beyond max_window.
+        // An unresolvable candidate near the buffer end (the "npm_" anchor
+        // whose window extends past the last byte) must be retained for the
+        // next push. The conservative flush keeps the last max_window bytes,
+        // so the carry can reach max_window but never exceed it.
         let engine = test_engine();
         let mut session = engine.session();
         let mut output = Vec::new();
-        // Place a short anchor "npm_" right at the end of a larger buffer.
         let mut input = vec![b'x'; 500];
         input.extend_from_slice(b"npm_");
         session.push(&input, &mut output).unwrap();
-        // Carry-over starts from the "npm_" anchor position (500) since
-        // its window (40) extends past the buffer end (504).
-        // But max_anchor_len - 1 = 10 would keep from pos 494.
-        // min(500, 494) = 494. The anchor is at 500, so first_unresolvable
-        // is 500. straddle_zone is 494. carry_start = min(494, 500) = 494.
         assert!(session.carry_over_len() <= engine.max_window);
+        // The retained bytes include the anchor: completing the token in
+        // the next push must produce a match.
+        session
+            .push(b"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", &mut output)
+            .unwrap();
+        let stats = session.finish(&mut output).unwrap();
+        assert_eq!(stats.matches[&RuleId::new("npm-token")], 1);
+    }
+
+    #[test]
+    fn unterminated_pem_begin_carry_stays_bounded() {
+        // H2 regression: a confirmed PEM BEGIN whose END never arrives must
+        // not accumulate the stream in carry-over. The body is hashed
+        // incrementally by the PEM state machine; carry stays at 0 while
+        // InBlock and <= max_window otherwise. Output must be identical to
+        // the whole-buffer path (bail-out at 16 KiB).
+        let engine = test_engine();
+        let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+        input.extend_from_slice(&vec![b'A'; 40 * 64 * 1024]);
+        let (whole, whole_stats) = push_all(&engine, &input);
+        assert_eq!(whole_stats.matches[&RuleId::new("pem-private-key")], 1);
+
+        let mut session = engine.session();
+        let mut output = Vec::new();
+        for chunk in input.chunks(64 * 1024) {
+            session.push(chunk, &mut output).unwrap();
+            assert!(
+                session.carry_over_len() <= engine.max_window,
+                "carry-over must stay bounded while a PEM block is open"
+            );
+        }
+        let stats = session.finish(&mut output).unwrap();
+        assert_eq!(output, whole, "chunked must equal whole-buffer");
+        assert_eq!(stats.matches, whole_stats.matches);
+        assert!(String::from_utf8_lossy(&output).contains("[CLOAK:pem-private-key:"));
+    }
+
+    #[test]
+    fn oversized_pem_streaming_equals_whole_buffer() {
+        // M4 regression: a body larger than PEM_BAIL_OUT must produce
+        // byte-identical output (including the truncated-bail-out digest)
+        // whether it arrives in one push or many.
+        let engine = test_engine();
+        let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+        input.extend_from_slice(&vec![b'A'; pem::PEM_BAIL_OUT + 2000]);
+        input.extend_from_slice(b"\n-----END RSA PRIVATE KEY-----\ntail");
+        let (whole, whole_stats) = push_all(&engine, &input);
+        for chunk_size in [1, 7, 100, 4096, 16385] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert_eq!(
+                out, whole,
+                "chunk-size={chunk_size} streaming diverges from whole-buffer"
+            );
+            assert_eq!(
+                stats.matches, whole_stats.matches,
+                "stats diverge at {chunk_size}"
+            );
+        }
+    }
+
+    #[test]
+    fn finish_with_open_pem_block_emits_single_tag() {
+        // M3 regression: an open block at stream end produces exactly one
+        // tag and one match count — identical to the whole-buffer path.
+        let engine = test_engine();
+        let input = b"-----BEGIN EC PRIVATE KEY-----\nPARTIALBODYDATA";
+        let (whole, whole_stats) = push_all(&engine, input);
+        assert_eq!(whole_stats.matches[&RuleId::new("pem-private-key")], 1);
+
+        let mut session = engine.session();
+        let mut out = Vec::new();
+        for chunk in input.chunks(3) {
+            session.push(chunk, &mut out).unwrap();
+        }
+        let stats = session.finish(&mut out).unwrap();
+        assert_eq!(out, whole, "chunked open-block finish diverges");
+        assert_eq!(stats.matches, whole_stats.matches);
+        assert_eq!(
+            String::from_utf8_lossy(&out)
+                .matches("[CLOAK:pem-private-key:")
+                .count(),
+            1,
+            "exactly one tag expected"
+        );
+        assert!(
+            &out.windows(15).all(|w| w != b"PARTIALBODYDATA"),
+            "body must not leak"
+        );
+    }
+
+    #[test]
+    fn multiple_oversized_blocks_in_one_push() {
+        // The push loop is iterative: several unterminated oversized blocks
+        // in a single push each bail out independently.
+        let engine = test_engine();
+        let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+        input.extend_from_slice(&vec![b'A'; pem::PEM_BAIL_OUT + 100]);
+        input.extend_from_slice(b"\n-----BEGIN EC PRIVATE KEY-----\n");
+        input.extend_from_slice(&vec![b'B'; pem::PEM_BAIL_OUT + 100]);
+        let mut session = engine.session();
+        let mut out = Vec::new();
+        session.push(&input, &mut out).unwrap();
+        assert!(
+            session.carry_over_len() <= engine.max_window,
+            "carry must stay bounded after bail-outs"
+        );
+        let stats = session.finish(&mut out).unwrap();
+        assert_eq!(stats.matches[&RuleId::new("pem-private-key")], 2);
+        assert_eq!(
+            String::from_utf8_lossy(&out)
+                .matches("[CLOAK:pem-private-key:")
+                .count(),
+            2
+        );
+        // Both BEGIN lines stay visible (the second one arrives in the
+        // bail-out remainder of the first block).
+        assert!(out.starts_with(b"-----BEGIN RSA PRIVATE KEY-----"));
+        assert!(
+            out.windows(30)
+                .any(|w| w == b"-----BEGIN EC PRIVATE KEY-----")
+        );
     }
 
     #[test]

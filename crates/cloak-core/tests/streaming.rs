@@ -4,7 +4,10 @@
 //! 1. Chunk-boundary: any chunking ≡ whole-buffer output
 //! 2. Passthrough: no anchors ⇒ byte-identical output
 //! 3. Idempotence: redact(redact(S)) == redact(S)
-//! 4. Bounded memory: carry-over ≤ max_window + max PEM block size
+//! 4. Bounded memory: carry-over ≤ max_window + PEM_BAIL_OUT + BEGIN line
+//!    (the engine's actual guarantee: regular carry is bounded by
+//!    max_window; a PEM block held for streaming entry or bail-out
+//!    truncation adds at most one PEM body)
 
 use std::sync::Once;
 
@@ -68,8 +71,16 @@ fn planted_token() -> BoxedStrategy<Vec<u8>> {
 }
 
 fn planted_pem() -> BoxedStrategy<Vec<u8>> {
-    Just(b"-----BEGIN RSA PRIVATE KEY-----\nTESTBODYDATA\n-----END RSA PRIVATE KEY-----".to_vec())
-        .boxed()
+    prop_oneof![
+        Just(
+            b"-----BEGIN RSA PRIVATE KEY-----\nTESTBODYDATA\n-----END RSA PRIVATE KEY-----"
+                .to_vec()
+        ),
+        // Unterminated BEGIN: no END marker — exercises the streaming
+        // entry + bail-out path (the H2 regression shape).
+        Just(b"-----BEGIN RSA PRIVATE KEY-----\nUNTERMINATED".to_vec()),
+    ]
+    .boxed()
 }
 
 fn corpus_strategy() -> BoxedStrategy<Vec<u8>> {
@@ -143,19 +154,19 @@ proptest! {
         );
     }
 
-    /// Bounded memory: carry-over never exceeds a reasonable bound during
-    /// streaming. The bound depends on max_window plus the largest PEM
-    /// block that can appear in the corpus.
+    /// Bounded memory: carry-over never exceeds the engine's guarantee
+    /// during streaming. Regular carry is bounded by max_window (266);
+    /// a PEM block held while awaiting its END (streaming entry, bail-out
+    /// truncation, or entry deferral) adds at most one PEM body
+    /// (PEM_BAIL_OUT) plus the BEGIN line.
     #[test]
     fn bounded_memory(corpus in corpus_strategy(), chunks in chunking_strategy(32)) {
         let engine = test_engine();
         let mut session = engine.session();
         let mut out = Vec::new();
         let mut pos = 0;
-        // The max PEM body in our corpus generator is ~73 bytes
-        // ("TESTBODYDATA" = 13, plus markers = ~73). The total PEM block
-        // is ~140 bytes. Carry-over can grow to max_window + PEM block.
-        let bound = 266 /* max_window */ + 200 /* PEM block + margin */;
+        let max_window = 266; // github-token: 11 + 255 (docs/02-rules.md)
+        let bound = max_window + 16_384 + 37; // + PEM_BAIL_OUT + max BEGIN line
         for &size in &chunks {
             let end = (pos + size).min(corpus.len());
             session.push(&corpus[pos..end], &mut out).unwrap();

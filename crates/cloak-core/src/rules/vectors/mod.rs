@@ -131,7 +131,14 @@ mod tests {
         for v in all_vectors() {
             let mut prev_end = 0;
             for span in v.spans {
-                assert!(span.start < span.end, "{}: empty span", v.name);
+                // PEM bodies can be zero-length (BEGIN line immediately
+                // followed by END, or at EOF); every other rule must have
+                // a non-empty span.
+                assert!(
+                    span.start < span.end || span.rule == crate::engine::pem::PEM_RULE_ID,
+                    "{}: empty span",
+                    v.name
+                );
                 assert!(
                     span.start >= prev_end,
                     "{}: spans overlap or unsorted",

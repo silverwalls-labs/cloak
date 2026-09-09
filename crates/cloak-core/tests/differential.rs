@@ -221,6 +221,92 @@ fn streaming_equals_whole_buffer_all_sizes() {
     }
 }
 
+// ---------- S3 PEM streaming bail-out differentials ----------
+
+/// A PEM body larger than PEM_BAIL_OUT must redact identically (tag over
+/// exactly the first 16 KiB, tail as clean text) at every chunk size —
+/// this pins the streaming bail-out digest to the whole-buffer/oracle one.
+#[test]
+fn oversized_pem_bailout_all_chunk_sizes() {
+    let (engine, key) = engine_and_key();
+    let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+    input.extend_from_slice(&vec![b'A'; 20_000]);
+    input.extend_from_slice(b"\n-----END RSA PRIVATE KEY-----\ntail");
+    let (reference, reference_stats) = cloak_core::reference::redact(&input, &key);
+    for sz in [1, 7, 100, 4096, 16_385, input.len()] {
+        let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, sz);
+        assert_eq!(
+            chunked, reference,
+            "chunk-size={sz} bail-out streaming ≢ reference"
+        );
+        assert_eq!(
+            chunked_stats.matches, reference_stats.matches,
+            "bail-out stats diverge at chunk-size={sz}"
+        );
+    }
+}
+
+/// An unterminated BEGIN (END never arrives) must match the oracle's
+/// truncated-bail-out output at every chunk size, including at EOF with
+/// an empty body.
+#[test]
+fn unterminated_pem_all_chunk_sizes() {
+    let (engine, key) = engine_and_key();
+    let cases: Vec<Vec<u8>> = vec![
+        {
+            // Body larger than the bail-out budget, no END.
+            let mut v = b"-----BEGIN EC PRIVATE KEY-----\n".to_vec();
+            v.extend_from_slice(&vec![b'B'; 17_000]);
+            v
+        },
+        // Small body, no END.
+        b"-----BEGIN RSA PRIVATE KEY-----\nPARTIAL".to_vec(),
+        // BEGIN line exactly at EOF — zero-length body.
+        b"-----BEGIN RSA PRIVATE KEY-----".to_vec(),
+    ];
+    for input in &cases {
+        let (reference, reference_stats) = cloak_core::reference::redact(input, &key);
+        for sz in [1, 3, 37, 512, input.len()] {
+            let (chunked, chunked_stats) = engine_redact_chunked(&engine, input, sz);
+            assert_eq!(
+                chunked,
+                reference,
+                "chunk-size={sz} unterminated-BEGIN streaming ≢ reference (len={})",
+                input.len()
+            );
+            assert_eq!(chunked_stats.matches, reference_stats.matches);
+        }
+    }
+}
+
+/// A nested BEGIN inside an oversized body's clean tail must be detected
+/// in streaming too — the engine resumes scanning at the bail-out point,
+/// exactly like the oracle (`pos = bail_end`).
+#[test]
+fn nested_begin_in_bailout_tail_streaming() {
+    let (engine, key) = engine_and_key();
+    let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+    input.extend_from_slice(&vec![b'A'; 20_000]);
+    input.extend_from_slice(
+        b"\n-----BEGIN EC PRIVATE KEY-----\nECBODY\n-----END EC PRIVATE KEY-----",
+    );
+    let (reference, reference_stats) = cloak_core::reference::redact(&input, &key);
+    assert_eq!(
+        reference_stats
+            .matches
+            .get(&cloak_core::RuleId::new("pem-private-key")),
+        Some(&2)
+    );
+    for sz in [1, 7, 1000, 16_385] {
+        let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, sz);
+        assert_eq!(
+            chunked, reference,
+            "chunk-size={sz} nested-BEGIN bail-out streaming ≢ reference"
+        );
+        assert_eq!(chunked_stats.matches, reference_stats.matches);
+    }
+}
+
 #[test]
 fn redaction_is_idempotent() {
     // Tags contain no anchors, so redacting redacted output is the identity.

@@ -7,7 +7,16 @@ use crate::types::{Digest, RuleId};
 /// Returns the first 2 bytes (16 bits = 4 hex chars) of the keyed hash.
 /// Same bytes + same key → same digest; different key → different digest.
 pub fn compute_digest(matched_bytes: &[u8], key: &[u8; 32]) -> Digest {
-    let hash = blake3::keyed_hash(key, matched_bytes);
+    let mut hasher = blake3::Hasher::new_keyed(key);
+    hasher.update(matched_bytes);
+    digest_from_hasher(&hasher)
+}
+
+/// Digest from a completed keyed hasher — single source of truth for the
+/// truncation, shared by the one-shot and incremental (streaming PEM) paths.
+/// The hasher must have been keyed with the same digest key.
+pub fn digest_from_hasher(hasher: &blake3::Hasher) -> Digest {
+    let hash = hasher.finalize();
     let bytes = hash.as_bytes();
     Digest::new([bytes[0], bytes[1]])
 }
