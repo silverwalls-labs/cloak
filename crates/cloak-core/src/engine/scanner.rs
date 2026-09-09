@@ -36,7 +36,14 @@ pub(crate) struct AhoCorasickScanner {
 }
 
 impl AhoCorasickScanner {
-    pub(crate) fn new(catalog: &[RuleSpec]) -> Result<Self, aho_corasick::BuildError> {
+    /// Build the prefilter from catalog anchors plus optional extra anchors
+    /// (e.g. the PEM `-----BEGIN ` anchor). Extra anchors use the provided
+    /// `(anchor_bytes, rule_index)` tuples — the rule index is a
+    /// pseudo-index outside the catalog range.
+    pub(crate) fn new(
+        catalog: &[RuleSpec],
+        extra_anchors: &[(&[u8], usize)],
+    ) -> Result<Self, aho_corasick::BuildError> {
         let mut literals: Vec<&[u8]> = Vec::new();
         let mut patterns = Vec::new();
         for (rule, spec) in catalog.iter().enumerate() {
@@ -44,6 +51,10 @@ impl AhoCorasickScanner {
                 literals.push(anchor);
                 patterns.push((rule, anchor.len()));
             }
+        }
+        for &(anchor, rule_idx) in extra_anchors {
+            literals.push(anchor);
+            patterns.push((rule_idx, anchor.len()));
         }
         // MatchKind::Standard is required by find_overlapping_iter (it panics
         // under the leftmost kinds) — set explicitly, don't rely on defaults.
@@ -84,12 +95,18 @@ pub(crate) struct ScalarScanner {
 
 #[allow(dead_code)] // bench baseline (S7); exercised by unit tests only in S2
 impl ScalarScanner {
-    pub(crate) fn new(catalog: &'static [RuleSpec]) -> Self {
+    pub(crate) fn new(
+        catalog: &'static [RuleSpec],
+        extra_anchors: &[(&'static [u8], usize)],
+    ) -> Self {
         let mut anchors = Vec::new();
         for (rule, spec) in catalog.iter().enumerate() {
             for anchor in spec.anchors {
                 anchors.push((*anchor, rule));
             }
+        }
+        for &(anchor, rule_idx) in extra_anchors {
+            anchors.push((anchor, rule_idx));
         }
         Self { anchors }
     }
@@ -117,7 +134,7 @@ mod tests {
     use crate::rules::{CATALOG, vectors};
 
     fn ac_scanner() -> AhoCorasickScanner {
-        AhoCorasickScanner::new(CATALOG).expect("catalog anchors must build")
+        AhoCorasickScanner::new(CATALOG, &[]).expect("catalog anchors must build")
     }
 
     fn scan_sorted(scanner: &impl Scanner, haystack: &[u8]) -> Vec<Candidate> {
@@ -219,7 +236,7 @@ mod tests {
         // candidate set (sorted; both are duplicate-free) on every vector
         // input plus adversarial extras.
         let ac = ac_scanner();
-        let scalar = ScalarScanner::new(CATALOG);
+        let scalar = ScalarScanner::new(CATALOG, &[]);
         let mut inputs: Vec<&[u8]> = vectors::all_vectors().iter().map(|v| v.input).collect();
         inputs.push(b"ghp_ gho_ ghs_ ghu_ ghr_ github_pat_ glpat- glrt- gldt- npm_");
         inputs.push(b"\x00\xff\x80ghp_\x01npm_\xfe");

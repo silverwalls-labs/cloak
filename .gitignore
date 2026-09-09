@@ -29,3 +29,6 @@ target
 .copilot/
 .codeium/
 .tabnine/
+
+# asciinema terminal recordings
+*.cast

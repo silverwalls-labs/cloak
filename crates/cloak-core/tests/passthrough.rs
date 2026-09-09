@@ -92,6 +92,42 @@ fn bytes_processed_accuracy() {
     assert_eq!(stats.bytes_processed, 6);
 }
 
+// ── S3: carry-over and streaming passthrough ─────────────────────────
+
+#[test]
+fn large_buffer_chunked_passthrough() {
+    // 256 KiB pushed in 64 KiB chunks — same as CLI streaming reads.
+    // No anchors, so every byte must pass through.
+    let engine = engine();
+    let mut session = engine.session();
+    let line = b"The quick brown fox jumps over the lazy dog.\n";
+    let input: Vec<u8> = line.iter().cycle().take(256 * 1024).copied().collect();
+    let mut output = Vec::new();
+    for chunk in input.chunks(64 * 1024) {
+        session.push(chunk, &mut output).unwrap();
+    }
+    let stats = session.finish(&mut output).unwrap();
+    assert_eq!(output, input, "chunked passthrough must be byte-identical");
+    assert_eq!(stats.bytes_processed, input.len() as u64);
+    assert_eq!(stats.total_matches(), 0);
+}
+
+#[test]
+fn passthrough_1byte_chunks() {
+    // Single-byte pushes of clean data — exercises the carry-over at every
+    // boundary without any anchor hits.
+    let engine = engine();
+    let mut session = engine.session();
+    let input = b"no anchors here, just plain text with numbers 42 and symbols #$%!";
+    let mut output = Vec::new();
+    for &byte in input.as_slice() {
+        session.push(&[byte], &mut output).unwrap();
+    }
+    let stats = session.finish(&mut output).unwrap();
+    assert_eq!(output.as_slice(), input.as_slice());
+    assert_eq!(stats.total_matches(), 0);
+}
+
 // ── Redaction writer (public API) ──────────────────────────────────
 
 #[test]

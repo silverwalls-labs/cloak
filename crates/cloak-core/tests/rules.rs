@@ -112,3 +112,103 @@ fn deterministic_key_is_stable_across_engines() {
     let (out_b, _) = redact_one_push(&engine_b, token);
     assert_eq!(out_a, out_b);
 }
+
+// ── S3: PEM through the public API ───────────────────────────────────
+
+fn redact_chunked(
+    engine: &Engine,
+    input: &[u8],
+    chunk_size: usize,
+) -> (Vec<u8>, cloak_core::Stats) {
+    let mut session = engine.session();
+    let mut out = Vec::new();
+    for chunk in input.chunks(chunk_size) {
+        session.push(chunk, &mut out).unwrap();
+    }
+    let stats = session.finish(&mut out).unwrap();
+    (out, stats)
+}
+
+#[test]
+fn pem_vectors_chunked_match_whole_buffer() {
+    // Every PEM vector: 7-byte chunks must produce identical output to
+    // single whole-buffer push — tests the carry-over for PEM blocks.
+    let (engine, key) = engine_and_key();
+    for v in cloak_core::vectors::all_vectors() {
+        if !v.name.starts_with("pem-") {
+            continue;
+        }
+        let expected = cloak_core::vectors::expected_output(v, &key);
+        let (whole, _) = redact_one_push(&engine, v.input);
+        let (chunked, _) = redact_chunked(&engine, v.input, 7);
+        assert_eq!(whole, expected, "whole-buffer PEM mismatch on '{}'", v.name);
+        assert_eq!(chunked, expected, "chunked PEM mismatch on '{}'", v.name);
+    }
+}
+
+#[test]
+fn mixed_secrets_and_pem_in_one_stream() {
+    // Tokens and PEM interleaved in one stream — all must be detected.
+    let (engine, _) = engine_and_key();
+    let mut input = b"log: npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 leaked\n".to_vec();
+    input.extend_from_slice(
+        b"-----BEGIN EC PRIVATE KEY-----\nECKEYDATA\n-----END EC PRIVATE KEY-----\n",
+    );
+    input.extend_from_slice(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n");
+
+    let (out, stats) = redact_one_push(&engine, &input);
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(
+        stats
+            .matches
+            .contains_key(&cloak_core::RuleId::new("npm-token"))
+    );
+    assert!(
+        stats
+            .matches
+            .contains_key(&cloak_core::RuleId::new("pem-private-key"))
+    );
+    assert!(
+        stats
+            .matches
+            .contains_key(&cloak_core::RuleId::new("github-token"))
+    );
+    assert_eq!(stats.total_matches(), 3);
+
+    // No secrets leaked.
+    assert!(!text.contains("npm_Ab"), "npm token leaked");
+    assert!(!text.contains("ECKEYDATA"), "PEM body leaked");
+    assert!(!text.contains("ghp_Ab"), "github token leaked");
+}
+
+#[test]
+fn pem_bail_out_large_body_through_api() {
+    // PEM body exceeding PEM_BAIL_OUT (16 KiB). The bail-out path must
+    // redact the first 16 KiB. Bytes past the bail-out point may pass
+    // through (they're no longer considered PEM body).
+    let (engine, _) = engine_and_key();
+    // Use a recognizable prefix so we can verify it's redacted.
+    let mut body = b"SECRET_PREFIX_".to_vec();
+    body.extend(vec![b'A'; 20_000 - body.len()]);
+    let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+    input.extend_from_slice(&body);
+    input.push(b'\n');
+    input.extend_from_slice(b"-----END RSA PRIVATE KEY-----");
+
+    let (out, stats) = redact_one_push(&engine, &input);
+    let text = String::from_utf8_lossy(&out);
+
+    assert!(
+        stats
+            .matches
+            .contains_key(&cloak_core::RuleId::new("pem-private-key")),
+        "bail-out must still detect PEM"
+    );
+    assert!(text.contains("[CLOAK:pem-private-key:"));
+    // The prefix is in the first 16 KiB of body — must be redacted.
+    assert!(
+        !text.contains("SECRET_PREFIX_"),
+        "body prefix within bail-out window must be redacted"
+    );
+}

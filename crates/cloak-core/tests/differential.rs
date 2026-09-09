@@ -34,6 +34,20 @@ fn engine_redact(engine: &Engine, input: &[u8]) -> (Vec<u8>, cloak_core::Stats) 
     (out, stats)
 }
 
+fn engine_redact_chunked(
+    engine: &Engine,
+    input: &[u8],
+    chunk_size: usize,
+) -> (Vec<u8>, cloak_core::Stats) {
+    let mut session = engine.session();
+    let mut out = Vec::new();
+    for chunk in input.chunks(chunk_size) {
+        session.push(chunk, &mut out).unwrap();
+    }
+    let stats = session.finish(&mut out).unwrap();
+    (out, stats)
+}
+
 /// The invariant, asserted on output bytes AND stats.
 fn assert_engine_equals_reference(engine: &Engine, key: &[u8; 32], input: &[u8], label: &str) {
     let (engine_out, engine_stats) = engine_redact(engine, input);
@@ -118,6 +132,179 @@ fn anchor_fragment_soup() {
     let soup = b"ghp ghp_ gh_p _ghp npm npm_ npm_x glpat glpat- glrt gldt- github_pat \
                  github_pat_ ghx_ NPM_ GLPAT- ghp_short npm_2short gldt-19chars";
     assert_engine_equals_reference(&engine, &key, soup, "anchor-fragment soup");
+}
+
+// ---------- S3 chunked streaming differential tests ----------
+
+/// The chunk-boundary guarantee: any chunking of any corpus produces
+/// byte-identical output to the reference oracle.
+#[test]
+fn every_vector_1byte_chunks() {
+    let (engine, key) = engine_and_key();
+    for v in cloak_core::vectors::all_vectors() {
+        let (chunked, chunked_stats) = engine_redact_chunked(&engine, v.input, 1);
+        let (reference, reference_stats) = cloak_core::reference::redact(v.input, &key);
+        assert_eq!(
+            chunked, reference,
+            "1-byte streaming ≢ reference on vector '{}'",
+            v.name
+        );
+        assert_eq!(
+            chunked_stats.matches, reference_stats.matches,
+            "stats diverge on vector '{}' (1-byte)",
+            v.name
+        );
+    }
+}
+
+#[test]
+fn every_vector_various_chunk_sizes() {
+    let (engine, key) = engine_and_key();
+    let sizes = [2, 3, 5, 7, 13, 37, 64, 256];
+    for v in cloak_core::vectors::all_vectors() {
+        for &sz in &sizes {
+            let (chunked, _) = engine_redact_chunked(&engine, v.input, sz);
+            let (reference, _) = cloak_core::reference::redact(v.input, &key);
+            assert_eq!(
+                chunked, reference,
+                "chunk-size={sz} streaming ≢ reference on vector '{}'",
+                v.name
+            );
+        }
+    }
+}
+
+#[test]
+fn concatenated_corpora_1byte_chunks() {
+    let (engine, key) = engine_and_key();
+    let separators: [&[u8]; 4] = [b"\n", b" ", b"\x00\xff\x80", b""];
+    for sep in separators {
+        let mut corpus = Vec::new();
+        for v in cloak_core::vectors::all_vectors() {
+            corpus.extend_from_slice(v.input);
+            corpus.extend_from_slice(sep);
+        }
+        let (chunked, _) = engine_redact_chunked(&engine, &corpus, 1);
+        let (reference, _) = cloak_core::reference::redact(&corpus, &key);
+        assert_eq!(
+            chunked, reference,
+            "1-byte concat streaming ≢ reference (sep={sep:?})"
+        );
+    }
+}
+
+#[test]
+fn anchor_fragment_soup_1byte() {
+    let (engine, key) = engine_and_key();
+    let soup = b"ghp ghp_ gh_p _ghp npm npm_ npm_x glpat glpat- glrt gldt- github_pat \
+                 github_pat_ ghx_ NPM_ GLPAT- ghp_short npm_2short gldt-19chars";
+    let (chunked, _) = engine_redact_chunked(&engine, soup, 1);
+    let (reference, _) = cloak_core::reference::redact(soup, &key);
+    assert_eq!(chunked, reference, "1-byte soup streaming ≢ reference");
+}
+
+/// Streaming output must equal whole-buffer output for every chunk size.
+#[test]
+fn streaming_equals_whole_buffer_all_sizes() {
+    let (engine, _key) = engine_and_key();
+    let sizes = [1, 2, 3, 5, 7, 13, 37, 64, 256];
+    for v in cloak_core::vectors::all_vectors() {
+        let (whole, _) = engine_redact(&engine, v.input);
+        for &sz in &sizes {
+            let (chunked, _) = engine_redact_chunked(&engine, v.input, sz);
+            assert_eq!(
+                chunked, whole,
+                "chunk-size={sz} streaming ≢ whole-buffer on vector '{}'",
+                v.name
+            );
+        }
+    }
+}
+
+// ---------- S3 PEM streaming bail-out differentials ----------
+
+/// A PEM body larger than PEM_BAIL_OUT must redact identically (tag over
+/// exactly the first 16 KiB, tail as clean text) at every chunk size —
+/// this pins the streaming bail-out digest to the whole-buffer/oracle one.
+#[test]
+fn oversized_pem_bailout_all_chunk_sizes() {
+    let (engine, key) = engine_and_key();
+    let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+    input.extend_from_slice(&vec![b'A'; 20_000]);
+    input.extend_from_slice(b"\n-----END RSA PRIVATE KEY-----\ntail");
+    let (reference, reference_stats) = cloak_core::reference::redact(&input, &key);
+    for sz in [1, 7, 100, 4096, 16_385, input.len()] {
+        let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, sz);
+        assert_eq!(
+            chunked, reference,
+            "chunk-size={sz} bail-out streaming ≢ reference"
+        );
+        assert_eq!(
+            chunked_stats.matches, reference_stats.matches,
+            "bail-out stats diverge at chunk-size={sz}"
+        );
+    }
+}
+
+/// An unterminated BEGIN (END never arrives) must match the oracle's
+/// truncated-bail-out output at every chunk size, including at EOF with
+/// an empty body.
+#[test]
+fn unterminated_pem_all_chunk_sizes() {
+    let (engine, key) = engine_and_key();
+    let cases: Vec<Vec<u8>> = vec![
+        {
+            // Body larger than the bail-out budget, no END.
+            let mut v = b"-----BEGIN EC PRIVATE KEY-----\n".to_vec();
+            v.extend_from_slice(&vec![b'B'; 17_000]);
+            v
+        },
+        // Small body, no END.
+        b"-----BEGIN RSA PRIVATE KEY-----\nPARTIAL".to_vec(),
+        // BEGIN line exactly at EOF — zero-length body.
+        b"-----BEGIN RSA PRIVATE KEY-----".to_vec(),
+    ];
+    for input in &cases {
+        let (reference, reference_stats) = cloak_core::reference::redact(input, &key);
+        for sz in [1, 3, 37, 512, input.len()] {
+            let (chunked, chunked_stats) = engine_redact_chunked(&engine, input, sz);
+            assert_eq!(
+                chunked,
+                reference,
+                "chunk-size={sz} unterminated-BEGIN streaming ≢ reference (len={})",
+                input.len()
+            );
+            assert_eq!(chunked_stats.matches, reference_stats.matches);
+        }
+    }
+}
+
+/// A nested BEGIN inside an oversized body's clean tail must be detected
+/// in streaming too — the engine resumes scanning at the bail-out point,
+/// exactly like the oracle (`pos = bail_end`).
+#[test]
+fn nested_begin_in_bailout_tail_streaming() {
+    let (engine, key) = engine_and_key();
+    let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
+    input.extend_from_slice(&vec![b'A'; 20_000]);
+    input.extend_from_slice(
+        b"\n-----BEGIN EC PRIVATE KEY-----\nECBODY\n-----END EC PRIVATE KEY-----",
+    );
+    let (reference, reference_stats) = cloak_core::reference::redact(&input, &key);
+    assert_eq!(
+        reference_stats
+            .matches
+            .get(&cloak_core::RuleId::new("pem-private-key")),
+        Some(&2)
+    );
+    for sz in [1, 7, 1000, 16_385] {
+        let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, sz);
+        assert_eq!(
+            chunked, reference,
+            "chunk-size={sz} nested-BEGIN bail-out streaming ≢ reference"
+        );
+        assert_eq!(chunked_stats.matches, reference_stats.matches);
+    }
 }
 
 #[test]
