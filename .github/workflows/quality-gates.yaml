@@ -145,7 +145,7 @@ jobs:
 
       - name: E2E Tests
         run: |
-          cargo test -p cloak-cli --test pipe
+          cargo test -p cloak-cli --test pipe --test config_e2e
 
   fuzz:
     name: Fuzz (placeholder — S6)
@@ -283,7 +283,7 @@ jobs:
       - name: E2E Tests with Coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p cloak-cli --test pipe --lcov --output-path coverage/e2e.lcov
+          cargo llvm-cov -p cloak-cli --test pipe --test config_e2e --lcov --output-path coverage/e2e.lcov
 
       - name: Upload Coverage
         if: ${{ !cancelled() }}

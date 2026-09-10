@@ -21,10 +21,13 @@ fn engine_and_key() -> (Engine, [u8; 32]) {
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::set_var(KEY_VAR, KEY_MATERIAL) };
     });
-    let engine = Engine::new(&Config {
-        digest_key_env: Some(KEY_VAR.into()),
-    })
-    .unwrap();
+    let config = Config {
+        redaction: cloak_core::RedactionConfig {
+            digest_key: format!("env:{KEY_VAR}"),
+        },
+        ..Config::default()
+    };
+    let engine = Engine::new(&config).unwrap();
     // Must mirror config::resolve_digest_key's KDF (context string pinned by
     // the `known_vector_stability` golden in cloak-core).
     let key = blake3::derive_key("cloak digest key", KEY_MATERIAL.as_bytes());

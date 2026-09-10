@@ -1,0 +1,6 @@
+---
+source: crates/cloak-cli/tests/config_e2e.rs
+assertion_line: 280
+expression: stderr
+---
+cloak: failed to read config file: /nonexistent/cloak.toml: No such file or directory (os error 2)

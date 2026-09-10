@@ -1,10 +1,7 @@
 use cloak_core::{Config, Digest, Engine, RuleId, Stats, compute_digest, format_tag, write_tag};
 
 fn engine() -> Engine {
-    let config = Config {
-        digest_key_env: None, // ephemeral key, no env lookup
-    };
-    Engine::new(&config).unwrap()
+    Engine::new(&Config::ephemeral()).unwrap()
 }
 
 #[test]
@@ -176,10 +173,7 @@ fn default_config_constructs_engine() {
 
 #[test]
 fn explicit_ephemeral_config() {
-    let config = Config {
-        digest_key_env: None,
-    };
-    let engine = Engine::new(&config);
+    let engine = Engine::new(&Config::ephemeral());
     assert!(engine.is_ok());
 }
 

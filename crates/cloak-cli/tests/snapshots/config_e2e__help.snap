@@ -1,0 +1,17 @@
+---
+source: crates/cloak-cli/tests/config_e2e.rs
+assertion_line: 246
+expression: stdout
+---
+CLI frontend for cloak — redact secrets and PII from streams
+
+Usage: cloak [OPTIONS] [FILES]...
+
+Arguments:
+  [FILES]...  Input files. If omitted, reads stdin
+
+Options:
+      --config <CONFIG>        Path to a TOML configuration file
+      --stats-format <FORMAT>  Emit per-rule match statistics to stderr [possible values: text, json]
+  -h, --help                   Print help
+  -V, --version                Print version

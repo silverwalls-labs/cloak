@@ -45,7 +45,8 @@ pub struct Engine {
     pub(crate) digest_key: [u8; 32],
     /// Anchor prefilter over all rules + PEM (docs/01, "Matching pipeline").
     scanner: AhoCorasickScanner,
-    /// Per-rule confirmers, in catalog order (index == `Candidate::rule`).
+    /// Per-rule confirmers, in filtered catalog order
+    /// (index == `Candidate::rule`). Only enabled rules are present.
     rules: Vec<CompiledRule>,
     /// Pseudo-rule index for PEM candidates in the prefilter. Candidates
     /// with `rule == pem_rule_idx` are routed to the PEM state machine
@@ -62,21 +63,42 @@ impl Engine {
     /// Build an engine from the given configuration.
     ///
     /// Compiles the built-in catalog: one prefilter automaton over all
-    /// rules' anchors plus one anchored confirm DFA per rule. Per-rule
-    /// enable/disable arrives with config in S5 — every rule is on.
+    /// enabled rules' anchors plus one anchored confirm DFA per rule.
+    /// Rules disabled via `config.rules` are excluded from the prefilter
+    /// and confirm compilation. PEM is gated separately.
     pub fn new(config: &Config) -> Result<Self, BuildError> {
-        let digest_key = config::resolve_digest_key(config.digest_key_env.as_deref())?;
-        let rules: Vec<CompiledRule> = rules::CATALOG
+        config.validate()?;
+        let digest_key = config::resolve_digest_key(config.digest_key_env_var())?;
+
+        // Filter catalog: a rule is enabled unless explicitly disabled.
+        let enabled_specs: Vec<&rules::RuleSpec> = rules::CATALOG
             .iter()
-            .map(confirm::compile_rule)
+            .filter(|spec| config.is_rule_enabled(spec.id))
+            .collect();
+
+        let rules: Vec<CompiledRule> = enabled_specs
+            .iter()
+            .map(|spec| confirm::compile_rule(spec))
             .collect::<Result<_, _>>()?;
 
-        // PEM anchor gets a pseudo-rule index outside the catalog range.
+        // PEM: enabled unless explicitly disabled.
+        let pem_enabled = config.is_rule_enabled(pem::PEM_RULE_ID);
         let pem_rule_idx = rules.len();
-        let pem_extra: &[(&[u8], usize)] = &[(pem::PEM_ANCHOR, pem_rule_idx)];
-        let scanner = AhoCorasickScanner::new(rules::CATALOG, pem_extra)?;
+        let pem_extra: Vec<(&[u8], usize)> = if pem_enabled {
+            vec![(pem::PEM_ANCHOR, pem_rule_idx)]
+        } else {
+            vec![]
+        };
+        let scanner = AhoCorasickScanner::new(&enabled_specs, &pem_extra)?;
 
-        let max_window = rules.iter().map(|r| r.window).max().unwrap_or(0);
+        let mut max_window = rules.iter().map(|r| r.window).max().unwrap_or(0);
+        // PEM's confirm window must be included when PEM is enabled —
+        // otherwise carry-over drops to 0 when all regular rules are
+        // disabled, and a PEM BEGIN anchor split across chunks is flushed
+        // before the scanner can match it.
+        if pem_enabled {
+            max_window = max_window.max(pem::pem_confirm_window());
+        }
 
         Ok(Self {
             digest_key,
@@ -515,10 +537,25 @@ mod tests {
     use crate::types::RuleId;
 
     fn test_engine() -> Engine {
-        let config = Config {
-            digest_key_env: None, // force ephemeral, no env lookup
-        };
+        Engine::new(&Config::ephemeral()).unwrap()
+    }
+
+    fn engine_with_rules(overrides: &[(&str, bool)]) -> Engine {
+        let mut config = Config::ephemeral();
+        for &(id, enabled) in overrides {
+            config
+                .rules
+                .insert(id.to_string(), config::RuleConfig { enabled });
+        }
         Engine::new(&config).unwrap()
+    }
+
+    fn all_rules_off() -> Vec<(&'static str, bool)> {
+        rules::CATALOG
+            .iter()
+            .map(|spec| (spec.id, false))
+            .chain(std::iter::once((pem::PEM_RULE_ID, false)))
+            .collect()
     }
 
     fn push_all(engine: &Engine, chunk: &[u8]) -> (Vec<u8>, Stats) {
@@ -744,6 +781,43 @@ mod tests {
             .unwrap();
         let stats = session.finish(&mut output).unwrap();
         assert_eq!(stats.matches[&RuleId::new("npm-token")], 1);
+    }
+
+    #[test]
+    fn max_window_reflects_filtered_rules() {
+        // JWT has window=2048 (largest in catalog). Disable it, and
+        // max_window should drop to the next-largest enabled rule.
+        let engine = engine_with_rules(&[("jwt", false)]);
+        assert!(
+            engine.max_window < 2048,
+            "jwt disabled → max_window must drop"
+        );
+    }
+
+    #[test]
+    fn max_window_zero_when_all_rules_disabled() {
+        // All rules INCLUDING PEM disabled → max_window must be 0.
+        let engine = engine_with_rules(&all_rules_off());
+        assert_eq!(
+            engine.max_window, 0,
+            "all rules disabled (incl PEM) → max_window must be 0"
+        );
+    }
+
+    #[test]
+    fn max_window_includes_pem_when_pem_enabled() {
+        // All catalog rules disabled but PEM stays enabled (default) →
+        // max_window must be at least pem_confirm_window (37), not 0.
+        let catalog_off: Vec<(&str, bool)> = all_rules_off()
+            .into_iter()
+            .filter(|(id, _)| *id != "pem-private-key")
+            .collect();
+        let engine = engine_with_rules(&catalog_off);
+        assert!(
+            engine.max_window >= 37,
+            "PEM enabled → max_window must include PEM confirm window, got {}",
+            engine.max_window
+        );
     }
 
     #[test]

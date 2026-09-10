@@ -36,12 +36,19 @@ pub(crate) struct AhoCorasickScanner {
 }
 
 impl AhoCorasickScanner {
-    /// Build the prefilter from catalog anchors plus optional extra anchors
-    /// (e.g. the PEM `-----BEGIN ` anchor). Extra anchors use the provided
-    /// `(anchor_bytes, rule_index)` tuples — the rule index is a
-    /// pseudo-index outside the catalog range.
+    /// Build the prefilter from a filtered set of catalog rules plus
+    /// optional extra anchors (e.g. the PEM `-----BEGIN ` anchor).
+    ///
+    /// Each rule spec is enumerated in the order of the `catalog` slice
+    /// to produce rule indices. When rules have been filtered (some
+    /// disabled), the indices map to positions in the *filtered* vec —
+    /// callers must compile confirm rules in the same order.
+    ///
+    /// Extra anchors use the provided `(anchor_bytes, rule_index)` tuples
+    /// — the rule index is typically a pseudo-index outside the catalog
+    /// range (e.g. PEM).
     pub(crate) fn new(
-        catalog: &[RuleSpec],
+        catalog: &[&RuleSpec],
         extra_anchors: &[(&[u8], usize)],
     ) -> Result<Self, aho_corasick::BuildError> {
         let mut literals: Vec<&[u8]> = Vec::new();
@@ -96,7 +103,7 @@ pub(crate) struct ScalarScanner {
 #[allow(dead_code)] // bench baseline (S7); exercised by unit tests only in S2
 impl ScalarScanner {
     pub(crate) fn new(
-        catalog: &'static [RuleSpec],
+        catalog: &[&'static RuleSpec],
         extra_anchors: &[(&'static [u8], usize)],
     ) -> Self {
         let mut anchors = Vec::new();
@@ -133,8 +140,12 @@ mod tests {
     use super::*;
     use crate::rules::{CATALOG, vectors};
 
+    fn catalog_refs() -> Vec<&'static RuleSpec> {
+        CATALOG.iter().collect()
+    }
+
     fn ac_scanner() -> AhoCorasickScanner {
-        AhoCorasickScanner::new(CATALOG, &[]).expect("catalog anchors must build")
+        AhoCorasickScanner::new(&catalog_refs(), &[]).expect("catalog anchors must build")
     }
 
     fn scan_sorted(scanner: &impl Scanner, haystack: &[u8]) -> Vec<Candidate> {
@@ -236,7 +247,8 @@ mod tests {
         // candidate set (sorted; both are duplicate-free) on every vector
         // input plus adversarial extras.
         let ac = ac_scanner();
-        let scalar = ScalarScanner::new(CATALOG, &[]);
+        let refs = catalog_refs();
+        let scalar = ScalarScanner::new(&refs, &[]);
         let mut inputs: Vec<&[u8]> = vectors::all_vectors().iter().map(|v| v.input).collect();
         inputs.push(b"ghp_ gho_ ghs_ ghu_ ghr_ github_pat_ glpat- glrt- gldt- npm_");
         inputs.push(b"\x00\xff\x80ghp_\x01npm_\xfe");
