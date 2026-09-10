@@ -98,6 +98,14 @@ impl Config {
                  (e.g. \"env:CLOAK_DIGEST_KEY\"); inline keys are not supported"
             )));
         }
+        // "env:" with an empty variable name would silently fall back to
+        // an ephemeral key with a garbled warning — reject it up front.
+        if dk == "env:" {
+            return Err(BuildError::InvalidConfig(format!(
+                "invalid digest_key \"{dk}\": \"env:\" requires a variable name \
+                 (e.g. \"env:CLOAK_DIGEST_KEY\")"
+            )));
+        }
 
         let known: std::collections::BTreeSet<&str> = rules::CATALOG
             .iter()
@@ -362,6 +370,20 @@ mod tests {
             RuleConfig { enabled: false },
         );
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_empty_env_var_name_rejected() {
+        // "env:" with no variable name must not pass validation: it would
+        // silently fall back to an ephemeral key with a garbled warning.
+        let mut config = Config::default();
+        config.redaction.digest_key = "env:".into();
+        let err = config.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("requires a variable name"),
+            "should explain the malformed digest_key: {msg}"
+        );
     }
 
     // ── resolve_digest_key ──────────────────────────────────────────

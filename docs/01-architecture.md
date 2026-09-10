@@ -167,7 +167,11 @@ cloak --stats-format json       # machine-readable per-rule counts on stderr
 
 Exit codes: `0` clean, `1` operational error. Stats (per-rule match counts, bytes
 processed) go to **stderr** at end of stream — stdout is exclusively the redacted
-payload, so the pipe contract stays pure.
+payload, so the pipe contract stays pure. With `--stats-format json`, the JSON
+object is the **last line** written to stderr: warnings (e.g. the ephemeral-key
+notice when a configured `digest_key` env var is unset) may precede it, so
+machine consumers should parse the final line rather than assume stderr is
+pure JSON.
 
 ## Toolchain & CI
 

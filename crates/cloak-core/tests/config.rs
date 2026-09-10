@@ -178,20 +178,8 @@ enabled = true
 // ── Config + streaming integration ──────────────────────────────────
 // The streaming guarantee (chunk-boundary invariant) must hold when
 // rules are filtered — this category was entirely untested before S5
-// test hardening.
-
-#[test]
-fn max_window_reflects_filtered_rules() {
-    // JWT has window=2048 (largest in catalog). Disable it, and
-    // max_window should drop to the next-largest enabled rule.
-    let config = ephemeral_config_with_rules(&[("jwt", false)]);
-    let engine = Engine::new(&config).unwrap();
-    // email = 320 is the second-largest; engine must use that as max.
-    assert!(
-        engine.carry_over_bound() < 2048,
-        "jwt disabled → max_window must drop"
-    );
-}
+// test hardening. (Filtered max_window assertions live in the engine
+// unit tests — they need private field access.)
 
 fn all_rules_off() -> Vec<(&'static str, bool)> {
     [
@@ -215,35 +203,6 @@ fn all_rules_off() -> Vec<(&'static str, bool)> {
     .iter()
     .map(|id| (*id, false))
     .collect()
-}
-
-#[test]
-fn max_window_zero_when_all_rules_disabled() {
-    // All rules INCLUDING PEM disabled → max_window must be 0.
-    let config = ephemeral_config_with_rules(&all_rules_off());
-    let engine = Engine::new(&config).unwrap();
-    assert_eq!(
-        engine.carry_over_bound(),
-        0,
-        "all rules disabled (incl PEM) → max_window must be 0"
-    );
-}
-
-#[test]
-fn max_window_includes_pem_when_pem_enabled() {
-    // All catalog rules disabled but PEM stays enabled (default) →
-    // max_window must be at least pem_confirm_window (37), not 0.
-    let catalog_off: Vec<(&str, bool)> = all_rules_off()
-        .into_iter()
-        .filter(|(id, _)| *id != "pem-private-key")
-        .collect();
-    let config = ephemeral_config_with_rules(&catalog_off);
-    let engine = Engine::new(&config).unwrap();
-    assert!(
-        engine.carry_over_bound() >= 37,
-        "PEM enabled → max_window must include PEM confirm window, got {}",
-        engine.carry_over_bound()
-    );
 }
 
 #[test]

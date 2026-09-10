@@ -52,10 +52,6 @@ pub struct Engine {
     /// with `rule == pem_rule_idx` are routed to the PEM state machine
     /// instead of the regular confirm step.
     pem_rule_idx: usize,
-    /// Whether the PEM pseudo-rule is enabled. Gating is implicit: when
-    /// false, the PEM anchor is not registered in the scanner, so no PEM
-    /// candidates are produced. Retained for debug/diagnostic queries.
-    _pem_enabled: bool,
     /// Maximum match window `W` across all compiled rules. Bounds the
     /// carry-over retained between pushes (S3): after every push,
     /// `carry_over.len() <= max_window`.
@@ -109,20 +105,9 @@ impl Engine {
             scanner,
             rules,
             pem_rule_idx,
-            _pem_enabled: pem_enabled,
             max_window,
             _config: config.clone(),
         })
-    }
-
-    /// Maximum carry-over window across all enabled rules.
-    ///
-    /// Returns the largest match window `W` in the compiled ruleset. After
-    /// every push, `Session::carry_over_len() <= carry_over_bound()`.
-    /// Zero when no rules are enabled.
-    #[doc(hidden)]
-    pub fn carry_over_bound(&self) -> usize {
-        self.max_window
     }
 
     /// Create a new per-stream session.
@@ -555,6 +540,24 @@ mod tests {
         Engine::new(&Config::ephemeral()).unwrap()
     }
 
+    fn engine_with_rules(overrides: &[(&str, bool)]) -> Engine {
+        let mut config = Config::ephemeral();
+        for &(id, enabled) in overrides {
+            config
+                .rules
+                .insert(id.to_string(), config::RuleConfig { enabled });
+        }
+        Engine::new(&config).unwrap()
+    }
+
+    fn all_rules_off() -> Vec<(&'static str, bool)> {
+        rules::CATALOG
+            .iter()
+            .map(|spec| (spec.id, false))
+            .chain(std::iter::once((pem::PEM_RULE_ID, false)))
+            .collect()
+    }
+
     fn push_all(engine: &Engine, chunk: &[u8]) -> (Vec<u8>, Stats) {
         let mut session = engine.session();
         let mut output = Vec::new();
@@ -778,6 +781,43 @@ mod tests {
             .unwrap();
         let stats = session.finish(&mut output).unwrap();
         assert_eq!(stats.matches[&RuleId::new("npm-token")], 1);
+    }
+
+    #[test]
+    fn max_window_reflects_filtered_rules() {
+        // JWT has window=2048 (largest in catalog). Disable it, and
+        // max_window should drop to the next-largest enabled rule.
+        let engine = engine_with_rules(&[("jwt", false)]);
+        assert!(
+            engine.max_window < 2048,
+            "jwt disabled → max_window must drop"
+        );
+    }
+
+    #[test]
+    fn max_window_zero_when_all_rules_disabled() {
+        // All rules INCLUDING PEM disabled → max_window must be 0.
+        let engine = engine_with_rules(&all_rules_off());
+        assert_eq!(
+            engine.max_window, 0,
+            "all rules disabled (incl PEM) → max_window must be 0"
+        );
+    }
+
+    #[test]
+    fn max_window_includes_pem_when_pem_enabled() {
+        // All catalog rules disabled but PEM stays enabled (default) →
+        // max_window must be at least pem_confirm_window (37), not 0.
+        let catalog_off: Vec<(&str, bool)> = all_rules_off()
+            .into_iter()
+            .filter(|(id, _)| *id != "pem-private-key")
+            .collect();
+        let engine = engine_with_rules(&catalog_off);
+        assert!(
+            engine.max_window >= 37,
+            "PEM enabled → max_window must include PEM confirm window, got {}",
+            engine.max_window
+        );
     }
 
     #[test]
