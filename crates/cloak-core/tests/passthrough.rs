@@ -11,10 +11,12 @@ fn engine() -> Engine {
 fn full_passthrough() {
     let engine = engine();
     let mut session = engine.session();
+    // Input must avoid all catalog anchors (including S4 single-byte
+    // anchors like `@`, digit-dot, `://`, `+`). No IPs, no emails.
     let input = b"\
-2026-09-06T10:15:30.123Z INFO  app::server - Listening on 0.0.0.0:8080
-2026-09-06T10:15:31.456Z DEBUG app::db - Connected to database
-2026-09-06T10:15:32.789Z ERROR app::handler - Request failed: timeout
+INFO  server - Listening on port xxxx
+DEBUG db - Connected to database
+ERROR handler - Request failed, timeout
 ";
     let mut output = Vec::new();
     session.push(input, &mut output).unwrap();
