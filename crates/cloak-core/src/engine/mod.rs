@@ -45,12 +45,17 @@ pub struct Engine {
     pub(crate) digest_key: [u8; 32],
     /// Anchor prefilter over all rules + PEM (docs/01, "Matching pipeline").
     scanner: AhoCorasickScanner,
-    /// Per-rule confirmers, in catalog order (index == `Candidate::rule`).
+    /// Per-rule confirmers, in filtered catalog order
+    /// (index == `Candidate::rule`). Only enabled rules are present.
     rules: Vec<CompiledRule>,
     /// Pseudo-rule index for PEM candidates in the prefilter. Candidates
     /// with `rule == pem_rule_idx` are routed to the PEM state machine
     /// instead of the regular confirm step.
     pem_rule_idx: usize,
+    /// Whether the PEM pseudo-rule is enabled. Gating is implicit: when
+    /// false, the PEM anchor is not registered in the scanner, so no PEM
+    /// candidates are produced. Retained for debug/diagnostic queries.
+    _pem_enabled: bool,
     /// Maximum match window `W` across all compiled rules. Bounds the
     /// carry-over retained between pushes (S3): after every push,
     /// `carry_over.len() <= max_window`.
@@ -62,30 +67,62 @@ impl Engine {
     /// Build an engine from the given configuration.
     ///
     /// Compiles the built-in catalog: one prefilter automaton over all
-    /// rules' anchors plus one anchored confirm DFA per rule. Per-rule
-    /// enable/disable arrives with config in S5 — every rule is on.
+    /// enabled rules' anchors plus one anchored confirm DFA per rule.
+    /// Rules disabled via `config.rules` are excluded from the prefilter
+    /// and confirm compilation. PEM is gated separately.
     pub fn new(config: &Config) -> Result<Self, BuildError> {
-        let digest_key = config::resolve_digest_key(config.digest_key_env.as_deref())?;
-        let rules: Vec<CompiledRule> = rules::CATALOG
+        config.validate()?;
+        let digest_key = config::resolve_digest_key(config.digest_key_env_var())?;
+
+        // Filter catalog: a rule is enabled unless explicitly disabled.
+        let enabled_specs: Vec<&rules::RuleSpec> = rules::CATALOG
             .iter()
-            .map(confirm::compile_rule)
+            .filter(|spec| config.is_rule_enabled(spec.id))
+            .collect();
+
+        let rules: Vec<CompiledRule> = enabled_specs
+            .iter()
+            .map(|spec| confirm::compile_rule(spec))
             .collect::<Result<_, _>>()?;
 
-        // PEM anchor gets a pseudo-rule index outside the catalog range.
+        // PEM: enabled unless explicitly disabled.
+        let pem_enabled = config.is_rule_enabled(pem::PEM_RULE_ID);
         let pem_rule_idx = rules.len();
-        let pem_extra: &[(&[u8], usize)] = &[(pem::PEM_ANCHOR, pem_rule_idx)];
-        let scanner = AhoCorasickScanner::new(rules::CATALOG, pem_extra)?;
+        let pem_extra: Vec<(&[u8], usize)> = if pem_enabled {
+            vec![(pem::PEM_ANCHOR, pem_rule_idx)]
+        } else {
+            vec![]
+        };
+        let scanner = AhoCorasickScanner::new(&enabled_specs, &pem_extra)?;
 
-        let max_window = rules.iter().map(|r| r.window).max().unwrap_or(0);
+        let mut max_window = rules.iter().map(|r| r.window).max().unwrap_or(0);
+        // PEM's confirm window must be included when PEM is enabled —
+        // otherwise carry-over drops to 0 when all regular rules are
+        // disabled, and a PEM BEGIN anchor split across chunks is flushed
+        // before the scanner can match it.
+        if pem_enabled {
+            max_window = max_window.max(pem::pem_confirm_window());
+        }
 
         Ok(Self {
             digest_key,
             scanner,
             rules,
             pem_rule_idx,
+            _pem_enabled: pem_enabled,
             max_window,
             _config: config.clone(),
         })
+    }
+
+    /// Maximum carry-over window across all enabled rules.
+    ///
+    /// Returns the largest match window `W` in the compiled ruleset. After
+    /// every push, `Session::carry_over_len() <= carry_over_bound()`.
+    /// Zero when no rules are enabled.
+    #[doc(hidden)]
+    pub fn carry_over_bound(&self) -> usize {
+        self.max_window
     }
 
     /// Create a new per-stream session.
@@ -515,10 +552,7 @@ mod tests {
     use crate::types::RuleId;
 
     fn test_engine() -> Engine {
-        let config = Config {
-            digest_key_env: None, // force ephemeral, no env lookup
-        };
-        Engine::new(&config).unwrap()
+        Engine::new(&Config::ephemeral()).unwrap()
     }
 
     fn push_all(engine: &Engine, chunk: &[u8]) -> (Vec<u8>, Stats) {

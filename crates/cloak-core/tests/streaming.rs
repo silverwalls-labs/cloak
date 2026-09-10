@@ -24,10 +24,13 @@ fn test_engine() -> Engine {
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::set_var(KEY_VAR, KEY_MATERIAL) };
     });
-    Engine::new(&Config {
-        digest_key_env: Some(KEY_VAR.into()),
-    })
-    .unwrap()
+    let config = Config {
+        redaction: cloak_core::RedactionConfig {
+            digest_key: format!("env:{KEY_VAR}"),
+        },
+        ..Config::default()
+    };
+    Engine::new(&config).unwrap()
 }
 
 fn whole_buffer_redact(engine: &Engine, input: &[u8]) -> Vec<u8> {

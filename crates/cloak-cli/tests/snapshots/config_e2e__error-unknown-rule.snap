@@ -1,0 +1,6 @@
+---
+source: crates/cloak-cli/tests/config_e2e.rs
+assertion_line: 300
+expression: stderr
+---
+cloak: failed to build engine: invalid configuration: unknown rule `typo-rule` in [rules.typo-rule]; known rules: aws-access-key, aws-secret-key, azure-style-token, connection-string, credit-card, email, gcp-api-key, github-token, gitlab-token, ipv4, ipv6, jwt, npm-token, pem-private-key, phone-intl, pypi-token

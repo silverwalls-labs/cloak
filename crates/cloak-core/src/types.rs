@@ -4,7 +4,7 @@ use std::fmt;
 /// Stable identifier for a detection rule in the catalog.
 ///
 /// Rule ids are stable from v0.1 — renaming is a breaking change.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 pub struct RuleId(String);
 
 impl RuleId {
@@ -40,6 +40,10 @@ impl fmt::Display for Digest {
 
 /// Per-match event record.
 ///
+/// Reserved for the v0.2 event-callback API (`docs/06-embedding.md`).
+/// Not currently constructed by the engine — v0.1 reports matches
+/// via aggregate [`Stats`] only.
+///
 /// Critically, this struct **never** carries the matched plaintext — the secret
 /// must not escape through the reporting side-channel.
 #[derive(Debug, Clone)]
@@ -49,7 +53,7 @@ pub struct MatchEvent {
 }
 
 /// Per-stream statistics returned by [`Session::finish`](crate::Session::finish).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Stats {
     /// Total bytes pushed through the session.
     pub bytes_processed: u64,

@@ -1,8 +1,10 @@
 //! Built-in detector catalog (docs/02-rules.md).
 //!
 //! Rules are static Rust data compiled into the engine at
-//! [`Engine::new`](crate::Engine::new). Per-rule enable/disable config
-//! arrives in S5; in S2 every catalog rule is always on.
+//! [`Engine::new`](crate::Engine::new). Per-rule enable/disable is
+//! controlled via [`Config::rules`](crate::Config) — rules not listed
+//! (or listed with `enabled = true`) are compiled; disabled rules are
+//! excluded from the prefilter and confirm steps.
 
 pub mod validators;
 pub mod vectors;

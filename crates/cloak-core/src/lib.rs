@@ -25,7 +25,7 @@ pub mod reference;
 #[doc(hidden)]
 pub use rules::vectors;
 
-pub use config::Config;
+pub use config::{Config, RedactionConfig, RuleConfig};
 pub use engine::{BuildError, Engine, Session};
 pub use redact::{compute_digest, format_tag, write_tag};
 pub use types::{Digest, MatchEvent, RuleId, Stats};
