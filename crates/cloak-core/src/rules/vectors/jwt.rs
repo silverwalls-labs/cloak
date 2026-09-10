@@ -52,7 +52,8 @@ pub static NEGATIVE: &[Vector] = &[
     Vector {
         name: "jwt-invalid-header",
         // eyB decodes to `{ ` — not `{"`, so header is not valid JSON.
-        input: b"eyBub3RKc29u.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+        input:
+            b"eyBub3RKc29u.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
         spans: &[],
     },
     Vector {

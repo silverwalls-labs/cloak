@@ -136,8 +136,7 @@ pub(crate) static CATALOG: &[RuleSpec] = &[
         id: "ipv4",
         // Digit-dot composites: more selective than bare `.`.
         anchors: &[
-            b"0.", b"1.", b"2.", b"3.", b"4.",
-            b"5.", b"6.", b"7.", b"8.", b"9.",
+            b"0.", b"1.", b"2.", b"3.", b"4.", b"5.", b"6.", b"7.", b"8.", b"9.",
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_ipv4),
         // Backward (3) + max IP (15) = 18.
@@ -154,10 +153,10 @@ pub(crate) static CATALOG: &[RuleSpec] = &[
         id: "credit-card",
         // Big Four IIN prefixes.
         anchors: &[
-            b"34", b"37",         // Amex
-            b"4",                  // Visa
+            b"34", b"37", // Amex
+            b"4",  // Visa
             b"51", b"52", b"53", b"54", b"55", // Mastercard
-            b"6011", b"65",       // Discover
+            b"6011", b"65", // Discover
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_credit_card),
         // 19 digits + 6 separators.

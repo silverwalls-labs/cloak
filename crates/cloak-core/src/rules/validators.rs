@@ -42,7 +42,9 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
     let mut pos = key_end;
     // Skip closing quote if JSON key: `"SecretAccessKey":`
     while pos < haystack.len()
-        && (haystack[pos] == b'"' || haystack[pos] == b'\'' || haystack[pos] == b' '
+        && (haystack[pos] == b'"'
+            || haystack[pos] == b'\''
+            || haystack[pos] == b' '
             || haystack[pos] == b'\t')
     {
         pos += 1;
@@ -98,9 +100,7 @@ fn is_base64_char(b: u8) -> bool {
 pub(crate) fn confirm_azure_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
     let rest = &haystack[anchor..];
     // Determine anchor length — anchor includes the `=`.
-    let key_len = if rest.len() >= 11
-        && rest[..11].eq_ignore_ascii_case(b"accountkey=")
-    {
+    let key_len = if rest.len() >= 11 && rest[..11].eq_ignore_ascii_case(b"accountkey=") {
         11
     } else if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"sig=") {
         4
@@ -162,10 +162,7 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
         scheme_start -= 1;
     }
     let scheme = &haystack[scheme_start..scheme_end];
-    if !CONN_SCHEMES
-        .iter()
-        .any(|s| scheme.eq_ignore_ascii_case(s))
-    {
+    if !CONN_SCHEMES.iter().any(|s| scheme.eq_ignore_ascii_case(s)) {
         return None;
     }
     // After `://`, find `user:password@host` structure.
@@ -330,7 +327,7 @@ pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<Conf
         end -= 1;
     }
     let digit_count = digits.len();
-    if digit_count < 13 || digit_count > 19 {
+    if !(13..=19).contains(&digit_count) {
         return None;
     }
     // IIN check (Big Four).
@@ -359,7 +356,7 @@ fn luhn_check(digits: &[u8]) -> bool {
         sum += val;
         double = !double;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Big Four IIN prefix check.
@@ -380,11 +377,7 @@ fn iin_check(digits: &[u8]) -> bool {
             if digits[1] == b'5' {
                 return true;
             }
-            if digits.len() >= 4
-                && digits[1] == b'0'
-                && digits[2] == b'1'
-                && digits[3] == b'1'
-            {
+            if digits.len() >= 4 && digits[1] == b'0' && digits[2] == b'1' && digits[3] == b'1' {
                 return true;
             }
             false
@@ -413,9 +406,7 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
         return None;
     }
     // Reject URL credential context: local preceded by `:` or `/`.
-    if local_start > 0
-        && (haystack[local_start - 1] == b':' || haystack[local_start - 1] == b'/')
-    {
+    if local_start > 0 && (haystack[local_start - 1] == b':' || haystack[local_start - 1] == b'/') {
         return None;
     }
     // Forward: domain.
@@ -433,10 +424,7 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
     }
     // Domain labels must not be empty or start/end with hyphens.
     for label in domain.split(|&b| b == b'.') {
-        if label.is_empty()
-            || label[0] == b'-'
-            || label[label.len() - 1] == b'-'
-        {
+        if label.is_empty() || label[0] == b'-' || label[label.len() - 1] == b'-' {
             return None;
         }
     }
@@ -444,11 +432,7 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
 }
 
 fn is_email_local_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric()
-        || b == b'.'
-        || b == b'+'
-        || b == b'-'
-        || b == b'_'
+    b.is_ascii_alphanumeric() || b == b'.' || b == b'+' || b == b'-' || b == b'_'
 }
 
 fn is_email_domain_char(b: u8) -> bool {
@@ -471,8 +455,7 @@ pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     let earliest = anchor.saturating_sub(11);
     // Find a candidate start: scan backward for a non-digit byte.
     let mut start = anchor;
-    while start > earliest
-        && (haystack[start - 1].is_ascii_digit() || haystack[start - 1] == b'.')
+    while start > earliest && (haystack[start - 1].is_ascii_digit() || haystack[start - 1] == b'.')
     {
         start -= 1;
     }
@@ -603,15 +586,15 @@ fn validate_ipv6(addr: &[u8]) -> bool {
                 return false;
             }
             // Check if the last right group is v4-mapped (contains dots).
-            if let Some(last) = right.last() {
-                if last.contains(&b'.') {
-                    // v4-mapped: last group is an IPv4 address.
-                    let v4_groups = left.len() + right.len() - 1;
-                    return v4_groups <= 6
-                        && left.iter().all(|g| is_hex_group(g))
-                        && right[..right.len() - 1].iter().all(|g| is_hex_group(g))
-                        && is_valid_v4_suffix(last);
-                }
+            if let Some(last) = right.last()
+                && last.contains(&b'.')
+            {
+                // v4-mapped: last group is an IPv4 address.
+                let v4_groups = left.len() + right.len() - 1;
+                return v4_groups <= 6
+                    && left.iter().all(|g| is_hex_group(g))
+                    && right[..right.len() - 1].iter().all(|g| is_hex_group(g))
+                    && is_valid_v4_suffix(last);
             }
             left.iter().all(|g| is_hex_group(g)) && right.iter().all(|g| is_hex_group(g))
         }
@@ -636,7 +619,7 @@ fn is_hex_group(g: &[u8]) -> bool {
 
 fn is_valid_v4_suffix(bytes: &[u8]) -> bool {
     let s = std::str::from_utf8(bytes).ok();
-    s.map_or(false, |s| {
+    s.is_some_and(|s| {
         let parts: Vec<&str> = s.split('.').collect();
         parts.len() == 4
             && parts.iter().all(|p| {
@@ -690,7 +673,7 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
         }
     }
     // E.164: 7-15 digits total (country code + subscriber number).
-    if digit_count < 7 || digit_count > 15 {
+    if !(7..=15).contains(&digit_count) {
         return None;
     }
     // Non-digit boundary after.

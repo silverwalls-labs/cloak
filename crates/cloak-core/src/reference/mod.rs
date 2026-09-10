@@ -61,8 +61,14 @@ const AWS_PREFIXES: [&[u8]; 2] = [b"AKIA", b"ASIA"];
 const GCP_PREFIX: &[u8] = b"AIza";
 const PYPI_PREFIX: &[u8] = b"pypi-";
 const CONN_SCHEMES: [&[u8]; 8] = [
-    b"postgres", b"postgresql", b"mysql", b"mongodb",
-    b"mongodb+srv", b"redis", b"amqp", b"amqps",
+    b"postgres",
+    b"postgresql",
+    b"mysql",
+    b"mongodb",
+    b"mongodb+srv",
+    b"redis",
+    b"amqp",
+    b"amqps",
 ];
 
 const GITHUB_MIN: usize = 36;
@@ -180,7 +186,9 @@ fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
 // --- Context-keyed: return (redact_start, redact_end) ---
 
 fn confirm_aws_secret(input: &[u8], start: usize) -> Option<(usize, usize)> {
-    if start >= input.len() { return None; }
+    if start >= input.len() {
+        return None;
+    }
     let rest = &input[start..];
     // Must start with one of the anchor strings.
     let key_end = if rest.starts_with(b"aws_secret_access_key") {
@@ -206,8 +214,7 @@ fn confirm_aws_secret(input: &[u8], start: usize) -> Option<(usize, usize)> {
     }
     pos += 1;
     while pos < input.len()
-        && (input[pos] == b' ' || input[pos] == b'\t'
-            || input[pos] == b'"' || input[pos] == b'\'')
+        && (input[pos] == b' ' || input[pos] == b'\t' || input[pos] == b'"' || input[pos] == b'\'')
     {
         pos += 1;
     }
@@ -225,7 +232,9 @@ fn is_base64_oracle(b: u8) -> bool {
 }
 
 fn confirm_azure(input: &[u8], start: usize) -> Option<(usize, usize)> {
-    if start >= input.len() { return None; }
+    if start >= input.len() {
+        return None;
+    }
     let rest = &input[start..];
     let key_len = if rest.len() >= 11 && rest[..11].eq_ignore_ascii_case(b"accountkey=") {
         11
@@ -256,22 +265,41 @@ fn confirm_jwt_oracle(input: &[u8], start: usize) -> Option<usize> {
     let limit = rest.len().min(2048);
     let rest = &rest[..limit];
     let dot1 = rest.iter().position(|&b| b == b'.')?;
-    if dot1 == 0 { return None; }
+    if dot1 == 0 {
+        return None;
+    }
     let after1 = dot1 + 1;
-    let dot2 = rest[after1..].iter().position(|&b| b == b'.').map(|p| after1 + p)?;
-    if dot2 == after1 { return None; }
+    let dot2 = rest[after1..]
+        .iter()
+        .position(|&b| b == b'.')
+        .map(|p| after1 + p)?;
+    if dot2 == after1 {
+        return None;
+    }
     let after2 = dot2 + 1;
     let mut sig_end = after2;
-    while sig_end < rest.len() && is_b64url_oracle(rest[sig_end]) { sig_end += 1; }
-    if sig_end == after2 { return None; }
+    while sig_end < rest.len() && is_b64url_oracle(rest[sig_end]) {
+        sig_end += 1;
+    }
+    if sig_end == after2 {
+        return None;
+    }
     let header = &rest[..dot1];
     let payload = &rest[after1..dot2];
     let sig = &rest[after2..sig_end];
-    if !header.iter().all(|&b| is_b64url_oracle(b)) { return None; }
-    if !payload.iter().all(|&b| is_b64url_oracle(b)) { return None; }
-    if !sig.iter().all(|&b| is_b64url_oracle(b)) { return None; }
+    if !header.iter().all(|&b| is_b64url_oracle(b)) {
+        return None;
+    }
+    if !payload.iter().all(|&b| is_b64url_oracle(b)) {
+        return None;
+    }
+    if !sig.iter().all(|&b| is_b64url_oracle(b)) {
+        return None;
+    }
     let decoded = b64url_decode_oracle(header)?;
-    if decoded.len() < 2 || decoded[0] != b'{' || decoded[1] != b'"' { return None; }
+    if decoded.len() < 2 || decoded[0] != b'{' || decoded[1] != b'"' {
+        return None;
+    }
     Some(start + sig_end)
 }
 
@@ -288,12 +316,17 @@ fn b64url_decode_oracle(input: &[u8]) -> Option<Vec<u8>> {
             b'A'..=b'Z' => (b - b'A') as u32,
             b'a'..=b'z' => (b - b'a' + 26) as u32,
             b'0'..=b'9' => (b - b'0' + 52) as u32,
-            b'-' => 62, b'_' => 63,
+            b'-' => 62,
+            b'_' => 63,
             _ => return None,
         };
         accum = (accum << 6) | val;
         bits += 6;
-        if bits >= 8 { bits -= 8; buf.push((accum >> bits) as u8); accum &= (1 << bits) - 1; }
+        if bits >= 8 {
+            bits -= 8;
+            buf.push((accum >> bits) as u8);
+            accum &= (1 << bits) - 1;
+        }
     }
     Some(buf)
 }
@@ -317,13 +350,20 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<(usize, usize)> {
         return None;
     }
     let after = start + 3;
-    let at_pos = input[after..].iter().position(|&b| b == b'@').map(|p| after + p)?;
-    if at_pos - after > 300 { return None; }
+    let at_pos = input[after..]
+        .iter()
+        .position(|&b| b == b'@')
+        .map(|p| after + p)?;
+    if at_pos - after > 300 {
+        return None;
+    }
     let userinfo = &input[after..at_pos];
     let colon_pos = userinfo.iter().position(|&b| b == b':')?;
     let pw_start = after + colon_pos + 1;
     let pw_end = at_pos;
-    if pw_start >= pw_end { return None; }
+    if pw_start >= pw_end {
+        return None;
+    }
     Some((pw_start, pw_end))
 }
 
@@ -341,8 +381,12 @@ fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<(usize, usize)> {
     while local_start > 0 && is_email_local_oracle(input[local_start - 1]) {
         local_start -= 1;
     }
-    if local_start == at_pos { return None; }
-    if input[local_start] == b'.' || input[at_pos - 1] == b'.' { return None; }
+    if local_start == at_pos {
+        return None;
+    }
+    if input[local_start] == b'.' || input[at_pos - 1] == b'.' {
+        return None;
+    }
     // Reject URL credential context: local preceded by `:` or `/`.
     if local_start > 0 && (input[local_start - 1] == b':' || input[local_start - 1] == b'/') {
         return None;
@@ -356,9 +400,13 @@ fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<(usize, usize)> {
     let domain = &input[domain_start..domain_end];
     let last_dot = domain.iter().rposition(|&b| b == b'.')?;
     let tld = &domain[last_dot + 1..];
-    if tld.len() < 2 || !tld.iter().all(|b| b.is_ascii_alphabetic()) { return None; }
+    if tld.len() < 2 || !tld.iter().all(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
     for label in domain.split(|&b| b == b'.') {
-        if label.is_empty() || label[0] == b'-' || label[label.len() - 1] == b'-' { return None; }
+        if label.is_empty() || label[0] == b'-' || label[label.len() - 1] == b'-' {
+            return None;
+        }
     }
     Some((local_start, domain_end))
 }
@@ -385,32 +433,52 @@ fn confirm_ipv4_oracle(input: &[u8], dot_pos: usize) -> Option<(usize, usize)> {
     while start > earliest && (input[start - 1].is_ascii_digit() || input[start - 1] == b'.') {
         start -= 1;
     }
-    if start > 0 && input[start - 1].is_ascii_digit() { return None; }
+    if start > 0 && input[start - 1].is_ascii_digit() {
+        return None;
+    }
     let mut pos = start;
     let mut octets = 0;
     while octets < 4 && pos < input.len() {
         let ostart = pos;
-        while pos < input.len() && input[pos].is_ascii_digit() { pos += 1; }
+        while pos < input.len() && input[pos].is_ascii_digit() {
+            pos += 1;
+        }
         let olen = pos - ostart;
-        if olen == 0 || olen > 3 { return None; }
-        if olen > 1 && input[ostart] == b'0' { return None; }
+        if olen == 0 || olen > 3 {
+            return None;
+        }
+        if olen > 1 && input[ostart] == b'0' {
+            return None;
+        }
         let val = parse_u8_ref(&input[ostart..pos]);
-        if val > 255 { return None; }
+        if val > 255 {
+            return None;
+        }
         octets += 1;
         if octets < 4 {
-            if pos >= input.len() || input[pos] != b'.' { return None; }
+            if pos >= input.len() || input[pos] != b'.' {
+                return None;
+            }
             pos += 1;
         }
     }
-    if octets != 4 { return None; }
-    if pos < input.len() && input[pos].is_ascii_digit() { return None; }
-    if pos < input.len() && input[pos] == b'.' { return None; }
+    if octets != 4 {
+        return None;
+    }
+    if pos < input.len() && input[pos].is_ascii_digit() {
+        return None;
+    }
+    if pos < input.len() && input[pos] == b'.' {
+        return None;
+    }
     Some((start, pos))
 }
 
 fn parse_u8_ref(bytes: &[u8]) -> u16 {
     let mut v: u16 = 0;
-    for &b in bytes { v = v * 10 + (b - b'0') as u16; }
+    for &b in bytes {
+        v = v * 10 + (b - b'0') as u16;
+    }
     v
 }
 
@@ -420,19 +488,35 @@ fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<(usize, usize)> {
         return None;
     }
     let mut start = dc_pos;
-    while start > 0 && is_ipv6_char_oracle(input[start - 1]) { start -= 1; }
-    if start > 0 && input[start - 1].is_ascii_alphanumeric() { return None; }
+    while start > 0 && is_ipv6_char_oracle(input[start - 1]) {
+        start -= 1;
+    }
+    if start > 0 && input[start - 1].is_ascii_alphanumeric() {
+        return None;
+    }
     let mut end = dc_pos + 2;
-    while end < input.len() && is_ipv6_ext_oracle(input[end]) { end += 1; }
-    if end - start > 45 { return None; }
-    if end < input.len() && input[end].is_ascii_alphanumeric() { return None; }
+    while end < input.len() && is_ipv6_ext_oracle(input[end]) {
+        end += 1;
+    }
+    if end - start > 45 {
+        return None;
+    }
+    if end < input.len() && input[end].is_ascii_alphanumeric() {
+        return None;
+    }
     let addr = &input[start..end];
-    if !validate_ipv6_oracle(addr) { return None; }
+    if !validate_ipv6_oracle(addr) {
+        return None;
+    }
     Some((start, end))
 }
 
-fn is_ipv6_char_oracle(b: u8) -> bool { b.is_ascii_hexdigit() || b == b':' }
-fn is_ipv6_ext_oracle(b: u8) -> bool { b.is_ascii_hexdigit() || b == b':' || b == b'.' }
+fn is_ipv6_char_oracle(b: u8) -> bool {
+    b.is_ascii_hexdigit() || b == b':'
+}
+fn is_ipv6_ext_oracle(b: u8) -> bool {
+    b.is_ascii_hexdigit() || b == b':' || b == b'.'
+}
 
 fn validate_ipv6_oracle(addr: &[u8]) -> bool {
     // Use the same logic as validators.rs but independently.
@@ -444,39 +528,58 @@ fn validate_ipv6_oracle(addr: &[u8]) -> bool {
         }
         Some(pos) => {
             // Check no second `::`
-            if addr[pos + 2..].windows(2).any(|w| w == b"::") { return false; }
-            let left: Vec<&[u8]> = if pos == 0 { vec![] } else { addr[..pos].split(|&b| b == b':').collect() };
+            if addr[pos + 2..].windows(2).any(|w| w == b"::") {
+                return false;
+            }
+            let left: Vec<&[u8]> = if pos == 0 {
+                vec![]
+            } else {
+                addr[..pos].split(|&b| b == b':').collect()
+            };
             let right_bytes = &addr[pos + 2..];
-            let right: Vec<&[u8]> = if right_bytes.is_empty() { vec![] } else { right_bytes.split(|&b| b == b':').collect() };
+            let right: Vec<&[u8]> = if right_bytes.is_empty() {
+                vec![]
+            } else {
+                right_bytes.split(|&b| b == b':').collect()
+            };
             let total = left.len() + right.len();
-            if total > 7 { return false; }
-            if let Some(last) = right.last() {
-                if last.contains(&b'.') {
-                    let v4_groups = left.len() + right.len() - 1;
-                    return v4_groups <= 6
-                        && left.iter().all(|g| is_hex_grp(g))
-                        && right[..right.len() - 1].iter().all(|g| is_hex_grp(g))
-                        && is_v4_suffix_oracle(last);
-                }
+            if total > 7 {
+                return false;
+            }
+            if let Some(last) = right.last()
+                && last.contains(&b'.')
+            {
+                let v4_groups = left.len() + right.len() - 1;
+                return v4_groups <= 6
+                    && left.iter().all(|g| is_hex_grp(g))
+                    && right[..right.len() - 1].iter().all(|g| is_hex_grp(g))
+                    && is_v4_suffix_oracle(last);
             }
             left.iter().all(|g| is_hex_grp(g)) && right.iter().all(|g| is_hex_grp(g))
         }
     }
 }
-fn is_hex_grp(g: &[u8]) -> bool { !g.is_empty() && g.len() <= 4 && g.iter().all(|b| b.is_ascii_hexdigit()) }
+fn is_hex_grp(g: &[u8]) -> bool {
+    !g.is_empty() && g.len() <= 4 && g.iter().all(|b| b.is_ascii_hexdigit())
+}
 fn is_v4_suffix_oracle(bytes: &[u8]) -> bool {
     let s = std::str::from_utf8(bytes).ok();
-    s.map_or(false, |s| {
+    s.is_some_and(|s| {
         let parts: Vec<&str> = s.split('.').collect();
-        parts.len() == 4 && parts.iter().all(|p| {
-            !p.is_empty() && p.len() <= 3 && (p.len() == 1 || !p.starts_with('0'))
-                && p.parse::<u16>().is_ok_and(|v| v <= 255)
-        })
+        parts.len() == 4
+            && parts.iter().all(|p| {
+                !p.is_empty()
+                    && p.len() <= 3
+                    && (p.len() == 1 || !p.starts_with('0'))
+                    && p.parse::<u16>().is_ok_and(|v| v <= 255)
+            })
     })
 }
 
 fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
-    if start > 0 && input[start - 1].is_ascii_digit() { return None; }
+    if start > 0 && input[start - 1].is_ascii_digit() {
+        return None;
+    }
     let rest = &input[start..];
     let limit = rest.len().min(25);
     let mut digits = Vec::with_capacity(19);
@@ -485,20 +588,34 @@ fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
         if b.is_ascii_digit() {
             digits.push(b);
             end += 1;
-            if digits.len() > 19 { break; }
+            if digits.len() > 19 {
+                break;
+            }
         } else if b == b' ' || b == b'-' {
-            if digits.is_empty() { break; }
+            if digits.is_empty() {
+                break;
+            }
             end += 1;
         } else {
             break;
         }
     }
     let abs_end = start + end;
-    if abs_end < input.len() && input[abs_end].is_ascii_digit() { return None; }
-    if end > 0 && !rest[end - 1].is_ascii_digit() { end -= 1; }
-    if digits.len() < 13 || digits.len() > 19 { return None; }
-    if !iin_oracle(&digits) { return None; }
-    if !luhn_oracle(&digits) { return None; }
+    if abs_end < input.len() && input[abs_end].is_ascii_digit() {
+        return None;
+    }
+    if end > 0 && !rest[end - 1].is_ascii_digit() {
+        end -= 1;
+    }
+    if digits.len() < 13 || digits.len() > 19 {
+        return None;
+    }
+    if !iin_oracle(&digits) {
+        return None;
+    }
+    if !luhn_oracle(&digits) {
+        return None;
+    }
     Some(start + end)
 }
 
@@ -507,21 +624,30 @@ fn luhn_oracle(digits: &[u8]) -> bool {
     let mut double = false;
     for &d in digits.iter().rev() {
         let mut val = (d - b'0') as u32;
-        if double { val *= 2; if val > 9 { val -= 9; } }
+        if double {
+            val *= 2;
+            if val > 9 {
+                val -= 9;
+            }
+        }
         sum += val;
         double = !double;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 fn iin_oracle(digits: &[u8]) -> bool {
-    if digits.is_empty() { return false; }
+    if digits.is_empty() {
+        return false;
+    }
     match digits[0] {
         b'4' => true,
         b'3' if digits.len() >= 2 && (digits[1] == b'4' || digits[1] == b'7') => true,
         b'5' if digits.len() >= 2 && digits[1] >= b'1' && digits[1] <= b'5' => true,
         b'6' if digits.len() >= 2 => {
-            if digits[1] == b'5' { return true; }
+            if digits[1] == b'5' {
+                return true;
+            }
             digits.len() >= 4 && digits[1] == b'0' && digits[2] == b'1' && digits[3] == b'1'
         }
         _ => false,
@@ -529,24 +655,42 @@ fn iin_oracle(digits: &[u8]) -> bool {
 }
 
 fn confirm_phone_oracle(input: &[u8], start: usize) -> Option<usize> {
-    if start > 0 && input[start - 1].is_ascii_alphanumeric() { return None; }
-    if input[start] != b'+' { return None; }
+    if start > 0 && input[start - 1].is_ascii_alphanumeric() {
+        return None;
+    }
+    if input[start] != b'+' {
+        return None;
+    }
     let mut pos = start + 1;
     let mut digit_count = 0;
     let limit = input.len().min(start + 25);
-    while pos < limit && input[pos].is_ascii_digit() { digit_count += 1; pos += 1; }
-    if digit_count == 0 { return None; }
+    while pos < limit && input[pos].is_ascii_digit() {
+        digit_count += 1;
+        pos += 1;
+    }
+    if digit_count == 0 {
+        return None;
+    }
     while pos < limit {
         let b = input[pos];
-        if b.is_ascii_digit() { digit_count += 1; pos += 1; }
-        else if (b == b' ' || b == b'-' || b == b'.') && pos + 1 < limit && input[pos + 1].is_ascii_digit() {
+        if b.is_ascii_digit() {
+            digit_count += 1;
+            pos += 1;
+        } else if (b == b' ' || b == b'-' || b == b'.')
+            && pos + 1 < limit
+            && input[pos + 1].is_ascii_digit()
+        {
             pos += 1;
         } else {
             break;
         }
     }
-    if digit_count < 7 || digit_count > 15 { return None; }
-    if pos < input.len() && input[pos].is_ascii_digit() { return None; }
+    if !(7..=15).contains(&digit_count) {
+        return None;
+    }
+    if pos < input.len() && input[pos].is_ascii_digit() {
+        return None;
+    }
     Some(pos)
 }
 
@@ -682,28 +826,44 @@ fn find_all_matches(input: &[u8], pem_blocks: &[RefMatch]) -> Vec<RefMatch> {
         // These functions validate their anchor internally, so calling at
         // every offset is safe — non-anchor positions return None immediately.
         for (rule, confirm) in [
-            (AWS_SECRET, confirm_aws_secret as fn(&[u8], usize) -> Option<(usize, usize)>),
+            (
+                AWS_SECRET,
+                confirm_aws_secret as fn(&[u8], usize) -> Option<(usize, usize)>,
+            ),
             (AZURE, confirm_azure),
             (CONN_STRING, confirm_connstring),
             (EMAIL, confirm_email_oracle),
             (IPV6, confirm_ipv6_oracle),
         ] {
             if let Some((rs, re)) = confirm(input, start) {
-                matches.push(RefMatch { start: rs, end: re, rule });
+                matches.push(RefMatch {
+                    start: rs,
+                    end: re,
+                    rule,
+                });
             }
         }
         // IPv4: only call at digit-dot positions to avoid duplicates from
         // backward-looking (the same IP found from multiple interior dots).
-        if start + 1 < input.len() && input[start].is_ascii_digit() && input[start + 1] == b'.' {
-            if let Some((rs, re)) = confirm_ipv4_oracle(input, start) {
-                matches.push(RefMatch { start: rs, end: re, rule: IPV4 });
-            }
+        if start + 1 < input.len()
+            && input[start].is_ascii_digit()
+            && input[start + 1] == b'.'
+            && let Some((rs, re)) = confirm_ipv4_oracle(input, start)
+        {
+            matches.push(RefMatch {
+                start: rs,
+                end: re,
+                rule: IPV4,
+            });
         }
     }
     // Deduplicate: backward-looking rules may produce the same span from
     // multiple start positions (e.g., IPv4 from each digit-dot pair).
     matches.sort_unstable_by(|a, b| {
-        a.start.cmp(&b.start).then(b.end.cmp(&a.end)).then(a.rule.cmp(&b.rule))
+        a.start
+            .cmp(&b.start)
+            .then(b.end.cmp(&a.end))
+            .then(a.rule.cmp(&b.rule))
     });
     matches.dedup();
     matches

@@ -337,4 +337,3 @@ fn redaction_is_idempotent() {
     // And the reference agrees on the redacted output too.
     assert_engine_equals_reference(&engine, &key, &once, "idempotence corpus");
 }
-

@@ -70,7 +70,7 @@ pub(crate) struct CompiledRule {
 /// Compiled confirm strategy — DFA for pattern rules, function pointer
 /// for custom rules.
 enum ConfirmImpl {
-    Dfa(dense::DFA<Vec<u32>>),
+    Dfa(Box<dense::DFA<Vec<u32>>>),
     Custom(fn(&[u8], usize) -> Option<ConfirmMatch>),
 }
 
@@ -95,7 +95,7 @@ pub(crate) fn compile_rule(spec: &RuleSpec) -> Result<CompiledRule, BuildError> 
                     rule: RuleId::new(spec.id),
                     source: Box::new(source),
                 })?;
-            ConfirmImpl::Dfa(dfa)
+            ConfirmImpl::Dfa(Box::new(dfa))
         }
         ConfirmSpec::Custom(f) => ConfirmImpl::Custom(f),
     };
@@ -206,16 +206,8 @@ mod tests {
     #[test]
     fn gitlab_charset_includes_dash_and_underscore() {
         let rule = compiled(1);
-        assert_full_span(
-            confirm(&rule, b"glpat-ab-cd_ef-gh_ij-kl_mn-qrs", 0),
-            0,
-            30,
-        );
-        assert_full_span(
-            confirm(&rule, b"glrt-abcdefghij0123456789", 0),
-            0,
-            25,
-        );
+        assert_full_span(confirm(&rule, b"glpat-ab-cd_ef-gh_ij-kl_mn-qrs", 0), 0, 30);
+        assert_full_span(confirm(&rule, b"glrt-abcdefghij0123456789", 0), 0, 25);
         assert_eq!(confirm(&rule, b"glpat-abcdefghij012345678", 0), None);
     }
 

@@ -261,7 +261,6 @@ impl Session<'_> {
             .scanner
             .scan(&self.carry_over, &mut self.candidates);
 
-
         // 2. Find complete PEM blocks in the buffer (BEGIN + END both present).
         //    Their body spans are added to the regular match pipeline so that
         //    overlap merge handles PEM and regular matches uniformly — matching
@@ -369,9 +368,7 @@ impl Session<'_> {
             }
             let rule = &self.engine.rules[cand.rule];
             let resolvable = is_final || cand.start + rule.window <= combined_len;
-            if resolvable
-                && let Some(cm) = confirm::confirm(rule, &self.carry_over, cand.start)
-            {
+            if resolvable && let Some(cm) = confirm::confirm(rule, &self.carry_over, cand.start) {
                 self.raw.push(RawMatch {
                     start: cm.match_start,
                     end: cm.match_end,
