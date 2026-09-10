@@ -220,9 +220,9 @@ mod tests {
     fn empty_and_anchor_free_haystacks() {
         let scanner = ac_scanner();
         assert!(scan_sorted(&scanner, b"").is_empty());
-        assert!(scan_sorted(&scanner, b"no anchors here at all").is_empty());
-        let binary: Vec<u8> = (0..=255).collect();
-        assert!(scan_sorted(&scanner, &binary).is_empty());
+        // After S4, single-byte anchors (`@`, `+`, `4`, `:`) exist.
+        // Use an input that avoids all catalog anchors.
+        assert!(scan_sorted(&scanner, b"hello world with no secrets").is_empty());
     }
 
     #[test]

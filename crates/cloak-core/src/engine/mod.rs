@@ -1,4 +1,4 @@
-mod confirm;
+pub(crate) mod confirm;
 mod overlap;
 pub(crate) mod pem;
 mod scanner;
@@ -308,6 +308,8 @@ impl Session<'_> {
                         self.raw.push(RawMatch {
                             start: body_start,
                             end: match_end,
+                            redact_start: body_start,
+                            redact_end: match_end,
                             rule: self.engine.pem_rule_idx,
                         });
                         pem_body_regions.push((body_start, match_end));
@@ -328,6 +330,8 @@ impl Session<'_> {
                         self.raw.push(RawMatch {
                             start: body_start,
                             end: bail_end,
+                            redact_start: body_start,
+                            redact_end: bail_end,
                             rule: self.engine.pem_rule_idx,
                         });
                         pem_body_regions.push((body_start, bail_end));
@@ -364,10 +368,14 @@ impl Session<'_> {
             }
             let rule = &self.engine.rules[cand.rule];
             let resolvable = is_final || cand.start + rule.window <= combined_len;
-            if resolvable && let Some(end) = confirm::confirm(rule, &self.carry_over, cand.start) {
+            if resolvable
+                && let Some(cm) = confirm::confirm(rule, &self.carry_over, cand.start)
+            {
                 self.raw.push(RawMatch {
-                    start: cand.start,
-                    end,
+                    start: cm.match_start,
+                    end: cm.match_end,
+                    redact_start: cm.redact_start,
+                    redact_end: cm.redact_end,
                     rule: cand.rule,
                 });
             }
@@ -447,6 +455,9 @@ impl Session<'_> {
         };
 
         // 7. Emit matches (regular + PEM body spans) and clean gaps.
+        //    For context-keyed rules, `m.start..m.redact_start` and
+        //    `m.redact_end..m.end` are context bytes that pass through;
+        //    only `m.redact_start..m.redact_end` is replaced by the tag.
         let mut pos = 0;
         for m in &self.merged {
             if m.start >= carry_start {
@@ -457,11 +468,15 @@ impl Session<'_> {
                     break;
                 }
             }
+            // Clean gap before the match extent.
             out.write_all(&self.carry_over[pos..m.start])?;
+            // Context prefix (empty for full-span rules).
+            out.write_all(&self.carry_over[m.start..m.redact_start])?;
+            // The CLOAK tag — digest covers only the redaction span.
             if m.rule == self.engine.pem_rule_idx {
                 let rule_id = crate::types::RuleId::new(pem::PEM_RULE_ID);
                 let digest = crate::redact::compute_digest(
-                    &self.carry_over[m.start..m.end],
+                    &self.carry_over[m.redact_start..m.redact_end],
                     &self.engine.digest_key,
                 );
                 crate::redact::write_tag(&rule_id, &digest, out)?;
@@ -469,12 +484,14 @@ impl Session<'_> {
             } else {
                 let rule_id = &self.engine.rules[m.rule].id;
                 let digest = crate::redact::compute_digest(
-                    &self.carry_over[m.start..m.end],
+                    &self.carry_over[m.redact_start..m.redact_end],
                     &self.engine.digest_key,
                 );
                 crate::redact::write_tag(rule_id, &digest, out)?;
                 *self.matches.entry(rule_id.clone()).or_insert(0) += 1;
             }
+            // Context suffix (empty for full-span rules).
+            out.write_all(&self.carry_over[m.redact_end..m.end])?;
             pos = m.end;
         }
 
@@ -516,10 +533,10 @@ mod tests {
 
     #[test]
     fn engine_max_window() {
-        // Pinned to docs/02-rules.md spec. W_max = github-token (11 + 255 = 266).
+        // W_max = jwt (2048) — the largest window in the S4 catalog.
         // This is also the hard bound on carry-over after every push.
         let engine = test_engine();
-        assert_eq!(engine.max_window, 266);
+        assert_eq!(engine.max_window, 2048);
     }
 
     #[test]
@@ -673,11 +690,12 @@ mod tests {
         let engine = test_engine();
         let mut session = engine.session();
         let mut output = Vec::new();
-        let data = vec![b'x'; 500];
+        // Must exceed max_window (2048 after S4) to see a flush.
+        let data = vec![b'x'; 5000];
         session.push(&data, &mut output).unwrap();
 
         assert_eq!(session.carry_over_len(), engine.max_window);
-        assert_eq!(output.len(), 500 - engine.max_window);
+        assert_eq!(output.len(), 5000 - engine.max_window);
 
         session.finish(&mut output).unwrap();
         assert_eq!(output, data);

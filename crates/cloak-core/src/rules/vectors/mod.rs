@@ -5,11 +5,24 @@
 //! Re-exported `#[doc(hidden)]` from lib.rs purely so integration tests can
 //! reach it — this module is **not** part of the public API contract.
 
+pub mod aws_access_key;
+pub mod aws_secret_key;
+pub mod azure_style_token;
+pub mod connection_string;
+pub mod credit_card;
+pub mod email;
+pub mod false_positives;
+pub mod gcp_api_key;
 pub mod github_token;
 pub mod gitlab_token;
+pub mod ipv4;
+pub mod ipv6;
+pub mod jwt;
 pub mod npm_token;
 pub mod overlap;
 pub mod pem;
+pub mod phone_intl;
+pub mod pypi_token;
 
 use crate::redact;
 use crate::types::RuleId;
@@ -51,6 +64,7 @@ pub fn expected_output(v: &Vector, key: &[u8; 32]) -> Vec<u8> {
 /// All vectors across all rule modules (corpus composition, differential).
 pub fn all_vectors() -> Vec<&'static Vector> {
     let mut all = Vec::new();
+    // S2 rules
     all.extend(github_token::POSITIVE);
     all.extend(github_token::NEGATIVE);
     all.extend(gitlab_token::POSITIVE);
@@ -58,8 +72,39 @@ pub fn all_vectors() -> Vec<&'static Vector> {
     all.extend(npm_token::POSITIVE);
     all.extend(npm_token::NEGATIVE);
     all.extend(overlap::VECTORS);
+    // S3 PEM
     all.extend(pem::POSITIVE);
     all.extend(pem::NEGATIVE);
+    // S4 simple prefix rules
+    all.extend(aws_access_key::POSITIVE);
+    all.extend(aws_access_key::NEGATIVE);
+    all.extend(gcp_api_key::POSITIVE);
+    all.extend(gcp_api_key::NEGATIVE);
+    all.extend(pypi_token::POSITIVE);
+    all.extend(pypi_token::NEGATIVE);
+    // S4 context-keyed rules
+    all.extend(aws_secret_key::POSITIVE);
+    all.extend(aws_secret_key::NEGATIVE);
+    all.extend(azure_style_token::POSITIVE);
+    all.extend(azure_style_token::NEGATIVE);
+    all.extend(connection_string::POSITIVE);
+    all.extend(connection_string::NEGATIVE);
+    // S4 custom validator rules
+    all.extend(jwt::POSITIVE);
+    all.extend(jwt::NEGATIVE);
+    all.extend(credit_card::POSITIVE);
+    all.extend(credit_card::NEGATIVE);
+    // S4 PII rules
+    all.extend(email::POSITIVE);
+    all.extend(email::NEGATIVE);
+    all.extend(ipv4::POSITIVE);
+    all.extend(ipv4::NEGATIVE);
+    all.extend(ipv6::POSITIVE);
+    all.extend(ipv6::NEGATIVE);
+    all.extend(phone_intl::POSITIVE);
+    all.extend(phone_intl::NEGATIVE);
+    // S4 false-positive suite
+    all.extend(false_positives::VECTORS);
     all
 }
 
