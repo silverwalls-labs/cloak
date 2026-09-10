@@ -125,16 +125,12 @@ proptest! {
     /// Passthrough invariant: input with no rule anchors passes through
     /// byte-identical.
     #[test]
-    fn passthrough(input in prop::collection::vec(any::<u8>(), 0..500)
-        .prop_filter("must not contain anchors", |v| {
-            let anchors: &[&[u8]] = &[
-                b"ghp_", b"gho_", b"ghs_", b"ghu_", b"ghr_", b"github_pat_",
-                b"glpat-", b"glrt-", b"gldt-", b"npm_", b"-----BEGIN ",
-            ];
-            !anchors.iter().any(|a|
-                v.windows(a.len()).any(|w| w == *a)
-            )
-        }))
+    fn passthrough(input in prop::collection::vec(
+        // Restrict to bytes that avoid ALL catalog anchors. After S4,
+        // single-byte anchors like `@`, `+`, `:` exist — use only
+        // lowercase letters (no digits, no punctuation) to guarantee
+        // no anchor can form.
+        b'a'..=b'z', 0..500))
     {
         let engine = test_engine();
         let output = whole_buffer_redact(&engine, &input);

@@ -127,7 +127,13 @@ pub(crate) fn confirm_azure_token(haystack: &[u8], anchor: usize) -> Option<Conf
 }
 
 fn is_azure_value_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'%'
+    // Base64 + URL-encoding chars. Explicitly exclude structural delimiters
+    // that terminate azure values in connection strings (`;`) and SAS URLs
+    // (`&`), plus `:` and `@` (URL structure).
+    match b {
+        b';' | b'&' | b':' | b'@' | b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' => false,
+        _ => b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'%',
+    }
 }
 
 // ── connection-string (context-keyed, partial redaction) ─────────────

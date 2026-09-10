@@ -245,7 +245,10 @@ fn confirm_azure(input: &[u8], start: usize) -> Option<(usize, usize)> {
 }
 
 fn is_azure_val_oracle(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'%'
+    match b {
+        b';' | b'&' | b':' | b'@' | b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' => false,
+        _ => b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=' || b == b'%',
+    }
 }
 
 fn confirm_jwt_oracle(input: &[u8], start: usize) -> Option<usize> {
