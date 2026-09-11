@@ -44,8 +44,7 @@ Remaining secret rules (`aws-access-key`, `aws-secret-key`, `gcp-api-key`,
 only). Positive/negative vector suites per rule, incl. binary-embedded and
 boundary-split variants. Digest-stability goldens committed (correlation promise:
 same input + key ⇒ same tag across releases). CRC32 checksum validator for
-`github-token` classic prefixes + `npm-token` (ledger F12 — semantics decided
-in S2, see the ledger entry).
+`github-token` classic prefixes + `npm-token` (ledger F12 — landed in issue #31).
 **Done when:** catalog in [02-rules.md](02-rules.md) fully implemented; all vectors
 green through engine *and* reference; FP suite (trace IDs, order numbers, base64
 payloads, bare 10-digit strings) produces zero matches.
@@ -107,7 +106,7 @@ issue when its milestone opens.
 | F9 | **k8s log-processor packaging** — container image, DaemonSet/sidecar manifests | Deployment layer 2 hardening | v0.2 |
 | F10 | **Match-heavy throughput gate** (v0.1 tracks, doesn't gate) | Perf scoping | v0.2 |
 | F11 | **Escaped-content decode layer, opt-in** — JSON-string unescape pass (later: base64 spans) so multi-line/escaped-char patterns (PEM!) match inside structured log fields. Must preserve the guarantee (decode is a defined transform, not a heuristic) and byte-exact passthrough of non-matching input | Full-setup review 2026-09-06: JSON logs are the norm in the k8s/Grafana stack, PEM-in-JSON is missed by byte patterns ([03 §threat model](03-guarantee-and-testing.md#threat-model)) | v0.2+ |
-| F12 | **CRC32 checksum validation for `github-token` classic prefixes + `npm-token`** — both formats embed a base62-encoded CRC32 of the 30-char entropy in the last 6 chars (GitHub engineering blog; reverse-engineered reference: base62-token.js). **Semantics decided in S2 (2026-09-07):** validate classic prefixes and `npm_`; checksum-fail ⇒ reject, pass through (look-alike, not a token — that IS the FP reduction); `github_pat_` stays shape-only (fine-grained checksum format not publicly pinned). Classic spec becomes exact prefix+36 (30 entropy + 6 CRC). Needs: valid-CRC vector generation (can't hand-type), wrong-checksum negatives, redesign of github-side overlap vectors around `github_pat_`, an **independent** CRC32+base62 reimplementation in the reference oracle, and a one-time real-PAT spot check before merge | S2 scoping 2026-09-07: session-sized chunk (~1.5–2h), not an S2 add-on; shape-only confirm ships first, FP risk already Low ([02 §secret detectors](02-rules.md#secret-detectors)) | **S4 (v0.1)** |
+| F12 | ~~**CRC32 checksum validation for `github-token` classic prefixes + `npm-token`**~~ — **Landed.** CRC32 (ISO-HDLC) + base62 validation for classic prefixes (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`) and `npm_`; checksum-fail ⇒ reject (FP reduction). `github_pat_` stays shape-only. Engine uses `crc32fast` crate; reference oracle has independent hand-rolled CRC32 + base62. Valid-CRC positive vectors, wrong-checksum negative vectors, overlap vectors redesigned around `github_pat_`. | S2 scoping 2026-09-07 | **Landed (issue #31)** |
 
 ## Versioning & policy
 

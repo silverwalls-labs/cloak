@@ -71,9 +71,10 @@ const CONN_SCHEMES: [&[u8]; 8] = [
     b"amqps",
 ];
 
-const GITHUB_MIN: usize = 36;
+const GITHUB_CLASSIC_BODY: usize = 36;
+const GITHUB_PAT_MIN: usize = 36;
 const GITLAB_MIN: usize = 20;
-const NPM_EXACT: usize = 36;
+const NPM_BODY: usize = 36;
 const AWS_BODY: usize = 16;
 const GCP_BODY: usize = 35;
 const PYPI_MIN: usize = 50;
@@ -85,6 +86,70 @@ struct RefMatch {
     start: usize,
     end: usize,
     rule: usize,
+}
+
+// ── Independent CRC32 + base62 (oracle reimplementation, no shared code) ──
+
+/// CRC32/ISO-HDLC lookup table (polynomial 0xEDB88320, reflected).
+/// Precomputed at compile time — no dependency on `crc32fast`.
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut crc = i;
+        let mut j = 0;
+        while j < 8 {
+            if crc & 1 == 1 {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+            j += 1;
+        }
+        table[i as usize] = crc;
+        i += 1;
+    }
+    table
+};
+
+/// Independent CRC32 implementation for the oracle. Uses the precomputed
+/// lookup table, not the `crc32fast` crate.
+fn crc32_oracle(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF;
+    for &byte in data {
+        let idx = ((crc ^ byte as u32) & 0xFF) as usize;
+        crc = (crc >> 8) ^ CRC32_TABLE[idx];
+    }
+    crc ^ 0xFFFFFFFF
+}
+
+/// Decode exactly 6 base62 characters to a u32 (independent of
+/// `validators::base62_decode_6`).
+fn base62_decode_6_oracle(chars: &[u8]) -> Option<u32> {
+    if chars.len() != 6 {
+        return None;
+    }
+    let mut value: u64 = 0;
+    for &b in chars {
+        let digit = match b {
+            b'0'..=b'9' => (b - b'0') as u64,
+            b'A'..=b'Z' => (b - b'A') as u64 + 10,
+            b'a'..=b'z' => (b - b'a') as u64 + 36,
+            _ => return None,
+        };
+        value = value * 62 + digit;
+    }
+    u32::try_from(value).ok()
+}
+
+/// Validate CRC32 checksum in the oracle path.
+fn validate_crc32_oracle(entropy: &[u8], checksum: &[u8]) -> bool {
+    let expected = crc32_oracle(entropy);
+    base62_decode_6_oracle(checksum).is_some_and(|decoded| decoded == expected)
+}
+
+fn is_base62_oracle(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
 }
 
 fn is_github_body(b: u8) -> bool {
@@ -115,11 +180,30 @@ fn confirm_github(input: &[u8], start: usize) -> Option<usize> {
     let rest = &input[start..];
     let prefix = GITHUB_PREFIXES.iter().find(|p| rest.starts_with(p))?;
     let body = &rest[prefix.len()..];
-    let mut taken = 0;
-    while taken < body.len() && taken < BODY_CAP && is_github_body(body[taken]) {
-        taken += 1;
+
+    if *prefix == b"github_pat_" {
+        // Fine-grained: shape-only, greedy [0-9A-Za-z_]{36,255}.
+        let mut taken = 0;
+        while taken < body.len() && taken < BODY_CAP && is_github_body(body[taken]) {
+            taken += 1;
+        }
+        (taken >= GITHUB_PAT_MIN).then_some(start + prefix.len() + taken)
+    } else {
+        // Classic: exactly 36 base62 chars, CRC32-validated.
+        if body.len() < GITHUB_CLASSIC_BODY {
+            return None;
+        }
+        let body36 = &body[..GITHUB_CLASSIC_BODY];
+        if !body36.iter().all(|&b| is_base62_oracle(b)) {
+            return None;
+        }
+        let entropy = &body36[..30];
+        let checksum = &body36[30..];
+        if !validate_crc32_oracle(entropy, checksum) {
+            return None;
+        }
+        Some(start + prefix.len() + GITHUB_CLASSIC_BODY)
     }
-    (taken >= GITHUB_MIN).then_some(start + prefix.len() + taken)
 }
 
 fn confirm_gitlab(input: &[u8], start: usize) -> Option<usize> {
@@ -139,11 +223,20 @@ fn confirm_npm(input: &[u8], start: usize) -> Option<usize> {
         return None;
     }
     let body = &rest[NPM_PREFIX.len()..];
-    let mut taken = 0;
-    while taken < body.len() && taken < NPM_EXACT && is_npm_body(body[taken]) {
-        taken += 1;
+    if body.len() < NPM_BODY {
+        return None;
     }
-    (taken == NPM_EXACT).then_some(start + NPM_PREFIX.len() + taken)
+    let body36 = &body[..NPM_BODY];
+    if !body36.iter().all(|&b| is_npm_body(b)) {
+        return None;
+    }
+    // CRC32 validation: 30 entropy + 6 checksum.
+    let entropy = &body36[..30];
+    let checksum = &body36[30..];
+    if !validate_crc32_oracle(entropy, checksum) {
+        return None;
+    }
+    Some(start + NPM_PREFIX.len() + NPM_BODY)
 }
 
 fn confirm_aws_access(input: &[u8], start: usize) -> Option<usize> {
@@ -1010,47 +1103,132 @@ mod tests {
         }
     }
 
+    // --- CRC32 oracle cross-check -------------------------------------------
+
+    #[test]
+    fn crc32_oracle_matches_crc32fast() {
+        // Verify the hand-rolled oracle produces identical results to the
+        // crc32fast crate used by the production engine — validates the
+        // oracle without sharing code in the hot path.
+        let test_inputs: &[&[u8]] = &[
+            b"",
+            b"x",
+            b"AbCdEfGhIjKlMnOpQrStUvWxYz0123",
+            b"aB1cD2eF3gH4iJ5kL6mN7oP8qR9sTu",
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123",
+            b"0123456789abcdefghijklmnopqrst",
+            &[0u8; 256],
+            &(0..=255).collect::<Vec<u8>>(),
+        ];
+        for input in test_inputs {
+            assert_eq!(
+                crc32_oracle(input),
+                crc32fast::hash(input),
+                "CRC32 mismatch for input len {}",
+                input.len()
+            );
+        }
+    }
+
+    #[test]
+    fn base62_decode_6_oracle_known_values() {
+        assert_eq!(base62_decode_6_oracle(b"000000"), Some(0));
+        assert_eq!(base62_decode_6_oracle(b"000001"), Some(1));
+        assert_eq!(base62_decode_6_oracle(b"2piBxe"), Some(0x9AC1C92E));
+        assert_eq!(base62_decode_6_oracle(b"00000_"), None); // underscore
+    }
+
+    #[test]
+    fn base62_decode_6_oracle_overflow() {
+        // "zzzzzz" = 56_800_235_583 > u32::MAX → None.
+        assert_eq!(base62_decode_6_oracle(b"zzzzzz"), None);
+    }
+
+    #[test]
+    fn base62_decode_6_oracle_wrong_length() {
+        assert_eq!(base62_decode_6_oracle(b"12345"), None); // 5 chars
+        assert_eq!(base62_decode_6_oracle(b"1234567"), None); // 7 chars
+    }
+
+    #[test]
+    fn crc32_oracle_standard_test_vector() {
+        // CRC32 of "123456789" is the ISO-HDLC standard check value 0xCBF43926.
+        assert_eq!(crc32_oracle(b"123456789"), 0xCBF43926);
+    }
+
+    #[test]
+    fn crc32_oracle_empty_input() {
+        // CRC32 of empty input = 0x00000000.
+        assert_eq!(crc32_oracle(b""), 0x00000000);
+    }
+
     // --- confirmers -------------------------------------------------------
 
     #[test]
-    fn github_min_and_below() {
-        let hit = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    fn github_classic_valid_crc() {
+        // CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
+        let hit = b"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";
         assert_eq!(confirm_github(hit, 0), Some(40));
+    }
+
+    #[test]
+    fn github_classic_wrong_crc_rejects() {
+        let miss = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+        assert_eq!(confirm_github(miss, 0), None);
+    }
+
+    #[test]
+    fn github_classic_exact_36_not_greedy() {
+        // Valid CRC + extra chars: match is exactly prefix+36.
+        let input = b"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Extra";
+        assert_eq!(confirm_github(input, 0), Some(40));
+    }
+
+    #[test]
+    fn github_classic_body_too_short() {
         let miss = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345678";
         assert_eq!(confirm_github(miss, 0), None);
     }
 
     #[test]
-    fn github_greedy_takes_40() {
-        let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789Wxyz";
-        assert_eq!(confirm_github(input, 0), Some(44));
-    }
-
-    #[test]
-    fn github_cap_at_255() {
-        let mut input = b"ghp_".to_vec();
-        input.extend(std::iter::repeat_n(b'a', 300));
-        assert_eq!(confirm_github(&input, 0), Some(259));
-    }
-
-    #[test]
-    fn github_charset_break() {
-        let input = b"ghp_abcdefghij0123456789-abcdefghij0123456789";
+    fn github_classic_random_body_rejects() {
+        // Shape matches but CRC doesn't validate — FP reduction.
+        let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
         assert_eq!(confirm_github(input, 0), None);
     }
 
     #[test]
-    fn github_pat_branch() {
+    fn github_classic_underscore_rejects() {
+        // Underscore not in base62 — rejected before CRC check.
+        let input = b"ghp_AbCdEfGhIjKlMnOp_rStUvWxYz01232piBxe";
+        assert_eq!(confirm_github(input, 0), None);
+    }
+
+    #[test]
+    fn github_pat_shape_only() {
         let mut input = b"github_pat_".to_vec();
         input.extend(std::iter::repeat_n(b'x', 82));
         assert_eq!(confirm_github(&input, 0), Some(93));
     }
 
     #[test]
+    fn github_pat_greedy_capped() {
+        let mut input = b"github_pat_".to_vec();
+        input.extend(std::iter::repeat_n(b'a', 300));
+        assert_eq!(confirm_github(&input, 0), Some(266));
+    }
+
+    #[test]
     fn github_wrong_offset_and_prefix() {
-        let input = b"xxghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let input = b"xx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";
         assert_eq!(confirm_github(input, 0), None);
         assert_eq!(confirm_github(input, 2), Some(42));
+    }
+
+    #[test]
+    fn github_charset_break() {
+        let input = b"ghp_abcdefghij0123456789-abcdefghij0123456789";
+        assert_eq!(confirm_github(input, 0), None);
     }
 
     #[test]
@@ -1073,27 +1251,60 @@ mod tests {
     }
 
     #[test]
-    fn npm_exact_36_semantics() {
+    fn npm_valid_crc() {
+        // CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
+        assert_eq!(
+            confirm_npm(b"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", 0),
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn npm_valid_crc_with_trailing() {
+        // Valid CRC + extra char: match is exactly prefix+36.
+        assert_eq!(
+            confirm_npm(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeX", 0),
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn npm_wrong_crc_rejects() {
+        assert_eq!(
+            confirm_npm(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0),
+            None
+        );
+    }
+
+    #[test]
+    fn npm_random_body_rejects() {
+        // Shape matches but CRC doesn't validate.
         assert_eq!(
             confirm_npm(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", 0),
-            Some(40)
+            None
         );
-        // 37 alnum chars: match ends at 40 (first 36), residue ignored.
-        assert_eq!(
-            confirm_npm(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789X", 0),
-            Some(40)
-        );
+    }
+
+    #[test]
+    fn npm_too_short() {
         assert_eq!(
             confirm_npm(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0),
             None
         );
-        // '_' is not npm body.
+    }
+
+    #[test]
+    fn npm_underscore_rejects() {
         assert_eq!(
             confirm_npm(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz012345678_", 0),
             None
         );
+    }
+
+    #[test]
+    fn npm_wrong_prefix() {
         assert_eq!(
-            confirm_npm(b"xpm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", 0),
+            confirm_npm(b"xpm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxe", 0),
             None
         );
     }
@@ -1320,7 +1531,8 @@ mod tests {
     #[test]
     fn redact_counts_per_rule() {
         let key = test_key();
-        let input = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 glpat-abcdefghij0123456789";
+        // npm with valid CRC + gitlab token.
+        let input = b"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 glpat-abcdefghij0123456789";
         let (_, stats) = redact(input, &key);
         assert_eq!(stats.matches[&RuleId::new("npm-token")], 1);
         assert_eq!(stats.matches[&RuleId::new("gitlab-token")], 1);

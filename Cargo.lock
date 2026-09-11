@@ -215,6 +215,7 @@ version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "blake3",
+ "crc32fast",
  "getrandom 0.4.3",
  "proptest",
  "regex-automata",
@@ -253,6 +254,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crc32fast"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]

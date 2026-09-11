@@ -148,41 +148,50 @@ mod tests {
         assert_eq!(cm.redact_end, expected_end);
     }
 
+    // ── github-token: CRC-validated classic + shape-only github_pat_ ──
+
     #[test]
-    fn github_min_confirms_and_below_rejects() {
+    fn github_classic_valid_crc_confirms() {
         let rule = compiled(0);
+        // CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
         assert_full_span(
-            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", 0),
+            confirm(&rule, b"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", 0),
             0,
             40,
         );
+    }
+
+    #[test]
+    fn github_classic_wrong_crc_rejects() {
+        let rule = compiled(0);
         assert_eq!(
-            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0),
+            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0),
             None
         );
     }
 
     #[test]
-    fn greedy_pin_longest_at_anchor() {
-        // THE load-bearing semantics test: LeftmostFirst + greedy {36,255}
-        // must take all 40 body chars, not stop at the 36-char minimum.
+    fn github_classic_exact_36_not_greedy() {
+        // Classic tokens are NOT greedy — exactly prefix+36, trailing chars pass through.
         let rule = compiled(0);
         assert_full_span(
-            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789Wxyz", 0),
+            confirm(
+                &rule,
+                b"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ExtraChars",
+                0,
+            ),
             0,
-            44,
+            40,
         );
     }
 
     #[test]
-    fn greedy_pin_cap_at_255() {
+    fn github_classic_body_too_short_rejects() {
         let rule = compiled(0);
-        let mut input = b"ghp_".to_vec();
-        input.extend(std::iter::repeat_n(b'a', 255));
-        assert_full_span(confirm(&rule, &input, 0), 0, 259);
-        // Over the cap: still 259, never more.
-        input.extend(std::iter::repeat_n(b'a', 45));
-        assert_full_span(confirm(&rule, &input, 0), 0, 259);
+        assert_eq!(
+            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0),
+            None
+        );
     }
 
     #[test]
@@ -204,6 +213,32 @@ mod tests {
     }
 
     #[test]
+    fn github_pat_greedy_pin() {
+        // Fine-grained IS greedy: [0-9A-Za-z_]{36,255}.
+        let rule = compiled(0);
+        assert_full_span(
+            confirm(
+                &rule,
+                b"github_pat_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789Wxyz",
+                0,
+            ),
+            0,
+            51,
+        );
+    }
+
+    #[test]
+    fn github_pat_cap_at_255() {
+        let rule = compiled(0);
+        let mut input = b"github_pat_".to_vec();
+        input.extend(std::iter::repeat_n(b'a', 255));
+        assert_full_span(confirm(&rule, &input, 0), 0, 266);
+        // Over the cap: still 266, never more.
+        input.extend(std::iter::repeat_n(b'a', 45));
+        assert_full_span(confirm(&rule, &input, 0), 0, 266);
+    }
+
+    #[test]
     fn gitlab_charset_includes_dash_and_underscore() {
         let rule = compiled(1);
         assert_full_span(confirm(&rule, b"glpat-ab-cd_ef-gh_ij-kl_mn-qrs", 0), 0, 30);
@@ -211,20 +246,42 @@ mod tests {
         assert_eq!(confirm(&rule, b"glpat-abcdefghij012345678", 0), None);
     }
 
+    // ── npm-token: CRC-validated ──
+
     #[test]
-    fn npm_exactly_36_no_boundary_check() {
+    fn npm_valid_crc_confirms() {
         let rule = compiled(2);
+        // CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
         assert_full_span(
-            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", 0),
+            confirm(&rule, b"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", 0),
             0,
             40,
         );
-        // 37 alnum: match ends at 40 (first 36) — spec-literal.
+    }
+
+    #[test]
+    fn npm_valid_crc_not_greedy() {
+        let rule = compiled(2);
+        // Valid CRC + extra alnum: match ends at 40 (exact 36 body).
         assert_full_span(
-            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789X", 0),
+            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeX", 0),
             0,
             40,
         );
+    }
+
+    #[test]
+    fn npm_wrong_crc_rejects() {
+        let rule = compiled(2);
+        assert_eq!(
+            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0),
+            None
+        );
+    }
+
+    #[test]
+    fn npm_body_too_short() {
+        let rule = compiled(2);
         assert_eq!(
             confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0),
             None
@@ -234,7 +291,7 @@ mod tests {
     #[test]
     fn anchored_search_at_nonzero_offset() {
         let rule = compiled(2);
-        let input = b"xx npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let input = b"xx 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";
         assert_full_span(confirm(&rule, input, 3), 3, 43);
         // Anchored: searching from 0 must NOT skip ahead to the token.
         assert_eq!(confirm(&rule, input, 0), None);

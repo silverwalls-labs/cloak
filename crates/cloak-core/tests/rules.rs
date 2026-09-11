@@ -76,7 +76,7 @@ fn every_vector_through_public_api() {
 #[test]
 fn digest_correlation_same_secret_same_tag() {
     let (engine, _) = engine_and_key();
-    let token = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let token = b"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";
     let mut input = token.to_vec();
     input.push(b'\n');
     input.extend_from_slice(token);
@@ -99,10 +99,11 @@ fn smoke_golden_redaction() {
     // (.github/workflows/quality-gates.yaml). If a digest or tag change
     // breaks that step, this test must break first, with a better message.
     let key = blake3::derive_key("cloak digest key", b"smoke-test-key");
-    let secret = b"ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    // Valid CRC: CRC32("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA") → "0uCPlr"
+    let secret = b"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";
     let digest = cloak_core::compute_digest(secret, &key);
     let tag = cloak_core::format_tag(&cloak_core::RuleId::new("github-token"), &digest);
-    assert_eq!(tag, "[CLOAK:github-token:cae2]");
+    assert_eq!(tag, "[CLOAK:github-token:c122]");
 }
 
 #[test]
@@ -153,11 +154,11 @@ fn pem_vectors_chunked_match_whole_buffer() {
 fn mixed_secrets_and_pem_in_one_stream() {
     // Tokens and PEM interleaved in one stream — all must be detected.
     let (engine, _) = engine_and_key();
-    let mut input = b"log: npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 leaked\n".to_vec();
+    let mut input = b"log: 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 leaked\n".to_vec();
     input.extend_from_slice(
         b"-----BEGIN EC PRIVATE KEY-----\nECKEYDATA\n-----END EC PRIVATE KEY-----\n",
     );
-    input.extend_from_slice(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n");
+    input.extend_from_slice(b"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\n");
 
     let (out, stats) = redact_one_push(&engine, &input);
     let text = String::from_utf8_lossy(&out);

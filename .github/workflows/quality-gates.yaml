@@ -184,8 +184,8 @@ jobs:
         run: |
           # Golden pinned by `smoke_golden_redaction` in cloak-core's
           # tests/rules.rs — digest drift fails tests before it fails here.
-          in='token=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA done'
-          want='token=[CLOAK:github-token:cae2] done'
+          in='token=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 done'
+          want='token=[CLOAK:github-token:c122] done'
           out=$(printf '%s\n' "$in" | CLOAK_DIGEST_KEY=smoke-test-key ./target/debug/cloak)
           [ "$out" = "$want" ]
 

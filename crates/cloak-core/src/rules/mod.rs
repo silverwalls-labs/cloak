@@ -52,13 +52,14 @@ pub(crate) struct RuleSpec {
 /// tie-break order (docs/02-rules.md, "Overlap resolution").
 /// Secrets before PII: secrets win overlap tie-breaks against PII.
 pub(crate) static CATALOG: &[RuleSpec] = &[
-    // ── Secret detectors (S2) ────────────────────────────────────────
+    // ── Secret detectors (S2, CRC-validated S4/F12) ────────────────────
     RuleSpec {
         id: "github-token",
         anchors: &[b"ghp_", b"gho_", b"ghs_", b"ghu_", b"ghr_", b"github_pat_"],
-        confirm: ConfirmSpec::Pattern(
-            "(?:ghp_|gho_|ghs_|ghu_|ghr_|github_pat_)[0-9A-Za-z_]{36,255}",
-        ),
+        // Classic prefixes: CRC32-validated, exact prefix+36 (30 entropy +
+        // 6 base62 CRC). Fine-grained `github_pat_`: shape-only, greedy
+        // [0-9A-Za-z_]{36,255}. See docs/02-rules.md ¹, F12.
+        confirm: ConfirmSpec::Custom(validators::confirm_github_token),
         // Body capped at 255 to bound W (docs/02); longest anchor is
         // "github_pat_" (11 bytes).
         window: 11 + 255,
@@ -73,9 +74,9 @@ pub(crate) static CATALOG: &[RuleSpec] = &[
     RuleSpec {
         id: "npm-token",
         anchors: &[b"npm_"],
-        // Spec-literal: exactly 36 body chars, no trailing-boundary check —
-        // a longer alnum run matches its first 36 (docs/02-rules.md).
-        confirm: ConfirmSpec::Pattern("npm_[0-9A-Za-z]{36}"),
+        // CRC32-validated: exact prefix+36 (30 entropy + 6 base62 CRC).
+        // Body alphabet is alnum only (no underscore). F12.
+        confirm: ConfirmSpec::Custom(validators::confirm_npm_token),
         window: 4 + 36,
     },
     // ── Secret detectors (S4) ────────────────────────────────────────
@@ -242,13 +243,15 @@ mod tests {
     }
 
     #[test]
-    fn pinned_windows_for_dfa_rules() {
-        // W values for DFA rules are documented in docs/02-rules.md —
-        // a change here must be a deliberate spec change, not drift.
+    fn pinned_windows() {
+        // W values documented in docs/02-rules.md — a change here must be
+        // a deliberate spec change, not drift.
         let expected = [
+            // CRC-validated custom rules (F12)
             ("github-token", 266),
-            ("gitlab-token", 261),
             ("npm-token", 40),
+            // DFA rules
+            ("gitlab-token", 261),
             ("aws-access-key", 20),
             ("gcp-api-key", 39),
             ("pypi-token", 260),
