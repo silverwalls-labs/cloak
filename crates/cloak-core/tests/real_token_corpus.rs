@@ -15,8 +15,15 @@
 //! decoding feeds the validator the identical bytes.
 //!
 //! All tokens are long-expired and public; none are valid credentials.
-//! npm has no public corpus — the npm side stays pinned by the manual
-//! spot check (PR #32 checklist).
+//!
+//! The npm side is pinned the same way (review finding R1, npm half): npm
+//! publishes no corpus, but 10 real npm-issued tokens are recoverable from
+//! public leaks — 8 accidental (committed `.npmrc` / `.travis.yml` /
+//! `.bashrc`), one from an OSSF malicious-package advisory, one from a
+//! deliberately published compromised-secret test file. All 10 carry a
+//! valid CRC32 under the F12 scheme (verified 2026-09-11 against an
+//! independent implementation), across independent leaks spanning years
+//! and contexts — the same class of evidence as the ghp_ corpus above.
 
 use cloak_core::{Config, Engine, RuleId};
 
@@ -43,6 +50,37 @@ const CORPUS_HEX: &[&str] = &[
     "6768705f67554a52667648555258584b31664b5a6251657868563339564c7849676332646d4b6473",
     "6768705f5557665a77486244476f66627876756261537433685641747172756d56503033696e4d61",
     "6768705f4d58756d3831495948376b696f57517949764e347a504d66454349575964316c64794348",
+];
+
+/// Real leaked `npm_` tokens, hex-encoded. All are long-public and
+/// revoked (npm is a GitHub secret-scanning partner; every leak below has
+/// been sitting in public code for years). Sources, verified 2026-09-11:
+///
+/// - 6 accidental leaks: committed `.npmrc` auth tokens
+///   (aozyildirim/Agena, OrJDev/create-jd-app, flingyp/vitepress-demo-preview,
+///   beerui/BeerUi), Travis CI configs (react-paper/react-paper-bindings,
+///   zrwusa/data-structure-typed), a `.bashrc` export
+///   (pierreericgarcia/react-step-progress-bar)
+/// - 1 hardcoded in a malicious package tarball, documented in OSSF
+///   malicious-packages advisory MAL-2026-4401 (@kruzer/lib-ui)
+/// - 2 deliberately published compromised-secret test files
+///   (gm3dmo/the-power, npm_classic / npm_granular)
+///
+/// A random 36-char base62 body carries a valid CRC32 with probability
+/// 62^-6 ≈ 1.8e-11; 10 independent leaks all validating pins the format
+/// (CRC32 ISO-HDLC over the 30-char entropy, big-endian base62
+/// `0-9A-Za-z`, `'0'`-padded) beyond reasonable doubt.
+const NPM_CORPUS_HEX: &[&str] = &[
+    "6e706d5f3962705a576149364c636e797646766148674d546d3272554b50693072513432444d5136",
+    "6e706d5f73483142726b4c7862644c6b4a693474564332536c316838484b6e6e395a32317136544d",
+    "6e706d5f576d52556f454c48394b705162763062466e3930307a306456436a6b785033585a36675a",
+    "6e706d5f5a415142375675566d6d6c31704d476f7244467779654570755172413849337970675046",
+    "6e706d5f7953544c4a487053394443774279436c5a424d79715257707472326b42343048456a6953",
+    "6e706d5f426e7373776e6c567064476a73575366763075544c44685776787a42544f345a7170714c",
+    "6e706d5f6d71724b44737458455a514e4d58705a724d5247506f39356438436f685233505970466c",
+    "6e706d5f6373683073653673747130724a416c4d50546e6d664437674f4f664e347733553863397a",
+    "6e706d5f467867364e4e424e53784644546641517057414262493837426c366c6148314d6b316448",
+    "6e706d5f30515756334458567263425a5273727768316f766442576c326b6a4f744830477a6d5263",
 ];
 
 fn decode_hex(s: &str) -> Vec<u8> {
@@ -76,6 +114,53 @@ fn real_expired_github_tokens_are_detected() {
             String::from_utf8_lossy(&out)
         );
     }
+}
+
+#[test]
+fn real_leaked_npm_tokens_are_detected() {
+    let engine = Engine::new(&Config::ephemeral()).unwrap();
+    for hex in NPM_CORPUS_HEX {
+        let token = decode_hex(hex);
+        assert_eq!(token.len(), 40, "corpus entry must be a 40-byte token");
+
+        let mut session = engine.session();
+        let mut out = Vec::new();
+        session.push(&token, &mut out).unwrap();
+        let stats = session.finish(&mut out).unwrap();
+
+        assert_eq!(
+            stats.matches.get(&RuleId::new("npm-token")),
+            Some(&1),
+            "real leaked token must be detected: {}",
+            String::from_utf8_lossy(&token)
+        );
+        assert!(
+            !out.windows(4).any(|w| w == b"npm_"),
+            "token must not leak: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+}
+
+#[test]
+fn corrupted_real_npm_token_is_rejected() {
+    // Negative control: flipping one checksum char of a real token must
+    // reject it — proves the corpus test exercises CRC validation, not
+    // just shape matching.
+    let engine = Engine::new(&Config::ephemeral()).unwrap();
+    let mut corrupted = decode_hex(NPM_CORPUS_HEX[0]);
+    corrupted[39] = if corrupted[39] == b'x' { b'y' } else { b'x' };
+
+    let mut session = engine.session();
+    let mut out = Vec::new();
+    session.push(&corrupted, &mut out).unwrap();
+    let stats = session.finish(&mut out).unwrap();
+
+    assert!(
+        !stats.matches.contains_key(&RuleId::new("npm-token")),
+        "corrupted real token must be rejected"
+    );
+    assert_eq!(&out[..], &corrupted[..], "corrupted token passes through");
 }
 
 #[test]
