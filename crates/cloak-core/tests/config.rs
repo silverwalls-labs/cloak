@@ -29,7 +29,7 @@ fn redact(engine: &Engine, input: &[u8]) -> (Vec<u8>, cloak_core::Stats) {
 #[test]
 fn default_config_all_rules_detect() {
     let engine = Engine::new(&Config::ephemeral()).unwrap();
-    let (output, stats) = redact(&engine, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+    let (output, stats) = redact(&engine, b"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");
     assert!(stats.matches.contains_key(&RuleId::new("github-token")));
     assert!(!output.windows(4).any(|w| w == b"ghp_"));
 }
@@ -40,7 +40,7 @@ fn default_config_all_rules_detect() {
 fn disabled_rule_passes_through() {
     let config = ephemeral_config_with_rules(&[("github-token", false)]);
     let engine = Engine::new(&config).unwrap();
-    let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let input = b"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";
     let (output, stats) = redact(&engine, input);
     // github-token is disabled — secret passes through unchanged.
     assert_eq!(&output[..], &input[..]);
@@ -52,7 +52,7 @@ fn disabled_rule_does_not_affect_others() {
     let config = ephemeral_config_with_rules(&[("github-token", false)]);
     let engine = Engine::new(&config).unwrap();
     // npm-token should still be caught.
-    let (_, stats) = redact(&engine, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+    let (_, stats) = redact(&engine, b"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");
     assert!(stats.matches.contains_key(&RuleId::new("npm-token")));
 }
 
@@ -104,7 +104,7 @@ fn all_rules_disabled_pure_passthrough() {
     let config = ephemeral_config_with_rules(&overrides);
     let engine = Engine::new(&config).unwrap();
 
-    let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 and more";
+    let input = b"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 and more";
     let (output, stats) = redact(&engine, input);
     assert_eq!(
         &output[..],
@@ -149,11 +149,11 @@ fn mixed_enable_disable() {
     let engine = Engine::new(&config).unwrap();
 
     // npm-token: enabled → redacted
-    let (_, stats) = redact(&engine, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789");
+    let (_, stats) = redact(&engine, b"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");
     assert!(stats.matches.contains_key(&RuleId::new("npm-token")));
 
     // github-token: disabled → passthrough
-    let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let input = b"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";
     let (output, _) = redact(&engine, input);
     assert_eq!(&output[..], &input[..]);
 }
@@ -255,10 +255,10 @@ fn disabled_rule_at_chunk_boundary_streaming() {
     // Split the token mid-body.
     session.push(b"ghp_AbCdEfGhIjKlMn", &mut output).unwrap();
     session
-        .push(b"OpQrStUvWxYz0123456789 tail", &mut output)
+        .push(b"OpQrStUvWxYz01232piBxe tail", &mut output)
         .unwrap();
     let stats = session.finish(&mut output).unwrap();
-    let full_input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 tail";
+    let full_input = b"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 tail";
     assert_eq!(
         &output[..],
         &full_input[..],
@@ -299,7 +299,7 @@ fn streaming_equivalence_with_partial_filtering() {
     ]);
     let engine = Engine::new(&config).unwrap();
     // Test with an npm-token (still enabled) plus clean text.
-    let input = b"prefix npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 suffix and more text here";
+    let input = b"prefix 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 suffix and more text here";
 
     // Whole buffer.
     let (whole, whole_stats) = redact(&engine, input);

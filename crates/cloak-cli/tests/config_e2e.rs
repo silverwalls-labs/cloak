@@ -28,7 +28,7 @@ fn config_file_loads_and_disables_rule() {
 enabled = false
 "#,
     );
-    let secret = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let secret = "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";
     cloak()
         .arg("--config")
         .arg(config.path())
@@ -110,7 +110,7 @@ fn config_file_malformed_exits_1() {
 #[test]
 fn stats_json_format() {
     let input =
-        "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nnpm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n";
+        "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\n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\n";
     let assert = cloak()
         .arg("--stats-format")
         .arg("json")
@@ -129,9 +129,9 @@ fn stats_json_format() {
 fn stats_json_exact_counts() {
     // Plant 2 github + 1 npm.
     let input = "\
-ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789
-npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789
-ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789
+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
+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
+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
 ";
     let assert = cloak()
         .arg("--stats-format")
@@ -153,7 +153,7 @@ fn stats_text_format() {
     let assert = cloak()
         .arg("--stats-format")
         .arg("text")
-        .write_stdin("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+        .write_stdin("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")
         .assert()
         .success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
@@ -174,7 +174,7 @@ fn stats_text_format() {
 #[test]
 fn stats_silent_by_default() {
     let assert = cloak()
-        .write_stdin("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+        .write_stdin("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")
         .assert()
         .success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
@@ -189,7 +189,7 @@ fn stats_silent_by_default() {
 #[test]
 fn file_arg_single() {
     let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n")
+    f.write_all(b"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\n")
         .unwrap();
     f.flush().unwrap();
 
@@ -205,12 +205,12 @@ fn file_arg_single() {
 #[test]
 fn file_args_multiple() {
     let mut f1 = tempfile::NamedTempFile::new().unwrap();
-    f1.write_all(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n")
+    f1.write_all(b"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\n")
         .unwrap();
     f1.flush().unwrap();
 
     let mut f2 = tempfile::NamedTempFile::new().unwrap();
-    f2.write_all(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n")
+    f2.write_all(b"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\n")
         .unwrap();
     f2.flush().unwrap();
 
@@ -267,9 +267,9 @@ fn help_output_snapshot() {
 fn stats_json_snapshot() {
     // Deterministic: keyed digest, planted vectors, exact JSON output.
     let input = "\
-ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789
-npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789
-ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789
+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
+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
+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
 ";
     let assert = Command::cargo_bin("cloak")
         .unwrap()
@@ -366,7 +366,7 @@ fn config_and_file_args_combined() {
     // --config disables github-token + file arg contains that secret.
     let config = write_config("[rules.github-token]\nenabled = false\n");
     let mut f = tempfile::NamedTempFile::new().unwrap();
-    f.write_all(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n")
+    f.write_all(b"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\n")
         .unwrap();
     f.flush().unwrap();
 
@@ -388,7 +388,7 @@ fn config_and_stats_combined() {
     // --config disables github-token + --stats-format json.
     let config = write_config("[rules.github-token]\nenabled = false\n");
     let input =
-        "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\nnpm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n";
+        "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\n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\n";
     let assert = cloak()
         .arg("--config")
         .arg(config.path())
@@ -450,7 +450,7 @@ fn empty_config_file_e2e() {
         .arg(config.path())
         .arg("--stats-format")
         .arg("json")
-        .write_stdin("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+        .write_stdin("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")
         .assert()
         .success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
@@ -467,11 +467,12 @@ fn empty_config_file_e2e() {
 fn token_split_across_file_args() {
     // Session carry-over must span file boundaries.
     let mut f1 = tempfile::NamedTempFile::new().unwrap();
+    // Valid CRC: CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
     f1.write_all(b"ghp_AbCdEfGhIjKlMn").unwrap();
     f1.flush().unwrap();
 
     let mut f2 = tempfile::NamedTempFile::new().unwrap();
-    f2.write_all(b"OpQrStUvWxYz0123456789\n").unwrap();
+    f2.write_all(b"OpQrStUvWxYz01232piBxe\n").unwrap();
     f2.flush().unwrap();
 
     let assert = cloak()
@@ -505,7 +506,7 @@ fn stats_json_with_ephemeral_warning() {
         .env_remove("CLOAK_DIGEST_KEY")
         .arg("--stats-format")
         .arg("json")
-        .write_stdin("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+        .write_stdin("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")
         .assert()
         .success();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
@@ -597,7 +598,7 @@ fn config_malformed_error_message_quality() {
 fn config_custom_digest_key_env_var_e2e() {
     // Config specifies a custom env var, CLI sets it → deterministic digest.
     let config = write_config("[redaction]\ndigest_key = \"env:CLOAK_CUSTOM_E2E_KEY\"\n");
-    let secret = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+    let secret = "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";
     let key = blake3::derive_key("cloak digest key", b"custom-key-material");
     let digest = cloak_core::compute_digest(secret.as_bytes(), &key);
     let tag = cloak_core::format_tag(&cloak_core::RuleId::new("github-token"), &digest);

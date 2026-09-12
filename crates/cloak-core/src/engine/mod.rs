@@ -632,7 +632,8 @@ mod tests {
     #[test]
     fn push_redacts_github_token_inline() {
         let engine = test_engine();
-        let secret = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        // Valid CRC: CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
+        let secret = b"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";
         let mut input = b"x ".to_vec();
         input.extend_from_slice(secret);
         input.extend_from_slice(b" y");
@@ -660,7 +661,8 @@ mod tests {
         let engine = test_engine();
         let mut session = engine.session();
         let mut output = Vec::new();
-        let token = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        // Valid CRC: CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
+        let token = b"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";
         session.push(token, &mut output).unwrap();
         session.push(b" clean ", &mut output).unwrap();
         session.push(token, &mut output).unwrap();
@@ -674,12 +676,14 @@ mod tests {
         // S3 fix: a token split across two pushes IS detected thanks to
         // bounded carry-over (previously the S2 limitation).
         let engine = test_engine();
-        let token = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        // Valid CRC: CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
+        let token = b"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";
         let mut session = engine.session();
         let mut output = Vec::new();
+        // Split at 18 bytes: "npm_AbCdEfGhIjKlMn" | "OpQrStUvWxYz01232piBxe"
         session.push(b"npm_AbCdEfGhIjKlMn", &mut output).unwrap();
         session
-            .push(b"OpQrStUvWxYz0123456789", &mut output)
+            .push(b"OpQrStUvWxYz01232piBxe", &mut output)
             .unwrap();
         let stats = session.finish(&mut output).unwrap();
         let digest = crate::redact::compute_digest(token, &engine.digest_key);
@@ -700,7 +704,8 @@ mod tests {
     #[test]
     fn one_byte_pushes_detect_token() {
         let engine = test_engine();
-        let token = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        // Valid CRC: CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
+        let token = b"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";
         let mut input = b"x ".to_vec();
         input.extend_from_slice(token);
         input.extend_from_slice(b" y");
@@ -776,8 +781,9 @@ mod tests {
         assert!(session.carry_over_len() <= engine.max_window);
         // The retained bytes include the anchor: completing the token in
         // the next push must produce a match.
+        // Valid CRC body: CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") → "2piBxe"
         session
-            .push(b"AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", &mut output)
+            .push(b"AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxe", &mut output)
             .unwrap();
         let stats = session.finish(&mut output).unwrap();
         assert_eq!(stats.matches[&RuleId::new("npm-token")], 1);
@@ -1022,7 +1028,7 @@ mod tests {
         // body is atomic (no regular rules run inside it).
         let engine = test_engine();
         let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
-        input.extend_from_slice(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789\n");
+        input.extend_from_slice(b"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\n");
         input.extend_from_slice(b"-----END RSA PRIVATE KEY-----");
 
         let (output, stats) = push_all(&engine, &input);

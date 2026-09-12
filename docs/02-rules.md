@@ -31,9 +31,9 @@ operators which ones to consider disabling per environment.
 | `aws-secret-key` | `aws_secret`, `SecretAccessKey` (context-keyed) | key-context + 40-char base64 value | Low-med |
 | `gcp-api-key` | `AIza` | `AIza[0-9A-Za-z_-]{35}` | Low |
 | `azure-style-token` | context keys (`accountkey=`, `sig=` in SAS) | context + base64/urlenc value shape | Med |
-| `github-token` | `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_` | prefix + `[0-9A-Za-z_]{36,255}` ¹ | Low |
+| `github-token` | `ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_` | classic: prefix + 36 base62 (30 entropy + 6 CRC32) ¹; `github_pat_`: shape-only `[0-9A-Za-z_]{36,255}` | Low |
 | `gitlab-token` | `glpat-`, `glrt-`, `gldt-` | prefix + `[0-9A-Za-z_-]{20,255}` | Low |
-| `npm-token` | `npm_` | `npm_[0-9A-Za-z]{36}` | Low |
+| `npm-token` | `npm_` | `npm_` + 36 base62 (30 entropy + 6 CRC32) ¹ | Low |
 | `pypi-token` | `pypi-` | `pypi-AgEIcHlwaS5vcmc…` (macaroon prefix) | Low |
 | `jwt` | `eyJ` | three dot-separated base64url segments, first two decode-shaped as JSON (`{"` prefix after decode of header) | Low-med |
 | `connection-string` | `://` (+ scheme set: `postgres`, `postgresql`, `mysql`, `mongodb`, `redis`, `amqp`, `amqps`…) | `scheme://user:PASSWORD@host` — only the password span is redacted | Low |
@@ -50,10 +50,11 @@ Notes:
 - `aws-secret-key` and `azure-style-token` are **context-keyed** (value shape alone
   is just base64): anchor on the key name, redact the value. This is the agreed
   precision trade — a bare 40-char base64 string without context is NOT matched.
-- ¹ GitHub classic tokens embed a CRC32 checksum; validation is **deferred to S4**
-  (ledger [F12](05-roadmap.md#follow-ups-ledger), S2 decision 2026-09-07) — S2 ships
-  shape-only confirm. Decided semantics: checksum-fail ⇒ reject (pass through);
-  `npm-token` gets the same validator; `github_pat_` stays shape-only.
+- ¹ GitHub classic tokens and npm tokens embed a CRC32 checksum (ISO-HDLC) of
+  the 30-char entropy section, base62-encoded in the final 6 chars. Checksum-fail
+  ⇒ reject (pass through) — this is the FP-reduction mechanism. `github_pat_`
+  stays shape-only (fine-grained checksum format not publicly pinned).
+  Landed in F12 (ledger [F12](05-roadmap.md#follow-ups-ledger)).
 
 ### Implemented in S2 — windows & caps
 
@@ -63,9 +64,9 @@ chars; the remainder passes through (spec-literal).
 
 | Rule id | `W` | As implemented | Notes |
 |---|---|---|---|
-| `github-token` | 266 (11 + 255) | `(?:ghp_\|gho_\|ghs_\|ghu_\|ghr_\|github_pat_)[0-9A-Za-z_]{36,255}` | Checksum deferred (see ¹). |
+| `github-token` | 266 (11 + 255) | Classic: prefix + exactly 36 base62, CRC32-validated; `github_pat_`: `[0-9A-Za-z_]{36,255}` greedy | Classic tightened by F12: exact 36, not greedy. |
 | `gitlab-token` | 261 (6 + 255) | `(?:glpat-\|glrt-\|gldt-)[0-9A-Za-z_-]{20,255}` | `-` and `_` valid in body. |
-| `npm-token` | 40 (4 + 36) | `npm_[0-9A-Za-z]{36}` | Spec-literal: exactly 36, no trailing-boundary check — a longer alnum run matches its first 36. |
+| `npm-token` | 40 (4 + 36) | `npm_` + exactly 36 base62, CRC32-validated | F12: CRC replaces shape-only confirm. |
 
 ### Overlap resolution (implemented S2)
 

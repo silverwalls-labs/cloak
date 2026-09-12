@@ -205,16 +205,17 @@ mod tests {
     fn capped_vector_lengths() {
         // The long literals are hand-typed — pin their exact lengths so a
         // miscounted digit fails here, not as a confusing engine mismatch.
+        // github_pat_ vectors (shape-only, capped at 255 body chars):
         let at_cap = github_token::POSITIVE
             .iter()
-            .find(|v| v.name == "github-at-cap-255")
+            .find(|v| v.name == "github-pat-at-cap-255")
             .unwrap();
-        assert_eq!(at_cap.input.len(), 4 + 255);
+        assert_eq!(at_cap.input.len(), 11 + 255); // "github_pat_" = 11
         let overflow = github_token::POSITIVE
             .iter()
-            .find(|v| v.name == "github-cap-overflow-300")
+            .find(|v| v.name == "github-pat-cap-overflow-300")
             .unwrap();
-        assert_eq!(overflow.input.len(), 4 + 300);
+        assert_eq!(overflow.input.len(), 11 + 300);
         let gitlab_cap = gitlab_token::POSITIVE
             .iter()
             .find(|v| v.name == "gitlab-at-cap-255")

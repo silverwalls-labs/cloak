@@ -16,6 +16,129 @@
 
 use crate::engine::confirm::ConfirmMatch;
 
+// ── CRC32 + base62 validation (github classic + npm) ────────────────
+
+/// Decode exactly 6 base62 characters (`0-9A-Za-z`, values 0–61) to a u32.
+/// Returns `None` if any character is outside the base62 alphabet.
+fn base62_decode_6(chars: &[u8]) -> Option<u32> {
+    debug_assert_eq!(chars.len(), 6);
+    let mut value: u64 = 0;
+    for &b in chars {
+        let digit = match b {
+            b'0'..=b'9' => (b - b'0') as u64,
+            b'A'..=b'Z' => (b - b'A') as u64 + 10,
+            b'a'..=b'z' => (b - b'a') as u64 + 36,
+            _ => return None,
+        };
+        value = value * 62 + digit;
+    }
+    // 6 base62 digits can represent up to 62^6 - 1 = 56,800,235,583
+    // which exceeds u32::MAX, but CRC32 values are always ≤ u32::MAX.
+    u32::try_from(value).ok()
+}
+
+/// Validate a CRC32 checksum encoded as 6 base62 characters.
+/// `entropy` = the 30-byte entropy section, `checksum` = the 6-byte
+/// base62-encoded CRC32.
+fn validate_crc32_base62(entropy: &[u8], checksum: &[u8]) -> bool {
+    debug_assert_eq!(entropy.len(), 30);
+    debug_assert_eq!(checksum.len(), 6);
+    let expected = crc32fast::hash(entropy);
+    base62_decode_6(checksum).is_some_and(|decoded| decoded == expected)
+}
+
+fn is_base62(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+}
+
+// ── github-token (classic CRC + fine-grained shape-only) ────────────
+
+/// Custom confirm for `github-token`.
+///
+/// Classic prefixes (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`):
+///   Exact prefix + 36 base62 chars (30 entropy + 6 CRC32). CRC mismatch
+///   ⇒ reject (pass through) — this is the FP-reduction mechanism.
+///
+/// Fine-grained (`github_pat_`):
+///   Shape-only, greedy `[0-9A-Za-z_]{36,255}`. No CRC validation (format
+///   not publicly pinned).
+pub(crate) fn confirm_github_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+    let rest = &haystack[anchor..];
+
+    if rest.starts_with(b"github_pat_") {
+        // Fine-grained: shape-only, greedy body.
+        let body_start = anchor + 11;
+        let cap = (body_start + 255).min(haystack.len());
+        let mut pos = body_start;
+        while pos < cap && is_github_body(haystack[pos]) {
+            pos += 1;
+        }
+        let body_len = pos - body_start;
+        return (body_len >= 36).then(|| ConfirmMatch::full(anchor, pos));
+    }
+
+    // Classic prefix: exactly 4 bytes.
+    let prefix = rest.get(..4)?;
+    if !matches!(prefix, b"ghp_" | b"gho_" | b"ghs_" | b"ghu_" | b"ghr_") {
+        return None;
+    }
+
+    // Exactly 36 body chars, base62 alphabet (no underscore).
+    let body_start = anchor + 4;
+    let body_end = body_start + 36;
+    if body_end > haystack.len() {
+        return None;
+    }
+    let body = &haystack[body_start..body_end];
+    if !body.iter().all(|&b| is_base62(b)) {
+        return None;
+    }
+
+    // CRC32 validation: first 30 = entropy, last 6 = checksum.
+    let entropy = &body[..30];
+    let checksum = &body[30..];
+    if !validate_crc32_base62(entropy, checksum) {
+        return None;
+    }
+
+    Some(ConfirmMatch::full(anchor, body_end))
+}
+
+fn is_github_body(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+// ── npm-token (CRC-validated) ───────────────────────────────────────
+
+/// Custom confirm for `npm-token`.
+///
+/// Exact prefix + 36 alnum chars (30 entropy + 6 CRC32). Body alphabet
+/// is `[0-9A-Za-z]` (no underscore). CRC mismatch ⇒ reject.
+pub(crate) fn confirm_npm_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+    let rest = &haystack[anchor..];
+    if !rest.starts_with(b"npm_") {
+        return None;
+    }
+
+    let body_start = anchor + 4;
+    let body_end = body_start + 36;
+    if body_end > haystack.len() {
+        return None;
+    }
+    let body = &haystack[body_start..body_end];
+    if !body.iter().all(|&b| is_base62(b)) {
+        return None;
+    }
+
+    let entropy = &body[..30];
+    let checksum = &body[30..];
+    if !validate_crc32_base62(entropy, checksum) {
+        return None;
+    }
+
+    Some(ConfirmMatch::full(anchor, body_end))
+}
+
 // ── aws-secret-key (context-keyed) ──────────────────────────────────
 
 /// Context-keyed confirm for `aws-secret-key`.
@@ -871,6 +994,298 @@ mod tests {
     fn phone_rejects_preceded_by_alnum() {
         // Preceded by a letter — not a boundary.
         assert!(confirm_phone_intl(b"x+14155551234", 1).is_none());
+    }
+
+    // --- base62 ---
+
+    #[test]
+    fn base62_decode_valid() {
+        // "000000" = 0
+        assert_eq!(base62_decode_6(b"000000"), Some(0));
+        // "000001" = 1
+        assert_eq!(base62_decode_6(b"000001"), Some(1));
+        // "00000z" = 61
+        assert_eq!(base62_decode_6(b"00000z"), Some(61));
+        // "000010" = 62
+        assert_eq!(base62_decode_6(b"000010"), Some(62));
+    }
+
+    #[test]
+    fn base62_decode_invalid_char() {
+        assert_eq!(base62_decode_6(b"00000_"), None); // underscore
+        assert_eq!(base62_decode_6(b"00000-"), None); // dash
+        assert_eq!(base62_decode_6(b"00000!"), None); // punctuation
+    }
+
+    #[test]
+    fn base62_decode_known_crc() {
+        // CRC32("AbCdEfGhIjKlMnOpQrStUvWxYz0123") = 0x9AC1C92E
+        // base62 = "2piBxe"
+        assert_eq!(base62_decode_6(b"2piBxe"), Some(0x9AC1C92E));
+    }
+
+    #[test]
+    fn base62_decode_max_u32() {
+        // u32::MAX = 4_294_967_295 → base62 "4gfFC3"
+        assert_eq!(base62_decode_6(b"4gfFC3"), Some(u32::MAX));
+    }
+
+    #[test]
+    fn base62_decode_overflow_returns_none() {
+        // "zzzzzz" = 61*62^5 + ... = 56_800_235_583 > u32::MAX
+        // Must return None (u32::try_from fails).
+        assert_eq!(base62_decode_6(b"zzzzzz"), None);
+    }
+
+    // --- CRC32 validation ---
+
+    #[test]
+    fn validate_crc32_base62_valid() {
+        let entropy = b"AbCdEfGhIjKlMnOpQrStUvWxYz0123";
+        let checksum = b"2piBxe";
+        assert!(validate_crc32_base62(entropy, checksum));
+    }
+
+    #[test]
+    fn validate_crc32_base62_wrong_checksum() {
+        let entropy = b"AbCdEfGhIjKlMnOpQrStUvWxYz0123";
+        let checksum = b"2piBxf"; // one char off
+        assert!(!validate_crc32_base62(entropy, checksum));
+    }
+
+    #[test]
+    fn validate_crc32_base62_wrong_entropy() {
+        let entropy = b"AbCdEfGhIjKlMnOpQrStUvWxYz0124"; // last digit changed
+        let checksum = b"2piBxe"; // checksum for the original entropy
+        assert!(!validate_crc32_base62(entropy, checksum));
+    }
+
+    #[test]
+    fn validate_crc32_base62_non_base62_checksum() {
+        // Underscore in checksum → base62_decode fails → false.
+        let entropy = b"AbCdEfGhIjKlMnOpQrStUvWxYz0123";
+        assert!(!validate_crc32_base62(entropy, b"2piB_e"));
+    }
+
+    // --- github-token (custom confirm) ---
+
+    #[test]
+    fn github_classic_valid_crc() {
+        // ghp_ + 30 entropy + 6 valid CRC = 40 bytes
+        let h = b"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";
+        let m = confirm_github_token(h, 0).unwrap();
+        assert_eq!(m.redact_start, 0);
+        assert_eq!(m.redact_end, 40);
+    }
+
+    #[test]
+    fn github_classic_wrong_crc_rejects() {
+        let h = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+        assert!(confirm_github_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn github_classic_exact_36_body() {
+        // With extra chars after — match is still exactly prefix+36.
+        let h = b"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ExtraChars";
+        let m = confirm_github_token(h, 0).unwrap();
+        assert_eq!(m.redact_end, 40); // NOT greedy
+    }
+
+    #[test]
+    fn github_classic_body_too_short() {
+        let h = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456"; // 35 body chars
+        assert!(confirm_github_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn github_classic_underscore_in_body_rejects() {
+        // Classic body must be base62 (no underscore).
+        let h = b"ghp_AbCdEfGhIjKlMnOp_rStUvWxYz01232piBxe";
+        assert!(confirm_github_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn github_pat_shape_only() {
+        // Fine-grained: shape-only, underscore allowed, greedy.
+        let mut h = b"github_pat_".to_vec();
+        h.extend(std::iter::repeat_n(b'x', 82));
+        let m = confirm_github_token(&h, 0).unwrap();
+        assert_eq!(m.redact_start, 0);
+        assert_eq!(m.redact_end, 93);
+    }
+
+    #[test]
+    fn github_pat_underscore_in_body() {
+        let mut h = b"github_pat_abc_def_".to_vec();
+        h.extend(std::iter::repeat_n(b'x', 30)); // total body = 19 + 30 = 49 >= 36
+        let m = confirm_github_token(&h, 0).unwrap();
+        assert_eq!(m.redact_start, 0);
+        assert_eq!(m.redact_end, h.len());
+    }
+
+    #[test]
+    fn github_pat_greedy_capped() {
+        let mut h = b"github_pat_".to_vec();
+        h.extend(std::iter::repeat_n(b'a', 300));
+        let m = confirm_github_token(&h, 0).unwrap();
+        // Cap at 255 body chars.
+        assert_eq!(m.redact_end, 11 + 255);
+    }
+
+    #[test]
+    fn github_all_classic_prefixes_work() {
+        // All five classic prefixes with the same entropy.
+        let entropy = b"AbCdEfGhIjKlMnOpQrStUvWxYz0123";
+        let checksum = b"2piBxe";
+        for prefix in [b"ghp_" as &[u8], b"gho_", b"ghs_", b"ghu_", b"ghr_"] {
+            let mut h = prefix.to_vec();
+            h.extend_from_slice(entropy);
+            h.extend_from_slice(checksum);
+            assert!(
+                confirm_github_token(&h, 0).is_some(),
+                "failed for prefix {:?}",
+                std::str::from_utf8(prefix).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn github_classic_at_nonzero_offset() {
+        // Token embedded mid-haystack.
+        let h = b"xx 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 yy";
+        let m = confirm_github_token(h, 3).unwrap();
+        assert_eq!(m.redact_start, 3);
+        assert_eq!(m.redact_end, 43);
+    }
+
+    #[test]
+    fn github_classic_unknown_prefix_rejects() {
+        // "ghx_" is not a known prefix — confirm must return None.
+        let h = b"ghx_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxe";
+        assert!(confirm_github_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn github_classic_anchor_near_eof() {
+        // Fewer than 4 bytes remaining → rest.get(..4) returns None.
+        assert!(confirm_github_token(b"ghp", 0).is_none());
+        assert!(confirm_github_token(b"gh", 0).is_none());
+        assert!(confirm_github_token(b"g", 0).is_none());
+    }
+
+    #[test]
+    fn github_classic_binary_in_body_rejects() {
+        // Non-ASCII byte in the body → not base62 → rejected.
+        let mut h = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz".to_vec();
+        h.push(0xFF); // binary byte
+        h.extend_from_slice(b"01232piBxe");
+        assert!(confirm_github_token(&h, 0).is_none());
+    }
+
+    #[test]
+    fn github_pat_body_too_short() {
+        // github_pat_ + 35 body chars → below minimum 36.
+        let mut h = b"github_pat_".to_vec();
+        h.extend(std::iter::repeat_n(b'x', 35));
+        assert!(confirm_github_token(&h, 0).is_none());
+    }
+
+    #[test]
+    fn github_pat_minimum_body_36() {
+        // Exactly 36 body chars — minimum, must match.
+        let mut h = b"github_pat_".to_vec();
+        h.extend(std::iter::repeat_n(b'x', 36));
+        let m = confirm_github_token(&h, 0).unwrap();
+        assert_eq!(m.redact_start, 0);
+        assert_eq!(m.redact_end, 47); // 11 + 36
+    }
+
+    #[test]
+    fn github_pat_at_nonzero_offset() {
+        let mut h = b"log ".to_vec();
+        h.extend_from_slice(b"github_pat_");
+        h.extend(std::iter::repeat_n(b'a', 40));
+        let m = confirm_github_token(&h, 4).unwrap();
+        assert_eq!(m.redact_start, 4);
+        assert_eq!(m.redact_end, 55); // 4 + 11 + 40
+    }
+
+    // --- npm-token (custom confirm) ---
+
+    #[test]
+    fn npm_valid_crc() {
+        let h = b"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";
+        let m = confirm_npm_token(h, 0).unwrap();
+        assert_eq!(m.redact_start, 0);
+        assert_eq!(m.redact_end, 40);
+    }
+
+    #[test]
+    fn npm_wrong_crc_rejects() {
+        let h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+        assert!(confirm_npm_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn npm_exact_36_body() {
+        // Extra alnum chars after — match is exactly prefix+36.
+        let h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeXYZ";
+        let m = confirm_npm_token(h, 0).unwrap();
+        assert_eq!(m.redact_end, 40); // NOT greedy
+    }
+
+    #[test]
+    fn npm_body_too_short() {
+        let h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456"; // 35 body
+        assert!(confirm_npm_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn npm_underscore_in_body_rejects() {
+        // npm body is alnum only — underscore rejected.
+        let h = b"npm_AbCdEfGhIjKlMnOp_rStUvWxYz01232piBxe";
+        assert!(confirm_npm_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn npm_at_nonzero_offset() {
+        let h = b"xx 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 yy";
+        let m = confirm_npm_token(h, 3).unwrap();
+        assert_eq!(m.redact_start, 3);
+        assert_eq!(m.redact_end, 43);
+    }
+
+    #[test]
+    fn npm_wrong_prefix_rejects() {
+        // "xpm_" — not "npm_".
+        let h = b"xpm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxe";
+        assert!(confirm_npm_token(h, 0).is_none());
+    }
+
+    #[test]
+    fn npm_body_truncated_at_eof() {
+        // Prefix present but body truncated by end of haystack.
+        assert!(confirm_npm_token(b"npm_abc", 0).is_none());
+        assert!(confirm_npm_token(b"npm_", 0).is_none());
+    }
+
+    #[test]
+    fn npm_binary_in_body_rejects() {
+        let mut h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz".to_vec();
+        h.push(0x00); // null byte
+        h.extend_from_slice(b"01232piBxe");
+        assert!(confirm_npm_token(&h, 0).is_none());
+    }
+
+    #[test]
+    fn npm_empty_haystack() {
+        assert!(confirm_npm_token(b"", 0).is_none());
+    }
+
+    #[test]
+    fn github_empty_haystack() {
+        assert!(confirm_github_token(b"", 0).is_none());
     }
 
     // --- aws-secret-key ---

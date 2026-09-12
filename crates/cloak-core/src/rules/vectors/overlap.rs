@@ -3,33 +3,42 @@
 //!
 //! These make the merge semantics visible in data: strict overlap merges
 //! (winner = longest-leftmost), exactly-touching spans stay separate.
+//!
+//! Classic github prefixes are CRC-validated (F12), so overlap vectors
+//! use `github_pat_` (shape-only) for the github-token side. npm tokens
+//! use valid CRC (same entropy → same checksum as in the npm vectors).
 
 use super::{ExpectedSpan, Vector};
 
 pub static VECTORS: &[Vector] = &[
     Vector {
-        // "gho_" nested inside a ghp_ body ('g','h','o','_' are all valid
-        // github body chars): both confirm, spans overlap → ONE merged span,
-        // digest over the full union.
-        // Layout: ghp_ (0..4) + 10 alnum + gho_ (14..18) + 36 body → end 54.
+        // `github_pat_` body contains a valid-CRC `ghp_` token: both confirm,
+        // spans overlap → ONE merged span, digest over the full union.
+        //
+        // Layout: github_pat_(0..11) + "a1b2c3d4e5"(11..21)
+        //         + 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(21..61)
+        //         + "xyzAB"(61..66)
+        // github_pat_ match: [0, 66) — body = 55 chars, greedy
+        // ghp_ match: [21, 61) — CRC-valid classic token
+        // Overlap: 21 < 61 and 0 < 66 → merge [0, 66), same rule, leftmost wins
         name: "overlap-same-rule-nested-anchor",
-        input: b"ghp_a1b2c3d4e5gho_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        input: b"github_pat_a1b2c3d4e5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xyzAB",
         spans: &[ExpectedSpan {
             start: 0,
-            end: 54,
+            end: 66,
             rule: "github-token",
         }],
     },
     Vector {
-        // Cross-rule tail extension: github body is 31 alnum + "glpat"
-        // (exactly 36, stopped by the '-'), then "glpat-" at 35 confirms a
-        // gitlab match [35, 61) extending past the github end [0, 40).
-        // Strict overlap (35 < 40) → merged [0, 61), leftmost rule wins.
+        // Cross-rule tail extension: github_pat_ body is 36 chars
+        // (31 alnum + "glpat", stopped by '-'), then "glpat-" at 42 confirms
+        // a gitlab match [42, 68) extending past the github end [0, 47).
+        // Strict overlap (42 < 47) → merged [0, 68), leftmost rule wins.
         name: "overlap-cross-rule-tail-extension",
-        input: b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01234glpat-abcdefghij0123456789",
+        input: b"github_pat_AbCdEfGhIjKlMnOpQrStUvWxYz01234glpat-abcdefghij0123456789",
         spans: &[ExpectedSpan {
             start: 0,
-            end: 61,
+            end: 68,
             rule: "github-token",
         }],
     },
@@ -37,8 +46,10 @@ pub static VECTORS: &[Vector] = &[
         // Zero-gap adjacency: npm match ends at 40 exactly where the gitlab
         // anchor starts. Touching is NOT overlap → TWO separate tags
         // (strict-overlap decision, docs/02-rules.md).
+        //
+        // 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 = valid CRC.
         name: "overlap-adjacent-zero-gap",
-        input: b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789glpat-abcdefghij0123456789",
+        input: b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeglpat-abcdefghij0123456789",
         spans: &[
             ExpectedSpan {
                 start: 0,
@@ -55,7 +66,7 @@ pub static VECTORS: &[Vector] = &[
     Vector {
         // One byte of separation → unambiguously two tags.
         name: "overlap-one-byte-gap",
-        input: b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789 glpat-abcdefghij0123456789",
+        input: b"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 glpat-abcdefghij0123456789",
         spans: &[
             ExpectedSpan {
                 start: 0,
@@ -70,14 +81,18 @@ pub static VECTORS: &[Vector] = &[
         ],
     },
     Vector {
-        // Containment: an npm match [9, 49) strictly inside a github match
-        // [0, 54) ("npm_" chars are valid github body) → union unchanged,
-        // leftmost (github) wins.
+        // Containment: a valid-CRC npm match [16, 56) strictly inside a
+        // github_pat_ match [0, 61) ("npm_" and alnum chars are valid
+        // github body) → union unchanged, leftmost (github) wins.
+        //
+        // github_pat_ body: "abc12npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxexyz01"
+        //   = 50 chars (>= 36 ✓)
+        // npm_ starts at 16: prefix(4) + 36 body → ends at 56.
         name: "overlap-contained-cross-rule",
-        input: b"ghp_abc12npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789xyz01",
+        input: b"github_pat_abc12npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxexyz01",
         spans: &[ExpectedSpan {
             start: 0,
-            end: 54,
+            end: 61,
             rule: "github-token",
         }],
     },

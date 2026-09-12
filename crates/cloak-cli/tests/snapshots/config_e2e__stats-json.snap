@@ -1,6 +1,6 @@
 ---
 source: crates/cloak-cli/tests/config_e2e.rs
-assertion_line: 266
+assertion_line: 283
 expression: stderr
 ---
 {"bytes_processed":123,"matches":{"github-token":2,"npm-token":1}}

@@ -66,8 +66,8 @@ fn chunked_redact(engine: &Engine, input: &[u8], chunks: &[usize]) -> Vec<u8> {
 
 fn planted_token() -> BoxedStrategy<Vec<u8>> {
     prop_oneof![
-        Just(b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".to_vec()),
-        Just(b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789".to_vec()),
+        Just(b"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".to_vec()),
+        Just(b"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".to_vec()),
         Just(b"glpat-abcdefghij0123456789".to_vec()),
     ]
     .boxed()
