@@ -308,6 +308,12 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     if password_start >= password_end {
         return None;
     }
+    // Idempotence (docs/03): a password that is already a redaction tag
+    // must not re-match — otherwise redact(redact(S)) re-digests the tag.
+    // Same guard as the PEM body check in engine/pem.rs.
+    if haystack[password_start..password_end].starts_with(b"[CLOAK:") {
+        return None;
+    }
     Some(ConfirmMatch {
         match_start: scheme_start,
         match_end: at_pos + 1, // include the `@`
@@ -1328,6 +1334,14 @@ mod tests {
         assert!(confirm_connection_string(h, 5).is_none());
     }
 
+    #[test]
+    fn connstring_redacted_password_rejected() {
+        // Idempotence guard: a password that is already a redaction tag
+        // must not re-match (found by fuzz_engine_stream).
+        let h = b"redis://default:[CLOAK:connection-string:aea0]@redis:6379";
+        assert!(confirm_connection_string(h, 5).is_none());
+    }
+
     // --- azure ---
 
     #[test]
@@ -1342,5 +1356,117 @@ mod tests {
     fn azure_sig_too_short() {
         let h = b"sig=abc";
         assert!(confirm_azure_token(h, 0).is_none());
+    }
+
+    // --- negative-path arms (S6 coverage fill: every reject branch of
+    // every validator is exercised directly, not only through vectors) ---
+
+    #[test]
+    fn aws_secret_negative_arms() {
+        // Anchor bytes not an accepted key name.
+        assert!(confirm_aws_secret(b"aws_secretX=0123", 0).is_none());
+        // Preceded by an alphanumeric (mid-word).
+        let h = b"Xaws_secret_access_key=0123456789012345678901234567890123456789";
+        assert!(confirm_aws_secret(h, 1).is_none());
+        // Key name runs to EOF while skipping quotes/whitespace.
+        assert!(confirm_aws_secret(b"aws_secret_access_key \t", 0).is_none());
+        // Separator is neither `=` nor `:`.
+        assert!(
+            confirm_aws_secret(
+                b"aws_secret_access_key*0123456789012345678901234567890123456789",
+                0
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn azure_anchor_mismatch_rejected() {
+        // Called at bytes that are not an accepted anchor.
+        assert!(confirm_azure_token(b"NotAKey=abcdefghijklmnopqrstuv", 0).is_none());
+    }
+
+    #[test]
+    fn connstring_negative_arms() {
+        // `@` farther than the 300-byte cap.
+        let mut h = b"postgres://user:".to_vec();
+        h.extend_from_slice(&vec![b'p'; 300]);
+        h.push(b'@');
+        h.extend_from_slice(b"host");
+        assert!(confirm_connection_string(&h, 8).is_none());
+        // Empty password: colon immediately before `@`.
+        assert!(confirm_connection_string(b"postgres://user:@host", 8).is_none());
+    }
+
+    #[test]
+    fn jwt_negative_arms() {
+        // Dot at position 0 (direct call — anchored calls can't produce it).
+        assert!(confirm_jwt(b".ab.cd", 0).is_none());
+        // Empty payload: two consecutive dots.
+        assert!(confirm_jwt(b"eyJhbGci..signature", 0).is_none());
+        // Invalid byte inside the header segment.
+        assert!(confirm_jwt(b"eyJ\xffab.cd.ef", 0).is_none());
+        // Header decodes but is not a JSON object.
+        assert!(confirm_jwt(b"QUJD.abcd.efgh", 0).is_none());
+        // `-`/`_` decode arms of base64url.
+        assert!(base64url_decode(b"eyJ-_w").is_some());
+    }
+
+    #[test]
+    fn credit_card_negative_arms() {
+        // More than 19 digits — cap branch, then length reject.
+        assert!(confirm_credit_card(b"41111111111111111111111", 0).is_none());
+        // Separator at the anchor position (no digits yet).
+        assert!(confirm_credit_card(b" 4111111111111111", 0).is_none());
+        // Digit immediately after the match window.
+        assert!(confirm_credit_card(b"45395787636214860", 0).is_none());
+        // Luhn-valid but unknown IIN.
+        assert!(confirm_credit_card(b"9111111111111111", 0).is_none());
+        // Discover 6011 positive arm.
+        let m = confirm_credit_card(b"6011000990139424", 0).unwrap();
+        assert_eq!(m.match_end, 16);
+        // iin_check arms directly.
+        assert!(!iin_check(&[]));
+        assert!(!iin_check(b"60"));
+        assert!(iin_check(b"6510000000000000"));
+    }
+
+    #[test]
+    fn email_negative_arms() {
+        // Local part ends with a dot.
+        assert!(confirm_email(b"a.@example.com", 2).is_none());
+        // Domain label starts with a hyphen.
+        assert!(confirm_email(b"user@-bad.com", 4).is_none());
+        // Domain label ends with a hyphen.
+        assert!(confirm_email(b"user@bad-.com", 4).is_none());
+    }
+
+    #[test]
+    fn ipv4_boundary_arms() {
+        // Backward scan hits the 11-byte cap with a digit still before it
+        // (a number too long to be an octet run).
+        let h = b"1111111111111.2.3.4";
+        assert!(confirm_ipv4(h, 12).is_none());
+        // Octet over 255.
+        assert!(confirm_ipv4(b"1.2.3.456", 0).is_none());
+    }
+
+    #[test]
+    fn ipv6_negative_arms() {
+        // Longer than 45 bytes of ipv6 charset.
+        let h = b"1111:2222:3333:4444:5555:6666:7777:8888:9999::aaaa";
+        assert!(confirm_ipv6(h, 45).is_none());
+        // Followed by an alphanumeric.
+        assert!(confirm_ipv6(b"::1z", 0).is_none());
+        // validate arms: full form (no `::`), multiple `::`.
+        assert!(validate_ipv6(b"1:2:3:4:5:6:7:8"));
+        assert!(!validate_ipv6(b"1:2:3:4:5:6:7"));
+        assert!(!validate_ipv6(b"1::2::3"));
+    }
+
+    #[test]
+    fn phone_boundary_after_digit() {
+        // 13th digit right after the 12-digit cap window.
+        assert!(confirm_phone_intl(b"+1234567890123456789", 0).is_none());
     }
 }

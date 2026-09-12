@@ -1,0 +1,1 @@
+redis://default:[CLOAK:connection-string:aea0]@redis:6379

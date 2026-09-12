@@ -148,9 +148,13 @@ pub(crate) fn end_marker_for(key_type_idx: usize) -> Vec<u8> {
 }
 
 /// Window required to confirm a PEM BEGIN at a given anchor position.
-/// The longest BEGIN line is `MAX_PEM_LINE` bytes.
+/// The longest BEGIN line is `MAX_PEM_LINE` bytes, plus the bytes the
+/// `[CLOAK:` idempotence guard in [`confirm_pem_begin`] inspects after
+/// the line — without them a streaming push could confirm the BEGIN
+/// before the guard bytes arrive and redact an already-redacted block
+/// the whole-buffer path rejects (found by fuzz_pem_state).
 pub(crate) fn pem_confirm_window() -> usize {
-    MAX_PEM_LINE
+    MAX_PEM_LINE + CLOAK_TAG_PREFIX.len()
 }
 
 // ---------------------------------------------------------------------------

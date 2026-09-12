@@ -1,0 +1,52 @@
+# Fuzz tier (docs/03-guarantee-and-testing.md §4) — cargo-fuzz harnesses.
+#
+# Excluded from the workspace (root Cargo.toml): builds need nightly +
+# libFuzzer flags, and libfuzzer-sys must stay out of cargo-deny's scan.
+# CI lints this crate separately via --manifest-path.
+#
+# Toolchain: rust-toolchain.toml pins stable for the repo, so every fuzz
+# invocation must select nightly explicitly, e.g.
+#   cargo +nightly-2026-09-05 fuzz run fuzz_engine_stream
+# Pin bump policy: bump the dated nightly (here in CI comments and in the
+# workflows) when cargo-fuzz requires it or monthly, whichever comes first.
+
+# Own workspace root (paired with `exclude` in the repo-root Cargo.toml).
+[workspace]
+
+[package]
+name = "cloak-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Key derivation only — mirrors tests/differential.rs.
+blake3 = "1"
+
+[dependencies.cloak-core]
+path = ".."
+
+[[bin]]
+name = "fuzz_engine_stream"
+path = "fuzz_targets/fuzz_engine_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pem_state"
+path = "fuzz_targets/fuzz_pem_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_config"
+path = "fuzz_targets/fuzz_config.rs"
+test = false
+doc = false
+bench = false

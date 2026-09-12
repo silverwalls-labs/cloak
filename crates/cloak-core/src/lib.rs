@@ -7,6 +7,26 @@
 //! The API is deliberately **binding-shaped**: bytes in, bytes out, expressible
 //! over a C ABI or WASM linear memory, so embedding (v0.2) lands without
 //! core rework.
+//!
+//! # Example
+//!
+//! The full pipe loop — config → engine → session → push/finish:
+//!
+//! ```
+//! use cloak_core::{Config, Engine};
+//!
+//! let config = Config::ephemeral(); // testing: no env lookup, no warning
+//! let engine = Engine::new(&config)?;
+//!
+//! let mut session = engine.session();
+//! let mut out = Vec::new();
+//! session.push(b"user=alice token=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\n", &mut out)?;
+//! let stats = session.finish(&mut out)?;
+//!
+//! assert!(out.starts_with(b"user=alice token=[CLOAK:github-token:"));
+//! assert_eq!(stats.total_matches(), 1);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 #![deny(unsafe_code)]
 

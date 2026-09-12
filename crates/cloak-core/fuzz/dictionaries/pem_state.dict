@@ -1,0 +1,19 @@
+# libFuzzer dictionary for fuzz_pem_state: PEM structural fragments
+# (engine/pem.rs constants) so mutation assembles adversarial BEGIN/END
+# sequences quickly.
+
+pem_begin="-----BEGIN "
+pem_end="-----END "
+pem_dashes="-----"
+key_rsa="RSA PRIVATE KEY"
+key_ec="EC PRIVATE KEY"
+key_dsa="DSA PRIVATE KEY"
+key_openssh="OPENSSH PRIVATE KEY"
+key_encrypted="ENCRYPTED PRIVATE KEY"
+key_pkcs8="PRIVATE KEY"
+begin_rsa_line="-----BEGIN RSA PRIVATE KEY-----"
+end_rsa_line="-----END RSA PRIVATE KEY-----"
+base64_chunk="MIIEpAIBAAKCAQEA"
+tag_prefix="[CLOAK:pem-private-key:"
+newline="\x0a"
+crlf="\x0d\x0a"

@@ -1,0 +1,13 @@
+# cargo-mutants (nightly CI stage, docs/03).
+#
+# Scope: ALL of cloak-core, including src/reference/ — a surviving mutant
+# in the oracle means the differential suite failed to notice the oracle
+# lying, which is exactly the tests-of-the-tests signal mutation testing
+# exists for. Narrowing trigger (record the measured numbers in the PR
+# that applies it): if a shard exceeds ~90 min or reference/ produces a
+# wall of low-value display/formatting survivors, restrict with
+#   examine_globs = ["src/engine/**", "src/rules/**", "src/config/**", "src/redact/**"]
+
+# Proptest suites (1024 cases each) make the baseline test run slow —
+# give mutated builds headroom before declaring a timeout.
+timeout_multiplier = 2.0

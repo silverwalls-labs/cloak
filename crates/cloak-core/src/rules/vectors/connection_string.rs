@@ -101,4 +101,11 @@ pub static NEGATIVE: &[Vector] = &[
         input: b"://bare",
         spans: &[],
     },
+    Vector {
+        name: "connstring-already-redacted",
+        // Idempotence: the tag in password position must not re-match
+        // (fuzz_engine_stream finding — redact(redact(S)) re-digested it).
+        input: b"redis://default:[CLOAK:connection-string:aea0]@redis:6379",
+        spans: &[],
+    },
 ];

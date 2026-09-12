@@ -1,0 +1,140 @@
+name: Nightly
+
+# Stage 2 of docs/03 §CI staging: extended fuzz (≥ 1 h/target, both Linux
+# ISAs) + cargo-mutants over cloak-core. Soak + criterion land in S7.
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz-extended:
+    name: Extended Fuzz (1h)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        target: [fuzz_engine_stream, fuzz_pem_state, fuzz_config]
+        include:
+          - target: fuzz_engine_stream
+            dict: engine_stream.dict
+            max_len: 32768
+            # Keep stderr open: panic/assert messages (which invariant, which
+            # length, which chunk schedule) must reach the log on a finding.
+            extra_flags: ""
+          - target: fuzz_pem_state
+            dict: pem_state.dict
+            max_len: 32768
+            extra_flags: ""
+          - target: fuzz_config
+            dict: config.dict
+            max_len: 4096
+            # Only fuzz_config needs -close_fd_mask: valid ephemeral-key
+            # configs print a stderr warning every iteration.
+            extra_flags: "-close_fd_mask=3"
+    runs-on: ${{ matrix.os }}
+    env:
+      # Pin bump policy: when cargo-fuzz requires it or monthly.
+      RUSTUP_TOOLCHAIN: nightly-2026-09-05
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust (nightly — libFuzzer instrumentation)
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: nightly-2026-09-05
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: crates/cloak-core/fuzz
+
+      - name: Install cargo-fuzz
+        run: |
+          cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Extended fuzz (1h)
+        working-directory: crates/cloak-core
+        run: |
+          # A crash fails the job — that is the finding-filed signal; the
+          # minimized input lands in the artifact below. Back-port every
+          # finding as a deterministic integration test AND a committed
+          # corpus entry (see fuzz/corpus/*/regression-*).
+          # NOTE: flip on CLOAK_FUZZ_STRICT=1 once issues #27 and #34 are
+          # fixed (fuzz/src/common.rs documents what the cap hides).
+          cargo fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -O --debug-assertions -- \
+            -max_total_time=3600 -timeout=10 -rss_limit_mb=2048 \
+            -max_len=${{ matrix.max_len }} \
+            ${{ matrix.extra_flags }} \
+            -dict=fuzz/dictionaries/${{ matrix.dict }}
+
+      - name: Upload grown corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nightly-fuzz-${{ matrix.target }}-${{ matrix.os }}
+          path: |
+            crates/cloak-core/fuzz/corpus/${{ matrix.target }}/
+            crates/cloak-core/fuzz/artifacts/
+          if-no-files-found: ignore
+
+  mutants:
+    name: Mutation Testing (shard ${{ matrix.shard }}/4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-mutants
+        run: |
+          cargo install cargo-mutants --version 27.1.0 --locked
+
+      - name: Mutation testing
+        run: |
+          # Exit 2 = surviving mutants: reported non-blocking initially
+          # (docs/03 — "surviving mutants filed as findings"); flip to
+          # blocking against a committed baseline once the first runs are
+          # triaged. Any other non-zero exit is a real failure.
+          rc=0
+          cargo mutants -p cloak-core --shard ${{ matrix.shard }}/4 --no-shuffle -vV || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "::warning::surviving mutants in shard ${{ matrix.shard }} — see artifact"
+            {
+              echo "## Surviving mutants (shard ${{ matrix.shard }}/4)"
+              echo '```'
+              cat mutants.out/missed.txt 2>/dev/null || echo "(missed.txt not found)"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
+
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore

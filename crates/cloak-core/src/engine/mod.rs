@@ -66,6 +66,13 @@ impl Engine {
     /// enabled rules' anchors plus one anchored confirm DFA per rule.
     /// Rules disabled via `config.rules` are excluded from the prefilter
     /// and confirm compilation. PEM is gated separately.
+    ///
+    /// ```
+    /// use cloak_core::{Config, Engine};
+    ///
+    /// let engine = Engine::new(&Config::ephemeral())?;
+    /// # Ok::<(), cloak_core::BuildError>(())
+    /// ```
     pub fn new(config: &Config) -> Result<Self, BuildError> {
         config.validate()?;
         let digest_key = config::resolve_digest_key(config.digest_key_env_var())?;
@@ -170,6 +177,23 @@ impl Session<'_> {
     /// arrived yet is hashed incrementally by the PEM state machine instead
     /// of being retained. Call [`finish`](Self::finish) to flush remaining
     /// carry-over and obtain per-rule statistics.
+    ///
+    /// Chunk boundaries never change the output — any chunking of the
+    /// same bytes produces identical redacted output (docs/03):
+    ///
+    /// ```
+    /// use cloak_core::{Config, Engine};
+    ///
+    /// let engine = Engine::new(&Config::ephemeral())?;
+    /// let mut session = engine.session();
+    /// let mut out = Vec::new();
+    /// // A secret split across pushes is still caught.
+    /// session.push(b"key=AKIAIOSFO", &mut out)?;
+    /// session.push(b"DNN7EXAMPLE ok\n", &mut out)?;
+    /// let stats = session.finish(&mut out)?;
+    /// assert_eq!(stats.total_matches(), 1);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn push(&mut self, chunk: &[u8], out: &mut impl io::Write) -> io::Result<()> {
         self.bytes_processed += chunk.len() as u64;
 
@@ -879,6 +903,34 @@ mod tests {
                 stats.matches, whole_stats.matches,
                 "stats diverge at {chunk_size}"
             );
+        }
+    }
+
+    #[test]
+    fn tag_after_begin_line_rejected_at_every_chunk_size() {
+        // fuzz_pem_state regression: the `[CLOAK:` idempotence guard reads
+        // bytes AFTER the BEGIN line, so the confirm window must cover
+        // them — with a short window, tiny pushes confirmed the BEGIN
+        // before the guard bytes arrived and redacted a block the
+        // whole-buffer path rejects (passthrough).
+        let engine = test_engine();
+        let mut input = b"-----BEGIN ENCRYPTED PRIVATE KEY-----".to_vec();
+        input.extend_from_slice(b"[CLOAK:pem-private-key:\nMIIE6TAbBg\n");
+        input.extend_from_slice(b"-----END ENCRYPTED PRIVATE KEY-----");
+        let (whole, whole_stats) = push_all(&engine, &input);
+        assert_eq!(whole, input, "guard must reject the tagged block");
+        for chunk_size in [1, 3, 7, 38, 44] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert_eq!(
+                out, whole,
+                "chunk-size={chunk_size} streaming diverges from whole-buffer"
+            );
+            assert_eq!(stats.matches, whole_stats.matches);
         }
     }
 

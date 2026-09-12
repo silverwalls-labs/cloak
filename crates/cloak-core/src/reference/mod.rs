@@ -80,13 +80,35 @@ const GCP_BODY: usize = 35;
 const PYPI_MIN: usize = 50;
 const BODY_CAP: usize = 255;
 
-/// One confirmed match, pre-merge.
+/// One confirmed match, pre-merge. `start..end` is the full match EXTENT
+/// (includes context for context-keyed rules — used for overlap grouping
+/// and winner selection, mirroring the engine's `RawMatch`);
+/// `redact_start..redact_end` is the sub-span actually replaced by a tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RefMatch {
     start: usize,
     end: usize,
+    redact_start: usize,
+    redact_end: usize,
     rule: usize,
 }
+
+impl RefMatch {
+    /// Full-span match: redaction covers the whole extent.
+    fn full(start: usize, end: usize, rule: usize) -> Self {
+        RefMatch {
+            start,
+            end,
+            redact_start: start,
+            redact_end: end,
+            rule,
+        }
+    }
+}
+
+/// Context-keyed confirm result:
+/// (extent_start, extent_end, redact_start, redact_end).
+type RefSpans = (usize, usize, usize, usize);
 
 // ── Independent CRC32 + base62 (oracle reimplementation, no shared code) ──
 
@@ -276,9 +298,11 @@ fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
     (taken >= PYPI_MIN).then_some(start + PYPI_PREFIX.len() + taken)
 }
 
-// --- Context-keyed: return (redact_start, redact_end) ---
+// --- Context-keyed: return (extent_start, extent_end, redact_start,
+// redact_end) — the extent includes the context (key name, scheme), the
+// redact sub-span is what gets replaced. Mirrors engine ConfirmMatch. ---
 
-fn confirm_aws_secret(input: &[u8], start: usize) -> Option<(usize, usize)> {
+fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
     if start >= input.len() {
         return None;
     }
@@ -317,21 +341,24 @@ fn confirm_aws_secret(input: &[u8], start: usize) -> Option<(usize, usize)> {
         pos += 1;
         taken += 1;
     }
-    (taken == 40).then_some((value_start, pos))
+    (taken == 40).then_some((start, pos, value_start, pos))
 }
 
 fn is_base64_oracle(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
 }
 
-fn confirm_azure(input: &[u8], start: usize) -> Option<(usize, usize)> {
+fn confirm_azure(input: &[u8], start: usize) -> Option<RefSpans> {
     if start >= input.len() {
         return None;
     }
     let rest = &input[start..];
-    let key_len = if rest.len() >= 11 && rest[..11].eq_ignore_ascii_case(b"accountkey=") {
+    // A match must begin at one of the catalog's LITERAL anchors — not any
+    // case variant (`Accountkey=` is not an anchor; the engine's prefilter
+    // is byte-exact — found by fuzz_engine_stream).
+    let key_len = if rest.starts_with(b"AccountKey=") || rest.starts_with(b"accountkey=") {
         11
-    } else if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"sig=") {
+    } else if rest.starts_with(b"sig=") {
         4
     } else {
         return None;
@@ -343,7 +370,7 @@ fn confirm_azure(input: &[u8], start: usize) -> Option<(usize, usize)> {
         pos += 1;
         taken += 1;
     }
-    (taken >= 20).then_some((value_start, pos))
+    (taken >= 20).then_some((start, pos, value_start, pos))
 }
 
 fn is_azure_val_oracle(b: u8) -> bool {
@@ -355,6 +382,12 @@ fn is_azure_val_oracle(b: u8) -> bool {
 
 fn confirm_jwt_oracle(input: &[u8], start: usize) -> Option<usize> {
     let rest = &input[start..];
+    // A match must begin at the catalog anchor `eyJ` — shape alone is not
+    // enough (`eyI`/`eyK`/`eyL` also decode to `{"`, but the rule spec
+    // anchors on the literal bytes; found by fuzz_engine_stream).
+    if !rest.starts_with(b"eyJ") {
+        return None;
+    }
     let limit = rest.len().min(2048);
     let rest = &rest[..limit];
     let dot1 = rest.iter().position(|&b| b == b'.')?;
@@ -424,7 +457,7 @@ fn b64url_decode_oracle(input: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn confirm_connstring(input: &[u8], start: usize) -> Option<(usize, usize)> {
+fn confirm_connstring(input: &[u8], start: usize) -> Option<RefSpans> {
     // Must have `://` at this position.
     if start + 2 >= input.len()
         || input[start] != b':'
@@ -457,14 +490,21 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<(usize, usize)> {
     if pw_start >= pw_end {
         return None;
     }
-    Some((pw_start, pw_end))
+    // Idempotence: an already-redacted password must not re-match
+    // (mirrors the engine guard in rules/validators.rs).
+    if input[pw_start..pw_end].starts_with(b"[CLOAK:") {
+        return None;
+    }
+    // Extent: scheme through the `@` (mirrors engine
+    // confirm_connection_string); redact: password only.
+    Some((scheme_start, at_pos + 1, pw_start, pw_end))
 }
 
 fn is_scheme_oracle(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.'
 }
 
-fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<(usize, usize)> {
+fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<RefSpans> {
     // Must actually be an `@` at this position (oracle is called at every offset).
     if at_pos >= input.len() || input[at_pos] != b'@' {
         return None;
@@ -501,7 +541,8 @@ fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<(usize, usize)> {
             return None;
         }
     }
-    Some((local_start, domain_end))
+    // Full-span rule: extent == redact span.
+    Some((local_start, domain_end, local_start, domain_end))
 }
 
 fn is_email_local_oracle(b: u8) -> bool {
@@ -575,7 +616,7 @@ fn parse_u8_ref(bytes: &[u8]) -> u16 {
     v
 }
 
-fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<(usize, usize)> {
+fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<RefSpans> {
     // The anchor `::` is 2 bytes — need at least 2 bytes at dc_pos.
     if dc_pos + 1 >= input.len() || input[dc_pos] != b':' || input[dc_pos + 1] != b':' {
         return None;
@@ -601,7 +642,8 @@ fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<(usize, usize)> {
     if !validate_ipv6_oracle(addr) {
         return None;
     }
-    Some((start, end))
+    // Full-span rule: extent == redact span.
+    Some((start, end, start, end))
 }
 
 fn is_ipv6_char_oracle(b: u8) -> bool {
@@ -669,11 +711,25 @@ fn is_v4_suffix_oracle(bytes: &[u8]) -> bool {
     })
 }
 
+/// Literal credit-card IIN anchors (catalog: Big Four prefixes).
+const CC_ANCHORS: [&[u8]; 10] = [
+    b"34", b"37", // Amex
+    b"4",  // Visa
+    b"51", b"52", b"53", b"54", b"55", // Mastercard
+    b"6011", b"65", // Discover
+];
+
 fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
     if start > 0 && input[start - 1].is_ascii_digit() {
         return None;
     }
     let rest = &input[start..];
+    // A match must begin at a LITERAL anchor — contiguous bytes, no
+    // separator inside the IIN prefix ("3 7..." is not the "37" anchor;
+    // found by fuzz_engine_stream).
+    if !CC_ANCHORS.iter().any(|a| rest.starts_with(a)) {
+        return None;
+    }
     let limit = rest.len().min(25);
     let mut digits = Vec::with_capacity(19);
     let mut end = 0;
@@ -823,32 +879,20 @@ fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
                     let body_end = body_start + end_offset;
                     let actual_body_len = body_end - body_start;
                     if actual_body_len <= PEM_BAIL_OUT {
-                        blocks.push(RefMatch {
-                            start: body_start,
-                            end: body_end,
-                            rule: PEM,
-                        });
+                        blocks.push(RefMatch::full(body_start, body_end, PEM));
                         pos = body_end + end_marker.len();
                         continue;
                     } else {
                         // Bail-out: redact first PEM_BAIL_OUT bytes of body.
                         let bail_end = body_start + PEM_BAIL_OUT;
-                        blocks.push(RefMatch {
-                            start: body_start,
-                            end: bail_end,
-                            rule: PEM,
-                        });
+                        blocks.push(RefMatch::full(body_start, bail_end, PEM));
                         pos = bail_end;
                         continue;
                     }
                 } else {
                     // No END marker: bail-out the entire remaining body.
                     let bail_end = (body_start + PEM_BAIL_OUT).min(input.len());
-                    blocks.push(RefMatch {
-                        start: body_start,
-                        end: bail_end,
-                        rule: PEM,
-                    });
+                    blocks.push(RefMatch::full(body_start, bail_end, PEM));
                     pos = bail_end;
                     continue;
                 }
@@ -912,26 +956,29 @@ fn find_all_matches(input: &[u8], pem_blocks: &[RefMatch]) -> Vec<RefMatch> {
             (PHONE_INTL, confirm_phone_oracle),
         ] {
             if let Some(end) = confirm(input, start) {
-                matches.push(RefMatch { start, end, rule });
+                matches.push(RefMatch::full(start, end, rule));
             }
         }
-        // Context-keyed/backward-looking: confirm returns (redact_start, redact_end).
+        // Context-keyed/backward-looking: confirm returns
+        // (extent_start, extent_end, redact_start, redact_end).
         // These functions validate their anchor internally, so calling at
         // every offset is safe — non-anchor positions return None immediately.
         for (rule, confirm) in [
             (
                 AWS_SECRET,
-                confirm_aws_secret as fn(&[u8], usize) -> Option<(usize, usize)>,
+                confirm_aws_secret as fn(&[u8], usize) -> Option<RefSpans>,
             ),
             (AZURE, confirm_azure),
             (CONN_STRING, confirm_connstring),
             (EMAIL, confirm_email_oracle),
             (IPV6, confirm_ipv6_oracle),
         ] {
-            if let Some((rs, re)) = confirm(input, start) {
+            if let Some((es, ee, rs, re)) = confirm(input, start) {
                 matches.push(RefMatch {
-                    start: rs,
-                    end: re,
+                    start: es,
+                    end: ee,
+                    redact_start: rs,
+                    redact_end: re,
                     rule,
                 });
             }
@@ -943,11 +990,7 @@ fn find_all_matches(input: &[u8], pem_blocks: &[RefMatch]) -> Vec<RefMatch> {
             && input[start + 1] == b'.'
             && let Some((rs, re)) = confirm_ipv4_oracle(input, start)
         {
-            matches.push(RefMatch {
-                start: rs,
-                end: re,
-                rule: IPV4,
-            });
+            matches.push(RefMatch::full(rs, re, IPV4));
         }
     }
     // Deduplicate: backward-looking rules may produce the same span from
@@ -957,6 +1000,8 @@ fn find_all_matches(input: &[u8], pem_blocks: &[RefMatch]) -> Vec<RefMatch> {
             .cmp(&b.start)
             .then(b.end.cmp(&a.end))
             .then(a.rule.cmp(&b.rule))
+            .then(a.redact_start.cmp(&b.redact_start))
+            .then(a.redact_end.cmp(&b.redact_end))
     });
     matches.dedup();
     matches
@@ -1007,8 +1052,9 @@ fn merge_matches(matches: &[RefMatch]) -> Vec<RefMatch> {
                 .map(|x| x.end)
                 .max()
                 .expect("group is never empty");
-            // Winner: longest-leftmost over the ORIGINAL member spans —
-            // leftmost start, then longer, then catalog order.
+            // Winner: longest-leftmost over the ORIGINAL member EXTENTS —
+            // leftmost start, then longer, then catalog order (mirrors the
+            // engine's overlap::merge sort).
             let winner = group
                 .iter()
                 .min_by(|a, b| {
@@ -1018,9 +1064,22 @@ fn merge_matches(matches: &[RefMatch]) -> Vec<RefMatch> {
                         .then(a.rule.cmp(&b.rule))
                 })
                 .expect("group is never empty");
+            // Redaction span: min/max union of member redact sub-spans.
+            let redact_start = group
+                .iter()
+                .map(|x| x.redact_start)
+                .min()
+                .expect("group is never empty");
+            let redact_end = group
+                .iter()
+                .map(|x| x.redact_end)
+                .max()
+                .expect("group is never empty");
             RefMatch {
                 start,
                 end,
+                redact_start,
+                redact_end,
                 rule: winner.rule,
             }
         })
@@ -1043,12 +1102,14 @@ pub fn redact(input: &[u8], digest_key: &[u8; 32]) -> (Vec<u8>, Stats) {
     let mut match_counts: BTreeMap<RuleId, u64> = BTreeMap::new();
     let mut pos = 0;
     for m in &merged {
-        out.extend_from_slice(&input[pos..m.start]);
+        // Context bytes (extent outside the redact sub-span) pass through.
+        out.extend_from_slice(&input[pos..m.redact_start]);
         let rule_id = RuleId::new(RULE_IDS[m.rule]);
-        let digest = crate::redact::compute_digest(&input[m.start..m.end], digest_key);
+        let digest =
+            crate::redact::compute_digest(&input[m.redact_start..m.redact_end], digest_key);
         crate::redact::write_tag(&rule_id, &digest, &mut out).expect("write to Vec cannot fail");
         *match_counts.entry(rule_id).or_insert(0) += 1;
-        pos = m.end;
+        pos = m.redact_end;
     }
     out.extend_from_slice(&input[pos..]);
 
@@ -1314,42 +1375,22 @@ mod tests {
     #[test]
     fn merge_empty_and_single() {
         assert!(merge_matches(&[]).is_empty());
-        let single = [RefMatch {
-            start: 5,
-            end: 10,
-            rule: NPM,
-        }];
+        let single = [RefMatch::full(5, 10, NPM)];
         assert_eq!(merge_matches(&single), single);
     }
 
     #[test]
     fn merge_disjoint_stays_sorted() {
         let matches = [
-            RefMatch {
-                start: 20,
-                end: 30,
-                rule: GITLAB,
-            },
-            RefMatch {
-                start: 0,
-                end: 10,
-                rule: GITHUB,
-            },
+            RefMatch::full(20, 30, GITLAB),
+            RefMatch::full(0, 10, GITHUB),
         ];
         let merged = merge_matches(&matches);
         assert_eq!(
             merged,
             [
-                RefMatch {
-                    start: 0,
-                    end: 10,
-                    rule: GITHUB
-                },
-                RefMatch {
-                    start: 20,
-                    end: 30,
-                    rule: GITLAB
-                },
+                RefMatch::full(0, 10, GITHUB),
+                RefMatch::full(20, 30, GITLAB),
             ]
         );
     }
@@ -1357,145 +1398,43 @@ mod tests {
     #[test]
     fn merge_touching_stays_separate() {
         // Strict overlap only: [0,10) + [10,20) do NOT merge.
-        let matches = [
-            RefMatch {
-                start: 0,
-                end: 10,
-                rule: NPM,
-            },
-            RefMatch {
-                start: 10,
-                end: 20,
-                rule: GITLAB,
-            },
-        ];
+        let matches = [RefMatch::full(0, 10, NPM), RefMatch::full(10, 20, GITLAB)];
         assert_eq!(merge_matches(&matches), matches);
     }
 
     #[test]
     fn merge_overlap_leftmost_wins() {
-        let matches = [
-            RefMatch {
-                start: 5,
-                end: 25,
-                rule: GITLAB,
-            },
-            RefMatch {
-                start: 0,
-                end: 10,
-                rule: NPM,
-            },
-        ];
-        assert_eq!(
-            merge_matches(&matches),
-            [RefMatch {
-                start: 0,
-                end: 25,
-                rule: NPM
-            }]
-        );
+        let matches = [RefMatch::full(5, 25, GITLAB), RefMatch::full(0, 10, NPM)];
+        assert_eq!(merge_matches(&matches), [RefMatch::full(0, 25, NPM)]);
     }
 
     #[test]
     fn merge_transitive_chain() {
         // A∩B and B∩C but A∌C → one span.
         let matches = [
-            RefMatch {
-                start: 0,
-                end: 10,
-                rule: GITHUB,
-            },
-            RefMatch {
-                start: 18,
-                end: 30,
-                rule: NPM,
-            },
-            RefMatch {
-                start: 8,
-                end: 20,
-                rule: GITLAB,
-            },
+            RefMatch::full(0, 10, GITHUB),
+            RefMatch::full(18, 30, NPM),
+            RefMatch::full(8, 20, GITLAB),
         ];
-        assert_eq!(
-            merge_matches(&matches),
-            [RefMatch {
-                start: 0,
-                end: 30,
-                rule: GITHUB
-            }]
-        );
+        assert_eq!(merge_matches(&matches), [RefMatch::full(0, 30, GITHUB)]);
     }
 
     #[test]
     fn merge_same_start_longer_wins() {
-        let matches = [
-            RefMatch {
-                start: 0,
-                end: 10,
-                rule: GITHUB,
-            },
-            RefMatch {
-                start: 0,
-                end: 20,
-                rule: NPM,
-            },
-        ];
-        assert_eq!(
-            merge_matches(&matches),
-            [RefMatch {
-                start: 0,
-                end: 20,
-                rule: NPM
-            }]
-        );
+        let matches = [RefMatch::full(0, 10, GITHUB), RefMatch::full(0, 20, NPM)];
+        assert_eq!(merge_matches(&matches), [RefMatch::full(0, 20, NPM)]);
     }
 
     #[test]
     fn merge_identical_span_catalog_order_wins() {
-        let matches = [
-            RefMatch {
-                start: 0,
-                end: 20,
-                rule: NPM,
-            },
-            RefMatch {
-                start: 0,
-                end: 20,
-                rule: GITLAB,
-            },
-        ];
-        assert_eq!(
-            merge_matches(&matches),
-            [RefMatch {
-                start: 0,
-                end: 20,
-                rule: GITLAB
-            }]
-        );
+        let matches = [RefMatch::full(0, 20, NPM), RefMatch::full(0, 20, GITLAB)];
+        assert_eq!(merge_matches(&matches), [RefMatch::full(0, 20, GITLAB)]);
     }
 
     #[test]
     fn merge_contained_outer_wins() {
-        let matches = [
-            RefMatch {
-                start: 5,
-                end: 15,
-                rule: NPM,
-            },
-            RefMatch {
-                start: 0,
-                end: 30,
-                rule: GITHUB,
-            },
-        ];
-        assert_eq!(
-            merge_matches(&matches),
-            [RefMatch {
-                start: 0,
-                end: 30,
-                rule: GITHUB
-            }]
-        );
+        let matches = [RefMatch::full(5, 15, NPM), RefMatch::full(0, 30, GITHUB)];
+        assert_eq!(merge_matches(&matches), [RefMatch::full(0, 30, GITHUB)]);
     }
 
     // --- redact (oracle vs. vector corpus) --------------------------------

@@ -154,9 +154,9 @@ proptest! {
     }
 
     /// Bounded memory: carry-over never exceeds the engine's guarantee
-    /// during streaming. Regular carry is bounded by max_window (266);
-    /// a PEM block held while awaiting its END (streaming entry, bail-out
-    /// truncation, or entry deferral) adds at most one PEM body
+    /// during streaming. Regular carry is bounded by max_window (2048,
+    /// jwt); a PEM block held while awaiting its END (streaming entry,
+    /// bail-out truncation, or entry deferral) adds at most one PEM body
     /// (PEM_BAIL_OUT) plus the BEGIN line.
     #[test]
     fn bounded_memory(corpus in corpus_strategy(), chunks in chunking_strategy(32)) {
@@ -164,7 +164,7 @@ proptest! {
         let mut session = engine.session();
         let mut out = Vec::new();
         let mut pos = 0;
-        let max_window = 266; // github-token: 11 + 255 (docs/02-rules.md)
+        let max_window = 2048; // jwt — pinned by the engine_max_window unit test
         let bound = max_window + 16_384 + 37; // + PEM_BAIL_OUT + max BEGIN line
         for &size in &chunks {
             let end = (pos + size).min(corpus.len());

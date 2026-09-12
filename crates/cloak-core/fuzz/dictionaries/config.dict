@@ -1,0 +1,18 @@
+# libFuzzer dictionary for fuzz_config: TOML structure + the config schema
+# (src/config/mod.rs) + rule ids.
+
+table_redaction="[redaction]"
+key_digest_key="digest_key"
+val_env="\"env:CLOAK_DIGEST_KEY\""
+prefix_env="env:"
+table_rules="[rules."
+key_enabled="enabled"
+val_true="true"
+val_false="false"
+rule_github="github-token"
+rule_pem="pem-private-key"
+rule_phone="phone-intl"
+rule_connection="connection-string"
+quote="\""
+equals=" = "
+newline="\x0a"

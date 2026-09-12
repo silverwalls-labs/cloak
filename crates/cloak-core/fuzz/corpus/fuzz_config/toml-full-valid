@@ -1,0 +1,8 @@
+[redaction]
+digest_key = "env:CLOAK_DIGEST_KEY"
+
+[rules.github-token]
+enabled = true
+
+[rules.phone-intl]
+enabled = false

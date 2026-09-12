@@ -77,13 +77,7 @@ fn every_vector_input() {
     }
 }
 
-/// Known issue: context-keyed rules (connection-string, aws-secret-key)
-/// interact with carry-over boundaries in large concatenated corpora,
-/// causing the engine to miss matches the oracle finds. Individual
-/// vectors pass; the issue is specific to dense multi-rule concatenation
-/// near the max_window boundary. Tracked for a dedicated fix.
 #[test]
-#[ignore = "context-keyed carry-over boundary interaction — tracked separately"]
 fn concatenated_corpora_with_separators() {
     // Concatenation manufactures adjacencies and overlaps the individual
     // vectors don't contain — including the EMPTY separator, which glues
@@ -101,7 +95,6 @@ fn concatenated_corpora_with_separators() {
 }
 
 #[test]
-#[ignore = "context-keyed carry-over boundary interaction — tracked separately"]
 fn shuffled_concatenation() {
     // Deterministic LCG shuffle: different neighbor pairs than declaration
     // order, reproducible on failure.
@@ -184,8 +177,24 @@ fn every_vector_various_chunk_sizes() {
     }
 }
 
+/// Known issue (#27), two faces:
+/// - Beyond max_window: the flush boundary cuts the backward context of
+///   context-guarded rules (e.g. the `:`/`/` credential guard before an
+///   email local part); the post-flush re-scan accepts what full context
+///   would have rejected. This test trips that face (1-byte chunks over
+///   a corpus larger than max_window).
+/// - At any length: a context-keyed extent overlapping a PEM body diverges
+///   from the oracle — the engine counts both the connstring and the PEM
+///   block (two tags with overlapping redaction spans), while the oracle's
+///   overlap merge collapses them into the connstring winner alone (fuzz
+///   reproducer committed as
+///   fuzz/corpus/fuzz_engine_stream/regression-connstring-pem-overlap;
+///   whole-buffer and streaming agree with each other on that seed).
+///
+/// The fuzz harness therefore gates all three equivalences behind strict
+/// mode (`fuzz/src/common.rs`).
 #[test]
-#[ignore = "context-keyed carry-over boundary interaction — tracked separately"]
+#[ignore = "flush-boundary context loss beyond max_window — issue #27"]
 fn concatenated_corpora_1byte_chunks() {
     let (engine, key) = engine_and_key();
     let separators: [&[u8]; 4] = [b"\n", b" ", b"\x00\xff\x80", b""];
@@ -319,7 +328,6 @@ fn nested_begin_in_bailout_tail_streaming() {
 }
 
 #[test]
-#[ignore = "context-keyed carry-over boundary interaction — tracked separately"]
 fn redaction_is_idempotent() {
     // Tags contain no anchors, so redacting redacted output is the identity.
     // Cheap deterministic version of the S4 property test.
@@ -339,4 +347,26 @@ fn redaction_is_idempotent() {
     );
     // And the reference agrees on the redacted output too.
     assert_engine_equals_reference(&engine, &key, &once, "idempotence corpus");
+}
+
+/// Known issue (#34, found by fuzz_engine_stream): redacting a match can
+/// erase the backward-guard context of an adjacent rejected candidate.
+/// Here the jwt body ends right before `+1234567`; phone-intl rejects the
+/// `+` in pass 1 (preceded by alphanumeric), but after redaction it is
+/// preceded by the tag's `]` and matches in pass 2.
+#[test]
+#[ignore = "backward-guard context erased by adjacent redaction — issue #34"]
+fn idempotence_survives_tag_adjacent_context() {
+    let (engine, _key) = engine_and_key();
+    let mut input = Vec::from(&b"\x00\xff"[..]);
+    // jwt vector body (same bytes as vectors::jwt), fused to a phone number.
+    input.extend_from_slice(
+        b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.\
+          SflKxwRJSMeKKF2QT4fwpMeJ",
+    );
+    input.extend_from_slice(b"+1234567f36POk6yJV_adQssw5c\x01");
+    let (once, _) = engine_redact(&engine, &input);
+    let (twice, stats) = engine_redact(&engine, &once);
+    assert_eq!(once, twice, "redaction must be idempotent");
+    assert_eq!(stats.total_matches(), 0);
 }
