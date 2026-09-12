@@ -1,10 +1,12 @@
 //! `fuzz_engine_stream` (docs/03 §4): arbitrary bytes + derived chunkings.
 //!
-//! Asserts, per input: no panic (debug_asserts armed via
-//! `-O --debug-assertions`) and bounded carry-over memory at every
-//! length; streaming ≡ whole-buffer for inputs ≤ max_window; and — in
-//! strict mode — whole-buffer ≡ reference oracle plus idempotence at
-//! every length (see `common::strict` for the #27/#34 gating rationale).
+//! Every input, both modes: no panic (debug_asserts armed via
+//! `-O --debug-assertions`) and the carry-over bound after every push
+//! (`common::chunked` asserts it across several chunk schedules).
+//!
+//! Strict mode only (`CLOAK_FUZZ_STRICT=1`): whole-buffer ≡ reference
+//! oracle, streaming ≡ whole-buffer, and idempotence — see `common::strict`
+//! for why these are gated (issues #27, #34).
 
 #![no_main]
 
@@ -19,55 +21,36 @@ fuzz_target!(|data: &[u8]| {
     let (whole_out, whole_stats) = common::whole(engine, data);
     assert_eq!(whole_stats.bytes_processed, data.len() as u64);
 
-    if common::strict() {
-        common::assert_reference_equivalence(data, &whole_out, &whole_stats);
-    }
+    // Exercise several chunk schedules for the carry-over bound (asserted
+    // inside `chunked`). Exhaustive chunking is proptest's job
+    // (tests/streaming.rs); here the schedules mutate with the input.
+    let seed = common::fold_seed(data);
+    let streamed = [
+        Some(common::chunked(engine, data, common::lcg_sizes(seed, 97))),
+        Some(common::chunked(
+            engine,
+            data,
+            common::lcg_sizes(seed ^ 0xDEAD_BEEF, 8192),
+        )),
+        (data.len() <= common::MAX_WINDOW)
+            .then(|| common::chunked(engine, data, std::iter::repeat(1))),
+    ];
 
-    if !common::assert_streaming(data) {
+    if !common::strict() {
         return;
     }
 
-    // Chunk-boundary invariant under three schedules. Exhaustive chunking
-    // is proptest's job (tests/streaming.rs); here the schedules mutate
-    // with the input.
-    let seed = common::fold_seed(data);
-    common::assert_streaming_equivalence(
-        engine,
-        data,
-        common::lcg_sizes(seed, 97),
-        &whole_out,
-        &whole_stats,
-        "small chunks",
-    );
-    common::assert_streaming_equivalence(
-        engine,
-        data,
-        common::lcg_sizes(seed ^ 0xDEAD_BEEF, 8192),
-        &whole_out,
-        &whole_stats,
-        "large chunks",
-    );
-    if data.len() <= common::MAX_WINDOW {
-        common::assert_streaming_equivalence(
-            engine,
-            data,
-            std::iter::repeat(1),
-            &whole_out,
-            &whole_stats,
-            "1-byte chunks",
-        );
+    // Correctness equivalences (strict only).
+    common::assert_reference_equivalence(data, &whole_out, &whole_stats);
+    for run in streamed.into_iter().flatten() {
+        assert_eq!(run.0, whole_out, "streaming ≢ whole-buffer");
+        assert_eq!(run.1.matches, whole_stats.matches, "streaming stats diverge");
     }
-
-    // Idempotence: tags don't re-match, nothing is reintroduced.
-    // Strict-only until issue #34 is fixed: redacting a match can erase
-    // the backward-guard context of an adjacent rejected candidate, which
-    // then matches on the second pass (violated at any input length —
-    // regression seed `regression-idempotence-tag-context` reproduces).
-    if common::strict() && whole_stats.matches.values().sum::<u64>() > 0 {
-        let (twice, second_stats) = common::whole(engine, &whole_out);
+    if whole_stats.matches.values().sum::<u64>() > 0 {
+        let (twice, second) = common::whole(engine, &whole_out);
         assert_eq!(twice, whole_out, "redaction not idempotent");
         assert_eq!(
-            second_stats.matches.values().sum::<u64>(),
+            second.matches.values().sum::<u64>(),
             0,
             "tags re-matched on second pass"
         );

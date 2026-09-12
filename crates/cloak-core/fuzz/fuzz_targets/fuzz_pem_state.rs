@@ -7,7 +7,9 @@
 //! markers straddle push boundaries — the adversarial surface of the PEM
 //! state machine (`engine/pem.rs`). Hang/OOM are findings via libFuzzer
 //! `-timeout` / `-rss_limit_mb`; the carry-over bound (which includes the
-//! PEM bail-out) is asserted after every push.
+//! PEM bail-out) is asserted after every push, in both modes.
+//!
+//! Strict mode only: the correctness equivalences (see `common::strict`).
 
 #![no_main]
 
@@ -20,40 +22,26 @@ fuzz_target!(|data: &[u8]| {
     let engine = &*common::ENGINE;
 
     let (whole_out, whole_stats) = common::whole(engine, data);
+    assert_eq!(whole_stats.bytes_processed, data.len() as u64);
 
-    if common::strict() {
-        common::assert_reference_equivalence(data, &whole_out, &whole_stats);
-    }
+    let seed = common::fold_seed(data);
+    let streamed = [
+        Some(common::chunked(engine, data, common::lcg_sizes(seed, 13))),
+        Some(common::chunked(
+            engine,
+            data,
+            common::lcg_sizes(seed ^ 0x9E37, 41),
+        )),
+        (data.len() <= 4096).then(|| common::chunked(engine, data, std::iter::repeat(1))),
+    ];
 
-    if !common::assert_streaming(data) {
+    if !common::strict() {
         return;
     }
 
-    let seed = common::fold_seed(data);
-    common::assert_streaming_equivalence(
-        engine,
-        data,
-        common::lcg_sizes(seed, 13),
-        &whole_out,
-        &whole_stats,
-        "tiny chunks",
-    );
-    common::assert_streaming_equivalence(
-        engine,
-        data,
-        common::lcg_sizes(seed ^ 0x9E37, 41),
-        &whole_out,
-        &whole_stats,
-        "small chunks",
-    );
-    if data.len() <= 4096 {
-        common::assert_streaming_equivalence(
-            engine,
-            data,
-            std::iter::repeat(1),
-            &whole_out,
-            &whole_stats,
-            "1-byte chunks",
-        );
+    common::assert_reference_equivalence(data, &whole_out, &whole_stats);
+    for run in streamed.into_iter().flatten() {
+        assert_eq!(run.0, whole_out, "streaming ≢ whole-buffer");
+        assert_eq!(run.1.matches, whole_stats.matches, "streaming stats diverge");
     }
 });

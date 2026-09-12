@@ -184,11 +184,12 @@ fn every_vector_various_chunk_sizes() {
 ///   would have rejected. This test trips that face (1-byte chunks over
 ///   a corpus larger than max_window).
 /// - At any length: a context-keyed extent overlapping a streamed PEM
-///   body diverges from the oracle's merge (fuzz reproducer committed as
+///   body diverges — from the oracle AND between streaming and
+///   whole-buffer (fuzz reproducer committed as
 ///   fuzz/corpus/fuzz_engine_stream/regression-connstring-pem-overlap).
 ///
-/// The fuzz harness gates its equivalence assertions accordingly
-/// (`fuzz/src/common.rs`).
+/// The fuzz harness therefore gates all three equivalences behind strict
+/// mode (`fuzz/src/common.rs`).
 #[test]
 #[ignore = "flush-boundary context loss beyond max_window — issue #27"]
 fn concatenated_corpora_1byte_chunks() {

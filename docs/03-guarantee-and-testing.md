@@ -170,13 +170,17 @@ regression-replayed on every run. The nightly stage runs 1 h/target per ISA; a
 crash fails the job and uploads the minimized input as an artifact. Every finding
 is back-ported as a deterministic test AND a committed `regression-*` corpus entry.
 
-Until issues #27 (context-keyed rules × carry-over/PEM hold) and #34
-(idempotence vs adjacent-redaction context) are fixed, the harness asserts
-engine ≡ reference and idempotence only in strict mode (`CLOAK_FUZZ_STRICT=1`)
-and caps streaming ≡ whole-buffer at max_window bytes — see
-`fuzz/src/common.rs`, which is also where strict becomes the default once both
-are fixed. No-panic and bounded memory are asserted unconditionally at every
-length in both modes.
+The PR gate and nightly assert the **universal** half every input: no panic and
+the carry-over bound (the robustness guarantee — the fuzz tier's primary job).
+The three correctness equivalences (engine ≡ reference, streaming ≡ whole-buffer,
+idempotence) run **only under `CLOAK_FUZZ_STRICT=1`**, because two tracked engine
+bugs violate all three on narrow inputs — issue #27 (a context-keyed extent
+overlapping a streamed PEM body breaks even streaming ≡ whole-buffer below
+max_window) and issue #34 (adjacent redaction erases a backward guard, breaking
+idempotence). Correctness on *known* inputs stays a PR gate via the deterministic
+`tests/differential.rs`; strict fuzzing is the tool to reproduce a finding and to
+hunt new divergences once #27 and #34 close, at which point strict becomes the
+default (`fuzz/src/common.rs`).
 
 ### CI staging (all blocking at their stage)
 

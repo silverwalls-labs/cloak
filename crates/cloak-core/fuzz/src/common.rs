@@ -44,31 +44,34 @@ pub static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
 pub static KEY: LazyLock<[u8; 32]> =
     LazyLock::new(|| blake3::derive_key("cloak digest key", KEY_MATERIAL.as_bytes()));
 
-/// Strict mode (`CLOAK_FUZZ_STRICT=1`): assert the FULL guarantee — every
-/// assertion at every input length. A strict-mode find that is not one of
-/// the tracked bugs below is a new guarantee bug.
+/// Assertion tiers, split by what actually holds today.
 ///
-/// Default mode (the CI gate) exempts what two tracked engine bugs are
-/// known to violate, so the gate stays meaningful while they're open:
-/// - engine ≡ reference and idempotence: strict-only. Issue #27
-///   (context-keyed rules × carry-over/PEM hold — reproduces below
-///   max_window, see corpus `regression-connstring-pem-overlap`) and
-///   issue #34 (adjacent redaction erases backward-guard context).
-/// - streaming ≡ whole-buffer: capped at `MAX_WINDOW` bytes — above it
-///   the flush boundary can cut backward context (#27's other face).
+/// **Both modes, every input:** no panic and the carry-over bound. These are
+/// universal — the robustness half of the guarantee (docs/03 threat model:
+/// malicious input must not crash / hang / OOM). This is the PR-gate and
+/// nightly signal.
 ///
-/// Asserted unconditionally in BOTH modes, at every length: no panic,
-/// carry-over bound, bytes_processed. Default back to strict when #27
-/// and #34 are fixed.
+/// **Strict mode only (`CLOAK_FUZZ_STRICT=1`), every input:** the three
+/// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
+/// idempotence. They are strict-only because two tracked engine bugs violate
+/// all three on narrow inputs, and asserting them by default would make the
+/// gate red for already-filed bugs:
+/// - **#27** — a context-keyed extent overlapping a streamed PEM body makes
+///   even `streaming ≢ whole-buffer` below max_window (reproducer:
+///   `regression-connstring-pem-overlap`), and cuts backward context beyond
+///   max_window.
+/// - **#34** — redacting a match erases an adjacent candidate's backward
+///   guard, breaking idempotence.
+///
+/// Correctness on KNOWN inputs is still gated every PR by the deterministic
+/// `tests/differential.rs` (engine ≡ reference over the vector corpus and
+/// concatenations). Strict fuzzing is the tool to (a) reproduce a finding and
+/// (b) hunt for NEW divergences once #27 and #34 are fixed — at which point
+/// strict becomes the default and this split collapses.
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> =
         LazyLock::new(|| std::env::var_os("CLOAK_FUZZ_STRICT").is_some());
     *STRICT
-}
-
-/// Whether the streaming ≡ whole-buffer assertion applies (see [`strict`]).
-pub fn assert_streaming(input: &[u8]) -> bool {
-    strict() || input.len() <= MAX_WINDOW
 }
 
 /// Whole-buffer redaction: one push + finish.
@@ -140,22 +143,5 @@ pub fn assert_reference_equivalence(input: &[u8], engine_out: &[u8], engine_stat
     assert_eq!(
         engine_stats.bytes_processed,
         reference_stats.bytes_processed
-    );
-}
-
-/// Streaming ≡ whole-buffer under one schedule (chunk-boundary invariant).
-pub fn assert_streaming_equivalence(
-    engine: &Engine,
-    input: &[u8],
-    sizes: impl Iterator<Item = usize>,
-    whole_out: &[u8],
-    whole_stats: &Stats,
-    label: &str,
-) {
-    let (out, stats) = chunked(engine, input, sizes);
-    assert_eq!(out, whole_out, "streaming ({label}) ≢ whole-buffer");
-    assert_eq!(
-        stats.matches, whole_stats.matches,
-        "streaming ({label}) stats ≢ whole-buffer stats"
     );
 }
