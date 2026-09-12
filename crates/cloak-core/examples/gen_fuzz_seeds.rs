@@ -9,6 +9,7 @@
 //! vectors change. Existing files (e.g. committed crash reproducers) are
 //! left alone unless a seed of the same name changed.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,11 @@ fn corpus_dir(target: &str) -> PathBuf {
         .join(target)
 }
 
-fn write_seed(dir: &Path, name: &str, bytes: &[u8]) {
+/// Write one seed, guarding against two distinct vector names sanitizing to
+/// the same filename (which would silently drop a seed). `used` tracks
+/// sanitized→original within a directory; a collision is a hard error so the
+/// vector must be renamed rather than lose corpus coverage.
+fn write_seed(dir: &Path, name: &str, bytes: &[u8], used: &mut HashMap<String, String>) {
     let sanitized: String = name
         .chars()
         .map(|c| {
@@ -31,6 +36,9 @@ fn write_seed(dir: &Path, name: &str, bytes: &[u8]) {
             }
         })
         .collect();
+    if let Some(prev) = used.insert(sanitized.clone(), name.to_string()) {
+        panic!("seed filename collision: {prev:?} and {name:?} both sanitize to {sanitized:?}");
+    }
     fs::write(dir.join(sanitized), bytes).unwrap_or_else(|e| panic!("write seed {name}: {e}"));
 }
 
@@ -39,8 +47,9 @@ fn main() {
     let engine_dir = corpus_dir("fuzz_engine_stream");
     fs::create_dir_all(&engine_dir).expect("create corpus dir");
     let all = vectors::all_vectors();
+    let mut engine_used = HashMap::new();
     for v in &all {
-        write_seed(&engine_dir, v.name, v.input);
+        write_seed(&engine_dir, v.name, v.input, &mut engine_used);
     }
     println!("fuzz_engine_stream: {} seeds", all.len());
 
@@ -52,8 +61,9 @@ fn main() {
         .iter()
         .chain(vectors::pem::NEGATIVE)
         .collect();
+    let mut pem_used = HashMap::new();
     for v in &pem_vectors {
-        write_seed(&pem_dir, v.name, v.input);
+        write_seed(&pem_dir, v.name, v.input, &mut pem_used);
     }
     let adversarial: &[(&str, Vec<u8>)] = &[
         (
@@ -88,7 +98,7 @@ fn main() {
         }),
     ];
     for (name, bytes) in adversarial {
-        write_seed(&pem_dir, name, bytes);
+        write_seed(&pem_dir, name, bytes, &mut pem_used);
     }
     println!(
         "fuzz_pem_state: {} seeds",
@@ -122,8 +132,9 @@ fn main() {
         ),
         ("toml-malformed", "[[[broken"),
     ];
+    let mut config_used = HashMap::new();
     for (name, s) in configs {
-        write_seed(&config_dir, name, s.as_bytes());
+        write_seed(&config_dir, name, s.as_bytes(), &mut config_used);
     }
     println!("fuzz_config: {} seeds", configs.len());
 }

@@ -69,8 +69,14 @@ pub static KEY: LazyLock<[u8; 32]> =
 /// (b) hunt for NEW divergences once #27 and #34 are fixed — at which point
 /// strict becomes the default and this split collapses.
 pub fn strict() -> bool {
-    static STRICT: LazyLock<bool> =
-        LazyLock::new(|| std::env::var_os("CLOAK_FUZZ_STRICT").is_some());
+    static STRICT: LazyLock<bool> = LazyLock::new(|| {
+        // Truthy value only, so `CLOAK_FUZZ_STRICT=0` / `=false` DISABLES
+        // (mere-presence would make the natural way to turn it off enable it).
+        match std::env::var("CLOAK_FUZZ_STRICT") {
+            Ok(v) => !matches!(v.trim(), "" | "0" | "false" | "no" | "off"),
+            Err(_) => false,
+        }
+    });
     *STRICT
 }
 

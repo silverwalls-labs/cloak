@@ -46,7 +46,9 @@ jobs:
             semgrep scan --error \
               --sarif-output=semgrep.sarif \
               --config p/rust \
-              --config p/owasp-top-ten
+              --config p/owasp-top-ten \
+              --exclude='crates/cloak-core/fuzz/corpus' \
+              --exclude='crates/cloak-core/fuzz/dictionaries'
 
       - name: Upload SARIF artifact
         if: always()

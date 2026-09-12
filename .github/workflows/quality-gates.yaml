@@ -206,8 +206,14 @@ jobs:
       - name: Corpus regression replay
         working-directory: crates/cloak-core
         run: |
-          # Every committed input (vector seeds + crash reproducers)
-          # re-executed with all harness assertions — no fuzzing.
+          # Every committed input re-executed with the default-mode harness
+          # assertions (no panic + carry-over bound) — no fuzzing. The
+          # correctness-equivalence assertions are strict-only; the
+          # regression-* reproducers for #27/#34 therefore only guard
+          # no-panic here, and their invariants are pinned instead by the
+          # (currently #[ignore]d) tests in tests/differential.rs. Set
+          # CLOAK_FUZZ_STRICT=1 to replay them with full equivalence checks
+          # once those bugs are fixed.
           for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do
             cargo fuzz run "$t" "fuzz/corpus/$t" -O --debug-assertions -- -runs=0 -timeout=10
           done

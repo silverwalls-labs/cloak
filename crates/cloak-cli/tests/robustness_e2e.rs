@@ -30,15 +30,18 @@ fn spawn_cloak(args: &[&str]) -> Child {
         .expect("spawn cloak")
 }
 
-fn read_stderr(child: &mut Child) -> String {
-    let mut err = String::new();
-    child
-        .stderr
-        .take()
-        .expect("stderr piped")
-        .read_to_string(&mut err)
-        .expect("read stderr");
-    err
+/// Drain the child's stderr on its own thread, started BEFORE `wait()`.
+/// Reading stderr only after wait would deadlock if the child writes more
+/// than the ~64 KiB pipe buffer (error spew / panic backtraces — the very
+/// failure modes these tests exist to catch): the child blocks on the full
+/// stderr pipe while the parent blocks in wait. Join the handle after wait.
+fn drain_stderr(child: &mut Child) -> std::thread::JoinHandle<String> {
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    std::thread::spawn(move || {
+        let mut err = String::new();
+        stderr.read_to_string(&mut err).expect("read stderr");
+        err
+    })
 }
 
 /// Pump `total` bytes of line-shaped data into stdin from a thread,
@@ -66,6 +69,7 @@ fn pump_stdin(child: &mut Child, total: usize) -> std::thread::JoinHandle<()> {
 fn broken_pipe_mid_stream_exits_zero() {
     let mut child = spawn_cloak(&[]);
     let pump = pump_stdin(&mut child, 32 * 1024 * 1024);
+    let stderr = drain_stderr(&mut child);
 
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut first = [0u8; 8192];
@@ -74,7 +78,7 @@ fn broken_pipe_mid_stream_exits_zero() {
 
     let status = child.wait().expect("wait");
     pump.join().unwrap();
-    let stderr = read_stderr(&mut child);
+    let stderr = stderr.join().unwrap();
 
     assert!(status.success(), "broken pipe must exit 0, got {status:?}");
     assert!(!stderr.contains("panic"), "stderr: {stderr}");
@@ -91,10 +95,11 @@ fn stdout_closed_before_first_write_exits_zero() {
     let mut child = spawn_cloak(&[]);
     drop(child.stdout.take().expect("stdout piped"));
     let pump = pump_stdin(&mut child, 8 * 1024 * 1024);
+    let stderr = drain_stderr(&mut child);
 
     let status = child.wait().expect("wait");
     pump.join().unwrap();
-    let stderr = read_stderr(&mut child);
+    let stderr = stderr.join().unwrap();
 
     assert!(status.success(), "expected exit 0, got {status:?}");
     assert!(!stderr.contains("panic"), "stderr: {stderr}");
@@ -107,6 +112,7 @@ fn stdout_closed_before_first_write_exits_zero() {
 fn broken_pipe_with_stats_flag_exits_zero() {
     let mut child = spawn_cloak(&["--stats-format", "json"]);
     let pump = pump_stdin(&mut child, 32 * 1024 * 1024);
+    let stderr = drain_stderr(&mut child);
 
     let mut stdout = child.stdout.take().expect("stdout piped");
     let mut first = [0u8; 4096];
@@ -115,7 +121,7 @@ fn broken_pipe_with_stats_flag_exits_zero() {
 
     let status = child.wait().expect("wait");
     pump.join().unwrap();
-    let stderr = read_stderr(&mut child);
+    let stderr = stderr.join().unwrap();
 
     assert!(status.success(), "expected exit 0, got {status:?}");
     assert!(!stderr.contains("panic"), "stderr: {stderr}");

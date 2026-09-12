@@ -1,6 +1,0 @@
-# Fuzz corpora and dictionaries are literal test-vector DATA (the same
-# tokens already vetted in crates/cloak-core/src/rules/vectors/), not code —
-# excluding them keeps SAST focused on source and stops the planted example
-# secrets from being flagged as leaks.
-crates/cloak-core/fuzz/corpus/
-crates/cloak-core/fuzz/dictionaries/

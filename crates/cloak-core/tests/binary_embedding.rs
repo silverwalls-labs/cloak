@@ -4,7 +4,7 @@
 //! continuation-byte soup are still caught, non-matching garbage passes
 //! through byte-identical, and the oracle defines every outcome.
 
-use std::sync::Once;
+use std::sync::{LazyLock, Once};
 
 use cloak_core::{Config, Engine, RuleId};
 use proptest::prelude::*;
@@ -31,6 +31,10 @@ fn engine_and_key() -> (Engine, [u8; 32]) {
     let key = blake3::derive_key("cloak digest key", KEY_MATERIAL.as_bytes());
     (engine, key)
 }
+
+/// Built once — the engine is immutable, so rebuilding it per proptest case
+/// (256×, and under coverage instrumentation) is pure waste.
+static ENGINE_KEY: LazyLock<(Engine, [u8; 32])> = LazyLock::new(engine_and_key);
 
 fn engine_redact(engine: &Engine, input: &[u8]) -> (Vec<u8>, cloak_core::Stats) {
     let mut session = engine.session();
@@ -110,18 +114,22 @@ fn soup(kind: usize, seed: u64) -> Vec<u8> {
 /// caught, the oracle agrees byte-for-byte, and chunked streaming matches.
 #[test]
 fn vectors_embedded_in_soup() {
-    let (engine, key) = engine_and_key();
+    let (engine, key) = &*ENGINE_KEY;
     for kind in 0..3 {
         for (i, v) in cloak_core::vectors::all_vectors().iter().enumerate() {
-            let mut input = soup(kind, (kind as u64) << 32 | i as u64);
+            // Distinct leading/trailing seeds for EVERY kind (the previous
+            // kind<<32 vs kind<<40 salting collapsed to the same value when
+            // kind==0, so random-binary cases had identical prefix/suffix).
+            let base = ((kind as u64) << 40) | i as u64;
+            let mut input = soup(kind, base ^ 0x1111_1111_1111_1111);
             input.push(b'\n');
             input.extend_from_slice(v.input);
             input.push(b'\n');
-            input.extend_from_slice(&soup(kind, (kind as u64) << 40 | i as u64));
+            input.extend_from_slice(&soup(kind, base ^ 0x9999_9999_9999_9999));
 
             // The oracle defines behavior on garbage — bytes AND stats.
-            let (out, stats) = engine_redact(&engine, &input);
-            let (ref_out, ref_stats) = cloak_core::reference::redact(&input, &key);
+            let (out, stats) = engine_redact(engine, &input);
+            let (ref_out, ref_stats) = cloak_core::reference::redact(&input, key);
             assert_eq!(out, ref_out, "soup kind={kind} vector={}", v.name);
             assert_eq!(stats.matches, ref_stats.matches, "{}", v.name);
 
@@ -140,7 +148,7 @@ fn vectors_embedded_in_soup() {
             }
 
             // Chunk-boundary invariant holds on garbage too.
-            let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, 7);
+            let (chunked, chunked_stats) = engine_redact_chunked(engine, &input, 7);
             assert_eq!(chunked, out, "7-byte chunking diverges on {}", v.name);
             assert_eq!(chunked_stats.matches, stats.matches);
         }
@@ -151,7 +159,7 @@ fn vectors_embedded_in_soup() {
 /// byte-identical: `cat file | cloak` with no matches is `cat`.
 #[test]
 fn anchorless_soup_is_passthrough() {
-    let (engine, _key) = engine_and_key();
+    let (engine, _key) = &*ENGINE_KEY;
     for kind in 0..3 {
         for round in 0..16u64 {
             let mut input = soup(kind, 0xBEEF << 8 | round);
@@ -160,7 +168,7 @@ fn anchorless_soup_is_passthrough() {
             input.retain(|b| {
                 !b.is_ascii_digit() && !matches!(b, b'@' | b'+' | b':' | b'.' | b'/' | b'=')
             });
-            let (out, stats) = engine_redact(&engine, &input);
+            let (out, stats) = engine_redact(engine, &input);
             assert_eq!(out, input, "soup kind={kind} round={round} corrupted");
             assert_eq!(stats.total_matches(), 0);
         }
@@ -178,7 +186,7 @@ proptest! {
         pick in any::<prop::sample::Index>(),
         split in any::<prop::sample::Index>(),
     ) {
-        let (engine, key) = engine_and_key();
+        let (engine, key) = &*ENGINE_KEY;
         let vectors = cloak_core::vectors::all_vectors();
         let v = vectors[pick.index(vectors.len())];
         let at = split.index(noise.len() + 1);
@@ -187,8 +195,8 @@ proptest! {
         input.extend_from_slice(v.input);
         input.extend_from_slice(&noise[at..]);
 
-        let (out, stats) = engine_redact(&engine, &input);
-        let (ref_out, ref_stats) = cloak_core::reference::redact(&input, &key);
+        let (out, stats) = engine_redact(engine, &input);
+        let (ref_out, ref_stats) = cloak_core::reference::redact(&input, key);
         prop_assert_eq!(out, ref_out, "vector {} at offset {}", v.name, at);
         prop_assert_eq!(stats.matches, ref_stats.matches);
     }

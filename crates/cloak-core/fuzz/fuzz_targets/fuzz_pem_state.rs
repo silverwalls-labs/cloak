@@ -47,4 +47,17 @@ fuzz_target!(|data: &[u8]| {
             "streaming stats diverge"
         );
     }
+    // Idempotence — PEM's `[CLOAK:` begin-guard (hardened here via
+    // pem_confirm_window) is idempotence-critical, and this target's tiny
+    // chunk schedules straddle BEGIN/END markers far more than
+    // fuzz_engine_stream's do.
+    if whole_stats.matches.values().sum::<u64>() > 0 {
+        let (twice, second) = common::whole(engine, &whole_out);
+        assert_eq!(twice, whole_out, "redaction not idempotent");
+        assert_eq!(
+            second.matches.values().sum::<u64>(),
+            0,
+            "tags re-matched on second pass"
+        );
+    }
 });

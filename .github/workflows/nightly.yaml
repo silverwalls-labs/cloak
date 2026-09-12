@@ -26,12 +26,19 @@ jobs:
           - target: fuzz_engine_stream
             dict: engine_stream.dict
             max_len: 32768
+            # Keep stderr open: panic/assert messages (which invariant, which
+            # length, which chunk schedule) must reach the log on a finding.
+            extra_flags: ""
           - target: fuzz_pem_state
             dict: pem_state.dict
             max_len: 32768
+            extra_flags: ""
           - target: fuzz_config
             dict: config.dict
             max_len: 4096
+            # Only fuzz_config needs -close_fd_mask: valid ephemeral-key
+            # configs print a stderr warning every iteration.
+            extra_flags: "-close_fd_mask=3"
     runs-on: ${{ matrix.os }}
     env:
       # Pin bump policy: when cargo-fuzz requires it or monthly.
@@ -67,7 +74,7 @@ jobs:
           cargo fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -O --debug-assertions -- \
             -max_total_time=3600 -timeout=10 -rss_limit_mb=2048 \
             -max_len=${{ matrix.max_len }} \
-            -close_fd_mask=3 \
+            ${{ matrix.extra_flags }} \
             -dict=fuzz/dictionaries/${{ matrix.dict }}
 
       - name: Upload grown corpus and crashes

@@ -140,23 +140,26 @@ fn compute_digest_is_stable() {
     );
 }
 
-/// The goldens table covers the full catalog — a new rule must add its
-/// golden here (governance mirror of docs/02).
+/// The goldens table stays in sync with the rules the vector corpus
+/// exercises: every rule that appears in a positive-vector span has a
+/// golden, and every golden names a rule the corpus exercises.
+///
+/// NB: this is a vectors↔goldens consistency check, not a `CATALOG` mirror
+/// — `rules::CATALOG` is `pub(crate)` and unreachable from an integration
+/// test, so a new catalog rule shipped WITHOUT positive vectors would slip
+/// past both this test and the corpus. The rule-catalog governance gate is
+/// the unit test `rules::tests` beside the catalog; this guards the
+/// downstream promise that every corpus-covered rule has a pinned tag.
 #[test]
-fn goldens_cover_every_rule() {
-    let engine = golden_engine();
-    // Cheap catalog probe: redact every vector and collect rule ids seen.
-    let mut seen = std::collections::BTreeSet::new();
-    for v in cloak_core::vectors::all_vectors() {
-        for span in v.spans {
-            seen.insert(span.rule);
-        }
-    }
+fn goldens_match_vector_rules() {
+    let seen: std::collections::BTreeSet<&str> = cloak_core::vectors::all_vectors()
+        .iter()
+        .flat_map(|v| v.spans.iter().map(|s| s.rule))
+        .collect();
     let covered: std::collections::BTreeSet<&str> =
         goldens().iter().map(|(rule, _, _)| *rule).collect();
     assert_eq!(
         seen, covered,
         "goldens table out of sync with the rules the vector corpus exercises"
     );
-    drop(engine);
 }
