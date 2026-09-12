@@ -28,6 +28,7 @@ pub const CARRY_BOUND: usize = MAX_WINDOW + 16_384 + 37;
 pub static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     // SAFETY: single dedicated var, set exactly once before any engine is
     // built, never removed; libFuzzer drives the target single-threaded.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { std::env::set_var(KEY_VAR, KEY_MATERIAL) };
     let config = Config {
         redaction: RedactionConfig {
