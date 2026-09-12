@@ -44,7 +44,10 @@ fuzz_target!(|data: &[u8]| {
     common::assert_reference_equivalence(data, &whole_out, &whole_stats);
     for run in streamed.into_iter().flatten() {
         assert_eq!(run.0, whole_out, "streaming ≢ whole-buffer");
-        assert_eq!(run.1.matches, whole_stats.matches, "streaming stats diverge");
+        assert_eq!(
+            run.1.matches, whole_stats.matches,
+            "streaming stats diverge"
+        );
     }
     if whole_stats.matches.values().sum::<u64>() > 0 {
         let (twice, second) = common::whole(engine, &whole_out);
