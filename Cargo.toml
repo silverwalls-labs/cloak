@@ -12,6 +12,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/cloak-core", "crates/cloak-cli"]
+# The fuzz crate is deliberately outside the workspace (standard cargo-fuzz
+# layout): it needs the nightly toolchain + libFuzzer link flags and must not
+# drag libfuzzer-sys into cargo-deny/workspace builds. CI runs fmt/clippy on
+# it separately via --manifest-path.
+exclude = ["crates/cloak-core/fuzz"]
 
 [workspace.package]
 version = "0.1.0"

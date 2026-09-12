@@ -102,4 +102,13 @@ pub static NEGATIVE: &[Vector] = &[
         input: b"45395787636214860",
         spans: &[],
     },
+    Vector {
+        name: "cc-separator-split-iin",
+        // Luhn-valid digits, but the IIN prefix (37) is split by a
+        // separator — no literal anchor, so no match (found by
+        // fuzz_engine_stream: the oracle used to strip separators before
+        // the IIN check and diverged from the engine's prefilter).
+        input: b"g3 745676234567",
+        spans: &[],
+    },
 ];

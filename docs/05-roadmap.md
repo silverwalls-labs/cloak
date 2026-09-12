@@ -60,15 +60,20 @@ I/O robustness cases (SIGPIPE/broken pipe → clean exit, closed stdout, huge li
 match planted-vector counts exactly (asserted end-to-end through the binary);
 config fuzz target parses arbitrary TOML without panic.
 
-### S6 — Guarantee hardening
+### S6 — Guarantee hardening (landed — issue #9)
 cargo-fuzz targets (`fuzz_engine_stream`, `fuzz_pem_state`, `fuzz_config`);
 invalid-UTF-8/binary corpora; differential suite (engine ≡ reference) wired into CI
-on all three targets; fuzz smoke + corpus replay as PR gates; nightly stage
-(extended fuzz ≥ 1 h/target, `cargo-mutants` over cloak-core); thread-share test
-(Engine across threads); coverage reporting (`cargo-llvm-cov`) published per PR.
+on both Linux targets (macOS deferred — ledger F14); fuzz smoke + corpus replay as
+PR gates; nightly stage (extended fuzz ≥ 1 h/target, `cargo-mutants` over
+cloak-core); thread-share test (Engine across threads); coverage reporting
+(`cargo-llvm-cov`) published per PR with raised thresholds.
 **Done when:** all [03-guarantee-and-testing.md](03-guarantee-and-testing.md) CI
 gates exist and are blocking; initial fuzz session (≥ 1 h/target locally) finds
-nothing outstanding.
+nothing outstanding. *Scoping note (2026-09-12): the ≥ 1 h/target session runs as
+the first nightly instead of locally; ~35 min of local fuzzing already yielded
+three real findings (2 engine, 1 oracle) fixed in the S6 PR, plus issue #34
+(idempotence) and the #27 reproducer class characterized. First `cargo-mutants`
+run triages from the first nightly artifact.*
 
 ### S7 — Performance
 Criterion suites (`push` end-to-end, prefilter-only, chunk-size sweep); five
@@ -108,6 +113,7 @@ issue when its milestone opens.
 | F11 | **Escaped-content decode layer, opt-in** — JSON-string unescape pass (later: base64 spans) so multi-line/escaped-char patterns (PEM!) match inside structured log fields. Must preserve the guarantee (decode is a defined transform, not a heuristic) and byte-exact passthrough of non-matching input | Full-setup review 2026-09-06: JSON logs are the norm in the k8s/Grafana stack, PEM-in-JSON is missed by byte patterns ([03 §threat model](03-guarantee-and-testing.md#threat-model)) | v0.2+ |
 | F12 | ~~**CRC32 checksum validation for `github-token` classic prefixes + `npm-token`**~~ — **Landed.** CRC32 (ISO-HDLC) + base62 validation for classic prefixes (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`) and `npm_`; checksum-fail ⇒ reject (FP reduction). `github_pat_` stays shape-only. Engine uses `crc32fast` crate; reference oracle has independent hand-rolled CRC32 + base62. Valid-CRC positive vectors, wrong-checksum negative vectors, overlap vectors redesigned around `github_pat_`. | S2 scoping 2026-09-07 | **Landed (issue #31)** |
 | F13 | **CRC near-miss observability** — per-rule counter in `Stats` for "shape-matched but checksum-rejected" candidates (skip-serialized when empty), so upstream format drift by GitHub/npm surfaces as a near-miss spike in operator stats instead of silent missed redactions. Needs a `ConfirmOutcome`-style extension of the `ConfirmSpec::Custom` signature — cross-cutting (all custom validators, `Stats`, CLI stats output), deliberately kept out of the F12 PR | PR #32 review 2026-09-11 (finding R2): checksum validation fails open on format drift; no signal exists today | v0.2 (issue #33) |
+| F14 | **macOS CI runners** — extend the test/fuzz matrix (currently linux x86-64 + aarch64) with macos aarch64 per [00-scope.md](00-scope.md) "CI green on three targets" | S6 scoping 2026-09-12: Linux-only matrix shipped to bound runner cost; macOS adds a third SIMD/ABI environment before v0.1.0 | S8 |
 
 ## Versioning & policy
 

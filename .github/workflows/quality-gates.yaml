@@ -38,6 +38,8 @@ jobs:
       - name: Format
         run: |
           cargo fmt --all -- --check
+          # The fuzz crate is workspace-excluded — check it explicitly.
+          cargo fmt --manifest-path crates/cloak-core/fuzz/Cargo.toml -- --check
 
   lint:
     name: Lint
@@ -59,12 +61,22 @@ jobs:
       - name: Clippy
         run: |
           cargo clippy --workspace --all-targets -- -D warnings
+          # The fuzz crate is workspace-excluded — lint it explicitly
+          # (check-only: no libFuzzer link, works on stable).
+          cargo clippy --manifest-path crates/cloak-core/fuzz/Cargo.toml --all-targets -- -D warnings
 
   # ── Build ────────────────────────────────────────────────────────
 
+  # Test jobs run on both Linux ISAs: x86-64 and aarch64 take different
+  # SIMD paths inside aho-corasick/regex-automata — cross-target divergence
+  # is asserted absent (docs/03). macOS runners deferred (ledger F14).
   build:
     name: Build
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -86,7 +98,11 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -107,7 +123,11 @@ jobs:
 
   integration-tests:
     name: Integration Tests
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -129,7 +149,11 @@ jobs:
 
   e2e-tests:
     name: E2E Tests
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -145,23 +169,77 @@ jobs:
 
       - name: E2E Tests
         run: |
-          cargo test -p cloak-cli --test pipe --test config_e2e
+          # Glob (quoted, cargo-side) — new e2e files are picked up
+          # without editing this workflow (matches integration job).
+          cargo test -p cloak-cli --test '*'
 
   fuzz:
-    name: Fuzz (placeholder — S6)
-    runs-on: ubuntu-24.04-arm
+    name: Fuzz — replay + smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    env:
+      # rust-toolchain.toml pins stable — cargo-fuzz needs nightly.
+      # Pin bump policy: when cargo-fuzz requires it or monthly.
+      RUSTUP_TOOLCHAIN: nightly-2026-09-05
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Fuzz
+      - name: Setup Rust (nightly — libFuzzer instrumentation)
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: nightly-2026-09-05
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: crates/cloak-core/fuzz
+
+      - name: Install cargo-fuzz
         run: |
-          echo "fuzz: no targets yet — lands in S6"
+          cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Corpus regression replay
+        working-directory: crates/cloak-core
+        run: |
+          # Every committed input (vector seeds + crash reproducers)
+          # re-executed with all harness assertions — no fuzzing.
+          for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do
+            cargo fuzz run "$t" "fuzz/corpus/$t" -O --debug-assertions -- -runs=0 -timeout=10
+          done
+
+      - name: Fuzz smoke (time-boxed)
+        working-directory: crates/cloak-core
+        run: |
+          cargo fuzz run fuzz_engine_stream fuzz/corpus/fuzz_engine_stream -O --debug-assertions -- \
+            -max_total_time=90 -timeout=10 -rss_limit_mb=2048 -max_len=32768 \
+            -dict=fuzz/dictionaries/engine_stream.dict
+          cargo fuzz run fuzz_pem_state fuzz/corpus/fuzz_pem_state -O --debug-assertions -- \
+            -max_total_time=90 -timeout=10 -rss_limit_mb=2048 -max_len=32768 \
+            -dict=fuzz/dictionaries/pem_state.dict
+          cargo fuzz run fuzz_config fuzz/corpus/fuzz_config -O --debug-assertions -- \
+            -max_total_time=60 -timeout=10 -max_len=4096 -close_fd_mask=3 \
+            -dict=fuzz/dictionaries/config.dict
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.os }}
+          path: crates/cloak-core/fuzz/artifacts/
+          if-no-files-found: ignore
 
   smoke:
     name: Smoke
-    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -283,7 +361,7 @@ jobs:
       - name: E2E Tests with Coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p cloak-cli --test pipe --test config_e2e --lcov --output-path coverage/e2e.lcov
+          cargo llvm-cov -p cloak-cli --test '*' --lcov --output-path coverage/e2e.lcov
 
       - name: Upload Coverage
         if: ${{ !cancelled() }}
@@ -304,19 +382,11 @@ jobs:
         run: |
           echo "smoke: coverage not applicable — golden pipe check only"
 
-  coverage-fuzz:
-    name: Coverage — Fuzz (placeholder — S6)
-    runs-on: ubuntu-24.04-arm
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Coverage — Fuzz
-        run: |
-          echo "fuzz: no targets yet — lands in S6"
-
   # ── Coverage aggregation ─────────────────────────────────────────
+  # No coverage-fuzz job: the fuzz tier is gated by the Fuzz job itself
+  # (corpus replay + time-boxed smoke); measuring replay coverage would
+  # need nightly `cargo fuzz coverage` plumbing for corpus that is the
+  # vector suite — already covered by the integration tier.
 
   coverage-report:
     name: Coverage Report
@@ -325,7 +395,6 @@ jobs:
       - coverage-integration
       - coverage-e2e
       - coverage-smoke
-      - coverage-fuzz
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     permissions:
@@ -343,10 +412,14 @@ jobs:
       - name: Generate coverage report and enforce thresholds
         run: |
           # ── Coverage thresholds (line coverage %) ──
-          THRESHOLD_UNIT=95
-          THRESHOLD_INTEGRATION=70
-          THRESHOLD_E2E=50
-          THRESHOLD_TOTAL=92
+          # Raised in S6 after the gap-fill (measured: unit 98.1, integration
+          # 94.7, e2e 98.7, total ~96.9). Rule: floor(measured) − 2, except
+          # e2e which keeps extra margin — its ~80-line denominator makes a
+          # single uncovered line worth >1%.
+          THRESHOLD_UNIT=96
+          THRESHOLD_INTEGRATION=92
+          THRESHOLD_E2E=90
+          THRESHOLD_TOTAL=94
 
           # Parse an LCOV file → "lines% funcs% branches% lines_raw"
           parse_lcov() {
@@ -432,7 +505,7 @@ jobs:
             echo "| integration | ${integ_l} | ${integ_f} | ${integ_b} | ≥${THRESHOLD_INTEGRATION}% | ${integ_status} |"
             echo "| e2e | ${e2e_l} | ${e2e_f} | ${e2e_b} | ≥${THRESHOLD_E2E}% | ${e2e_status} |"
             echo "| smoke | - | - | - | — | — |"
-            echo "| fuzz | - | - | - | — | — |"
+            echo "| fuzz | replay + smoke | - | - | gated in Fuzz job | — |"
             echo "| **Total** | **${total_lpct}** | **${total_fpct}** | **${total_bpct}** | **≥${THRESHOLD_TOTAL}%** | **${total_status}** |"
           } > coverage/report.md
 

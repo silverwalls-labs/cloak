@@ -6,6 +6,18 @@ use crate::types::{Digest, RuleId};
 ///
 /// Returns the first 2 bytes (16 bits = 4 hex chars) of the keyed hash.
 /// Same bytes + same key → same digest; different key → different digest.
+///
+/// ```
+/// use cloak_core::{compute_digest, format_tag, RuleId};
+///
+/// let key = [7u8; 32];
+/// let digest = compute_digest(b"hunter2", &key);
+/// // Correlation: same bytes + same key ⇒ same digest.
+/// assert_eq!(digest, compute_digest(b"hunter2", &key));
+///
+/// let tag = format_tag(&RuleId::new("github-token"), &digest);
+/// assert!(tag.starts_with("[CLOAK:github-token:") && tag.ends_with(']'));
+/// ```
 pub fn compute_digest(matched_bytes: &[u8], key: &[u8; 32]) -> Digest {
     let mut hasher = blake3::Hasher::new_keyed(key);
     hasher.update(matched_bytes);

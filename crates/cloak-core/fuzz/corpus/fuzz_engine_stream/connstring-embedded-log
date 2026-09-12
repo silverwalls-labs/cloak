@@ -1,0 +1,1 @@
+DATABASE_URL=postgres://admin:s3cret@db:5432/app

@@ -1,0 +1,56 @@
+# libFuzzer dictionary for fuzz_engine_stream: every prefilter anchor from
+# src/rules/mod.rs (+ PEM), one CRC-valid token, and the tag prefix
+# (idempotence probing).
+
+# github-token
+anchor_ghp="ghp_"
+anchor_gho="gho_"
+anchor_ghs="ghs_"
+anchor_ghu="ghu_"
+anchor_ghr="ghr_"
+anchor_github_pat="github_pat_"
+# gitlab-token
+anchor_glpat="glpat-"
+anchor_glrt="glrt-"
+anchor_gldt="gldt-"
+# npm-token
+anchor_npm="npm_"
+# aws-access-key
+anchor_akia="AKIA"
+anchor_asia="ASIA"
+# gcp-api-key
+anchor_aiza="AIza"
+# pypi-token
+anchor_pypi="pypi-"
+# aws-secret-key
+anchor_aws_secret="aws_secret"
+anchor_secret_access_key="SecretAccessKey"
+# azure-style-token
+anchor_account_key="AccountKey="
+anchor_accountkey="accountkey="
+anchor_sig="sig="
+# jwt
+anchor_eyj="eyJ"
+# connection-string
+anchor_scheme="://"
+# email
+anchor_at="@"
+# ipv4 (digit-dot composites — two representatives)
+anchor_1dot="1."
+anchor_9dot="9."
+# ipv6
+anchor_coloncolon="::"
+# credit-card (IIN prefixes — representatives)
+anchor_visa="4"
+anchor_discover="6011"
+# phone-intl
+anchor_plus="+"
+# pem
+anchor_pem_begin="-----BEGIN "
+anchor_pem_end="-----END "
+pem_rsa="RSA PRIVATE KEY"
+# CRC-valid github classic token (from tests/rules.rs smoke golden)
+valid_ghp="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"
+# redaction tag prefix — probes idempotence / tag re-matching
+tag_prefix="[CLOAK:"
+newline="\x0a"

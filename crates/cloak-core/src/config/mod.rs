@@ -80,6 +80,17 @@ impl Config {
     /// parsed config is NOT validated against the rule catalog — call
     /// [`validate`](Self::validate) (or let [`Engine::new`](crate::Engine::new)
     /// call it) for that.
+    /// ```
+    /// use cloak_core::Config;
+    ///
+    /// let config = Config::from_toml("[rules.phone-intl]\nenabled = false\n")?;
+    /// assert!(!config.is_rule_enabled("phone-intl"));
+    /// assert!(config.is_rule_enabled("github-token"));
+    ///
+    /// // Malformed TOML and unknown fields are typed errors, not panics.
+    /// assert!(Config::from_toml("[[[broken").is_err());
+    /// # Ok::<(), cloak_core::BuildError>(())
+    /// ```
     pub fn from_toml(s: &str) -> Result<Self, BuildError> {
         toml::from_str(s).map_err(|e| BuildError::InvalidConfig(e.to_string()))
     }
@@ -89,6 +100,16 @@ impl Config {
     /// Returns [`BuildError::InvalidConfig`] if any key in `self.rules`
     /// does not match a known rule id from the catalog or the PEM
     /// pseudo-rule.
+    ///
+    /// ```
+    /// use cloak_core::Config;
+    ///
+    /// Config::from_toml("[rules.github-token]\nenabled = false\n")?.validate()?;
+    ///
+    /// let bad = Config::from_toml("[rules.not-a-rule]\nenabled = false\n")?;
+    /// assert!(bad.validate().is_err());
+    /// # Ok::<(), cloak_core::BuildError>(())
+    /// ```
     pub fn validate(&self) -> Result<(), BuildError> {
         // Digest key: must be empty (ephemeral) or start with "env:".
         let dk = &self.redaction.digest_key;
