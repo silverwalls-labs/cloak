@@ -6,8 +6,9 @@
 //! Usage: `cargo run -p cloak-core --example gen_fuzz_seeds`
 //! Output lands in `crates/cloak-core/fuzz/corpus/<target>/` and is
 //! committed; CI replays it as the fuzz regression gate. Re-run whenever
-//! vectors change. Existing files (e.g. committed crash reproducers) are
-//! left alone unless a seed of the same name changed.
+//! vectors change. Seeds are rewritten unconditionally (content-identical
+//! when unchanged); files with no corresponding seed (e.g. committed crash
+//! reproducers) are never touched.
 
 use std::collections::HashMap;
 use std::fs;

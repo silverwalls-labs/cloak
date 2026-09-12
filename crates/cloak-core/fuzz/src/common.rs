@@ -56,9 +56,11 @@ pub static KEY: LazyLock<[u8; 32]> =
 /// idempotence. They are strict-only because two tracked engine bugs violate
 /// all three on narrow inputs, and asserting them by default would make the
 /// gate red for already-filed bugs:
-/// - **#27** — a context-keyed extent overlapping a streamed PEM body makes
-///   even `streaming ≢ whole-buffer` below max_window (reproducer:
-///   `regression-connstring-pem-overlap`), and cuts backward context beyond
+/// - **#27** — a context-keyed extent overlapping a PEM block diverges from
+///   the reference even in whole-buffer mode (reproducer:
+///   `regression-connstring-pem-overlap`: the engine emits two tags with
+///   overlapping redaction spans, the oracle's overlap merge collapses them
+///   into one), and the flush boundary cuts backward context beyond
 ///   max_window.
 /// - **#34** — redacting a match erases an adjacent candidate's backward
 ///   guard, breaking idempotence.
@@ -73,7 +75,10 @@ pub fn strict() -> bool {
         // Truthy value only, so `CLOAK_FUZZ_STRICT=0` / `=false` DISABLES
         // (mere-presence would make the natural way to turn it off enable it).
         match std::env::var("CLOAK_FUZZ_STRICT") {
-            Ok(v) => !matches!(v.trim(), "" | "0" | "false" | "no" | "off"),
+            Ok(v) => !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "no" | "off"
+            ),
             Err(_) => false,
         }
     });

@@ -183,10 +183,13 @@ fn every_vector_various_chunk_sizes() {
 ///   email local part); the post-flush re-scan accepts what full context
 ///   would have rejected. This test trips that face (1-byte chunks over
 ///   a corpus larger than max_window).
-/// - At any length: a context-keyed extent overlapping a streamed PEM
-///   body diverges — from the oracle AND between streaming and
-///   whole-buffer (fuzz reproducer committed as
-///   fuzz/corpus/fuzz_engine_stream/regression-connstring-pem-overlap).
+/// - At any length: a context-keyed extent overlapping a PEM body diverges
+///   from the oracle — the engine counts both the connstring and the PEM
+///   block (two tags with overlapping redaction spans), while the oracle's
+///   overlap merge collapses them into the connstring winner alone (fuzz
+///   reproducer committed as
+///   fuzz/corpus/fuzz_engine_stream/regression-connstring-pem-overlap;
+///   whole-buffer and streaming agree with each other on that seed).
 ///
 /// The fuzz harness therefore gates all three equivalences behind strict
 /// mode (`fuzz/src/common.rs`).

@@ -175,8 +175,9 @@ the carry-over bound (the robustness guarantee — the fuzz tier's primary job).
 The three correctness equivalences (engine ≡ reference, streaming ≡ whole-buffer,
 idempotence) run **only under `CLOAK_FUZZ_STRICT=1`**, because two tracked engine
 bugs violate all three on narrow inputs — issue #27 (a context-keyed extent
-overlapping a streamed PEM body breaks even streaming ≡ whole-buffer below
-max_window) and issue #34 (adjacent redaction erases a backward guard, breaking
+overlapping a PEM body diverges from the reference even in whole-buffer mode,
+and the flush boundary cuts backward context beyond max_window) and issue #34
+(adjacent redaction erases a backward guard, breaking
 idempotence). Correctness on *known* inputs stays a PR gate via the deterministic
 `tests/differential.rs`; strict fuzzing is the tool to reproduce a finding and to
 hunt new divergences once #27 and #34 close, at which point strict becomes the
