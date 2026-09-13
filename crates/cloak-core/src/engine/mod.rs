@@ -19,21 +19,29 @@ use scanner::{AhoCorasickScanner, Candidate, Scanner};
 /// Error constructing an [`Engine`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// The configuration failed semantic validation (unknown rule id,
+    /// malformed digest key reference, …).
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
+    /// The OS entropy source failed while generating an ephemeral key.
     #[error("failed to obtain entropy for digest key: {0}")]
     Entropy(#[from] config::DigestKeyError),
 
+    /// The anchor-prefilter automaton failed to build (duplicate or
+    /// otherwise invalid anchor set).
     #[error("failed to build anchor prefilter automaton: {0}")]
     Prefilter(#[from] aho_corasick::BuildError),
 
+    /// The confirm DFA for `rule` failed to compile.
     #[error("failed to compile confirm pattern for rule `{rule}`")]
     Confirm {
+        /// The rule whose pattern failed to compile.
         rule: crate::types::RuleId,
         // Boxed: dense::BuildError is ~152 bytes and would dominate the
         // size of every Result<_, BuildError> (clippy::result_large_err).
         #[source]
+        /// The underlying DFA build failure.
         source: Box<regex_automata::dfa::dense::BuildError>,
     },
 }

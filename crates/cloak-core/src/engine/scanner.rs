@@ -25,6 +25,9 @@ pub struct Candidate {
 /// appended — order unspecified, duplicates permitted. A missed candidate is
 /// a guarantee bug; an extra one only costs confirm time.
 pub trait Scanner {
+    /// Append every anchor hit in `haystack` to `out` (see the trait
+    /// contract above). `out` is not cleared — callers merge across
+    /// chunk boundaries.
     fn scan(&self, haystack: &[u8], out: &mut Vec<Candidate>);
 }
 
