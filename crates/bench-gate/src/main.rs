@@ -32,6 +32,9 @@ Commands:
 ";
 
 fn main() -> ExitCode {
+    // nosemgrep: rust.lang.security.args.args — CI tool reading its own
+    // flags; argv is not used for any security decision (no privilege
+    // boundary, no secret handling).
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
         Ok(code) => code,
