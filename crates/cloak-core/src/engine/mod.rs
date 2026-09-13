@@ -1,7 +1,9 @@
 pub(crate) mod confirm;
 mod overlap;
 pub(crate) mod pem;
-mod scanner;
+// `pub` (doc-hidden via lib.rs) so criterion benches can access both scanners
+// for the receipts protocol (docs/04-performance.md).
+pub mod scanner;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -17,21 +19,29 @@ use scanner::{AhoCorasickScanner, Candidate, Scanner};
 /// Error constructing an [`Engine`].
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// The configuration failed semantic validation (unknown rule id,
+    /// malformed digest key reference, …).
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
+    /// The OS entropy source failed while generating an ephemeral key.
     #[error("failed to obtain entropy for digest key: {0}")]
     Entropy(#[from] config::DigestKeyError),
 
+    /// The anchor-prefilter automaton failed to build (duplicate or
+    /// otherwise invalid anchor set).
     #[error("failed to build anchor prefilter automaton: {0}")]
     Prefilter(#[from] aho_corasick::BuildError),
 
+    /// The confirm DFA for `rule` failed to compile.
     #[error("failed to compile confirm pattern for rule `{rule}`")]
     Confirm {
+        /// The rule whose pattern failed to compile.
         rule: crate::types::RuleId,
         // Boxed: dense::BuildError is ~152 bytes and would dominate the
         // size of every Result<_, BuildError> (clippy::result_large_err).
         #[source]
+        /// The underlying DFA build failure.
         source: Box<regex_automata::dfa::dense::BuildError>,
     },
 }
@@ -554,6 +564,15 @@ impl Session<'_> {
         self.carry_over.len()
     }
 }
+
+/// Hard upper bound on [`Session::carry_over_len`] after any `push`:
+/// the largest rule window in the full catalog (2048, jwt — pinned by the
+/// `engine_max_window` unit test) plus PEM retention (`PEM_BAIL_OUT` +
+/// `MAX_PEM_LINE`). Shared by the fuzz harness, the S7 corpus tests, and
+/// the soak tests so the asserted bound cannot drift between them.
+// `pub` for the `#[doc(hidden)]` re-export in lib.rs (bench/test tier) —
+// the module itself is private, so this is not part of the public API.
+pub const CARRY_OVER_BOUND: usize = 2048 + pem::PEM_BAIL_OUT + pem::MAX_PEM_LINE;
 
 #[cfg(test)]
 mod tests {

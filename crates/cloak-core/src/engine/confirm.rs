@@ -34,8 +34,13 @@ use crate::types::RuleId;
 /// same span: `match_start == redact_start`, `match_end == redact_end`.
 /// For context-keyed rules, the match extent is larger than the redaction
 /// span — context bytes pass through, only the redaction span is replaced.
+// `pub` is required, not cosmetic: `ConfirmSpec::Custom`'s fn-pointer
+// signature returns `Option<ConfirmMatch>` and `ConfirmSpec` is `pub`
+// (S7 bench access) — anything less triggers the `private_interfaces`
+// lint, denied by the CI clippy gate. The type stays externally
+// unnameable: `mod confirm` is `pub(crate)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ConfirmMatch {
+pub struct ConfirmMatch {
     /// Start of the full match extent (includes context for overlap and
     /// carry-over boundary decisions).
     pub match_start: usize,

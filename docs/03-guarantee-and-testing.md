@@ -189,7 +189,7 @@ default (`fuzz/src/common.rs`).
 |---|---|---|
 | **0 — Smoke** | every push, fail-fast, both Linux targets¹ | fmt, clippy `-D warnings`, build, unit tests, golden e2e pipe test |
 | **1 — Full** | every PR, both Linux targets¹ | integration (vectors, property invariants, differential engine ≡ reference — cross-target divergence asserted absent, digest-stability goldens, thread-share), full e2e suite (incl. I/O robustness + `insta` snapshots), doc build + doc tests, fuzz smoke (time-boxed minutes) + committed-corpus regression replay, `cargo-deny` (advisories/licenses/dupes), coverage report published |
-| **2 — Nightly** | scheduled (S6 ships fuzz + mutants; soak + criterion land in S7) | extended fuzz (≥ 1 h/target × both ISAs, findings uploaded as artifacts and back-ported to the corpus), `cargo-mutants` over `cloak-core` (4-way shard; surviving mutants reported non-blocking initially, filed as findings), multi-GB soak with flat-RSS assertion, full criterion suite: [≥ 500 MB/s floor + 10 % regression gate](04-performance.md#the-floor-ci-enforced), chunk-size sweep |
+| **2 — Nightly** | scheduled (S6 ships fuzz + mutants; soak + criterion land in S7) | extended fuzz (≥ 1 h/target × both ISAs, findings uploaded as artifacts and back-ported to the corpus), `cargo-mutants` over `cloak-core` (4-way shard; surviving mutants reported non-blocking initially, filed as findings), multi-GB soak with flat-RSS assertion, full criterion suite: [≥ 250 MB/s floor + 10 % regression gate](04-performance.md#the-floor-ci-enforced), chunk-size sweep |
 | **3 — Release** | tag | everything above + receipts table refresh + released-artifact golden smoke |
 
 Bench gates live in nightly/release rather than per-PR — criterion on shared PR

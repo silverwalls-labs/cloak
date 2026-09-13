@@ -11,7 +11,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/cloak-core", "crates/cloak-cli"]
+members = ["crates/cloak-core", "crates/cloak-cli", "crates/bench-gate"]
 # The fuzz crate is deliberately outside the workspace (standard cargo-fuzz
 # layout): it needs the nightly toolchain + libFuzzer link flags and must not
 # drag libfuzzer-sys into cargo-deny/workspace builds. CI runs fmt/clippy on
@@ -37,6 +37,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 serde_json = "1"
 crc32fast = "1"
+criterion = "0.5"
 insta = { version = "1", features = ["json"] }
+rand = "0.9"
 tempfile = "3"
 proptest = "1"

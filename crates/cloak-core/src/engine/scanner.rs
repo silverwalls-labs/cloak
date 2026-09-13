@@ -10,7 +10,7 @@ use crate::rules::RuleSpec;
 /// A candidate anchor hit produced by the prefilter. Not yet a match — the
 /// confirm step decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Candidate {
+pub struct Candidate {
     /// Byte offset where the anchor begins.
     pub start: usize,
     /// Index into the compiled rule table (catalog order).
@@ -24,12 +24,15 @@ pub(crate) struct Candidate {
 /// Contract: **every** occurrence of every rule anchor in `haystack` MUST be
 /// appended — order unspecified, duplicates permitted. A missed candidate is
 /// a guarantee bug; an extra one only costs confirm time.
-pub(crate) trait Scanner {
+pub trait Scanner {
+    /// Append every anchor hit in `haystack` to `out` (see the trait
+    /// contract above). `out` is not cleared — callers merge across
+    /// chunk boundaries.
     fn scan(&self, haystack: &[u8], out: &mut Vec<Candidate>);
 }
 
 /// Production prefilter: one automaton over all rules' anchors.
-pub(crate) struct AhoCorasickScanner {
+pub struct AhoCorasickScanner {
     ac: aho_corasick::AhoCorasick,
     /// `PatternID.as_usize()` → (rule index, anchor length).
     patterns: Vec<(usize, usize)>,
@@ -47,7 +50,7 @@ impl AhoCorasickScanner {
     /// Extra anchors use the provided `(anchor_bytes, rule_index)` tuples
     /// — the rule index is typically a pseudo-index outside the catalog
     /// range (e.g. PEM).
-    pub(crate) fn new(
+    pub fn new(
         catalog: &[&RuleSpec],
         extra_anchors: &[(&[u8], usize)],
     ) -> Result<Self, aho_corasick::BuildError> {
@@ -94,18 +97,16 @@ impl Scanner for AhoCorasickScanner {
 /// Deliberately naive prefilter: byte-compare every anchor at every offset.
 /// Trait-level oracle for `AhoCorasickScanner` (unit tier) and the S7 bench
 /// baseline — the receipts for "SIMD-powered" (docs/04).
-#[allow(dead_code)] // bench baseline (S7); exercised by unit tests only in S2
-pub(crate) struct ScalarScanner {
+pub struct ScalarScanner<'a> {
     /// (anchor, rule index) pairs, flattened in catalog order.
-    anchors: Vec<(&'static [u8], usize)>,
+    anchors: Vec<(&'a [u8], usize)>,
 }
 
-#[allow(dead_code)] // bench baseline (S7); exercised by unit tests only in S2
-impl ScalarScanner {
-    pub(crate) fn new(
-        catalog: &[&'static RuleSpec],
-        extra_anchors: &[(&'static [u8], usize)],
-    ) -> Self {
+impl<'a> ScalarScanner<'a> {
+    /// Signature mirrors [`AhoCorasickScanner::new`]: catalog specs at any
+    /// lifetime (their `anchors` fields are `&'static` regardless) plus
+    /// extra anchors borrowed for `'a`.
+    pub fn new(catalog: &[&RuleSpec], extra_anchors: &[(&'a [u8], usize)]) -> Self {
         let mut anchors = Vec::new();
         for (rule, spec) in catalog.iter().enumerate() {
             for anchor in spec.anchors {
@@ -119,7 +120,7 @@ impl ScalarScanner {
     }
 }
 
-impl Scanner for ScalarScanner {
+impl Scanner for ScalarScanner<'_> {
     fn scan(&self, haystack: &[u8], out: &mut Vec<Candidate>) {
         for start in 0..haystack.len() {
             for &(anchor, rule) in &self.anchors {

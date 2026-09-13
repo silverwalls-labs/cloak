@@ -29,10 +29,10 @@ use crate::types::RuleId;
 // ---------------------------------------------------------------------------
 
 /// Anchor fed to the shared prefilter (11 bytes, same length as `github_pat_`).
-pub(crate) const PEM_ANCHOR: &[u8] = b"-----BEGIN ";
+pub const PEM_ANCHOR: &[u8] = b"-----BEGIN ";
 
 /// Stable rule id for PEM private-key detection.
-pub(crate) const PEM_RULE_ID: &str = "pem-private-key";
+pub const PEM_RULE_ID: &str = "pem-private-key";
 
 /// Default body-size bail-out (bytes). If the body between BEGIN and END
 /// exceeds this limit, the engine emits a tag and resumes normal scanning.

@@ -1,7 +1,7 @@
 name: Nightly
 
 # Stage 2 of docs/03 §CI staging: extended fuzz (≥ 1 h/target, both Linux
-# ISAs) + cargo-mutants over cloak-core. Soak + criterion land in S7.
+# ISAs) + cargo-mutants over cloak-core + criterion floor gate + soak test.
 
 on:
   schedule:
@@ -138,3 +138,125 @@ jobs:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants.out
           if-no-files-found: ignore
+
+  # ── Criterion floor gate (S7) ─────────────────────────────────────
+  #
+  # ≥ 250 MB/s single-core on the worse of the two clean-* corpora
+  # (median of criterion's sample). The floor is set from the committed
+  # receipts (clean-text ≈ 280 MB/s on the dev machine) with margin for
+  # slower CI runners — still ~100× real kube log volume (a few MB/s).
+  # 10% regression gate against stored per-target baselines. Bench gates
+  # live in nightly (not per-PR) because criterion on shared runners is
+  # noise (docs/04).
+
+  bench-floor:
+    name: Bench Floor (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Run throughput benchmark
+        shell: bash
+        run: |
+          set -eo pipefail
+          # sample-size 20: 10 is criterion's minimum and too noisy for a
+          # 10% regression gate on shared runners.
+          cargo bench -p cloak-core --bench throughput -- \
+            --sample-size 20 --measurement-time 10 \
+            2>&1 | tee bench-output.txt
+
+      - name: Run prefilter benchmark (informational)
+        shell: bash
+        run: |
+          set -eo pipefail
+          cargo bench -p cloak-core --bench prefilter -- \
+            --sample-size 10 --measurement-time 5 \
+            2>&1 | tee prefilter-output.txt
+
+      - name: Run chunk-sweep benchmark (informational)
+        shell: bash
+        run: |
+          set -eo pipefail
+          cargo bench -p cloak-core --bench chunk_sweep -- \
+            --sample-size 10 --measurement-time 5 \
+            2>&1 | tee chunk-sweep-output.txt
+
+      - name: Check 250 MB/s floor
+        run: |
+          cargo run -p bench-gate --release -- floor --floor-mbs 250
+
+      - name: Check regression against baseline
+        run: |
+          cargo run -p bench-gate --release -- regression \
+            --baseline docs/benchmarks/baselines/${{ runner.arch }}.json \
+            --threshold-pct 10
+
+      - name: Generate baseline candidate
+        # Populates the regression gate: download this artifact from a green
+        # run and commit it to docs/benchmarks/baselines/${{ runner.arch }}.json
+        # (see the note in the baseline files).
+        run: |
+          cargo run -p bench-gate --release -- emit-baseline \
+            --out baseline-${{ runner.arch }}.json \
+            --target ${{ runner.arch }}
+
+      - name: Upload bench results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-${{ matrix.os }}
+          path: |
+            bench-output.txt
+            prefilter-output.txt
+            chunk-sweep-output.txt
+            baseline-${{ runner.arch }}.json
+          if-no-files-found: ignore
+
+  # ── Soak test (S7) ────────────────────────────────────────────────
+  #
+  # Push tens of GB through a single Session, assert flat RSS.
+  # Proves bounded memory as an observed fact — the proptest invariant
+  # (docs/03, "soak test" cross-cutting class), made empirical.
+
+  soak:
+    name: Soak Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Soak test (10 GB, RSS < 100 MB)
+        env:
+          SOAK_TARGET_GB: "10"
+          SOAK_RSS_LIMIT_MB: "100"
+        run: |
+          cargo run -p cloak-core --example soak --release

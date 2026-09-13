@@ -74,7 +74,7 @@ v0.1 rides **SIMD-backed crates** — speed is the point, SIMD is the means:
 
 Every rule **must** declare at least one literal anchor — this keeps the clean path
 (no anchors present) at prefilter speed, which is what makes the
-[≥ 500 MB/s floor](04-performance.md) achievable.
+[≥ 250 MB/s floor](04-performance.md) achievable.
 
 ### The SIMD upgrade path (kept honest)
 

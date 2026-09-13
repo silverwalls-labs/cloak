@@ -16,12 +16,16 @@ pub const KEY_MATERIAL: &str = "fuzz-digest-key";
 /// flush before `finish`, so the whole guarantee holds unconditionally;
 /// above it, the flush boundary can cut backward context for
 /// context-guarded rules — the known engine bug tracked as issue #27.
+// Each fuzz target compiles this module independently (`#[path]`); only
+// fuzz_engine_stream switches assertion tiers on this constant.
+#[allow(dead_code)]
 pub const MAX_WINDOW: usize = 2048;
 
 /// Carry-over bound asserted after every push: max_window (2048, jwt) plus
-/// PEM_BAIL_OUT (16 KiB) plus the longest BEGIN line (37). Mirrors the
-/// bounded-memory proptest in `tests/streaming.rs`.
-pub const CARRY_BOUND: usize = MAX_WINDOW + 16_384 + 37;
+/// PEM_BAIL_OUT (16 KiB) plus the longest BEGIN line (37). Defined once in
+/// cloak-core and shared with the corpus/soak tests so it cannot drift.
+/// Mirrors the bounded-memory proptest in `tests/streaming.rs`.
+pub const CARRY_BOUND: usize = cloak_core::CARRY_OVER_BOUND;
 
 /// One engine for the whole fuzz process — `Engine` is Send+Sync and
 /// sessions are cheap; rebuilding per input would dominate runtime.
