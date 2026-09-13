@@ -1,0 +1,7 @@
+{
+  "generated": "2026-09-13",
+  "rustc": "1.98.1",
+  "target": "x86_64-unknown-linux-gnu",
+  "note": "Populate by running `cargo bench -p cloak-core --bench throughput` on the CI runner class and extracting median MiB/s values. Use workflow_dispatch to trigger a manual nightly run.",
+  "benchmarks": {}
+}

@@ -18,7 +18,8 @@ use crate::engine::confirm::ConfirmMatch;
 /// the confirm step requires backward-looking from the anchor (email `@`),
 /// custom validation (Luhn, JWT decode), or partial redaction
 /// (context-keyed rules that redact only the value sub-span).
-pub(crate) enum ConfirmSpec {
+// `pub` for bench-tier access (`#[doc(hidden)]` re-export in lib.rs).
+pub enum ConfirmSpec {
     /// Anchored regex pattern compiled into a DFA. The full DFA match
     /// span is the redaction span (byte-oriented, ASCII classes only,
     /// greedy — leftmost-first must equal longest-at-anchor;
@@ -35,7 +36,7 @@ pub(crate) enum ConfirmSpec {
 ///
 /// Compiled at engine build time into a prefilter pattern set and an
 /// anchored confirm DFA or custom function (see [`ConfirmSpec`]).
-pub(crate) struct RuleSpec {
+pub struct RuleSpec {
     /// Stable rule id (docs/02-rules.md — renaming is a breaking change).
     pub id: &'static str,
     /// Literal anchors for the prefilter. Every rule MUST declare at least
@@ -51,7 +52,7 @@ pub(crate) struct RuleSpec {
 /// The built-in catalog. Order is significant: catalog order == overlap
 /// tie-break order (docs/02-rules.md, "Overlap resolution").
 /// Secrets before PII: secrets win overlap tie-breaks against PII.
-pub(crate) static CATALOG: &[RuleSpec] = &[
+pub static CATALOG: &[RuleSpec] = &[
     // ── Secret detectors (S2, CRC-validated S4/F12) ────────────────────
     RuleSpec {
         id: "github-token",

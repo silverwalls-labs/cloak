@@ -18,5 +18,18 @@ toml = { workspace = true }
 crc32fast = { workspace = true }
 
 [dev-dependencies]
-blake3 = { workspace = true }
+criterion = { workspace = true }
 proptest = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[[bench]]
+name = "prefilter"
+harness = false
+
+[[bench]]
+name = "chunk_sweep"
+harness = false

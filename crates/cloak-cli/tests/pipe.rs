@@ -314,3 +314,28 @@ fn pipe_mixed_valid_and_invalid_crc() {
         "should count 2 github-token matches (valid classic + pat): {stderr}"
     );
 }
+
+// ── Corpus passthrough (S7) ─────────────────────────────────────────
+
+#[test]
+fn corpus_clean_text_pipe_passthrough() {
+    // Pipe the committed clean-text bench corpus (~1 MB) through the real
+    // binary. Zero matches → output must be byte-identical to input.
+    // This is the E2E tier of the clean-path floor validation.
+    let corpus_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("corpus")
+        .join("clean-text");
+    let corpus = std::fs::read(&corpus_path)
+        .unwrap_or_else(|e| panic!("read corpus: {e}"));
+
+    Command::cargo_bin("cloak")
+        .unwrap()
+        .write_stdin(corpus.clone())
+        .assert()
+        .success()
+        .stdout(corpus);
+}

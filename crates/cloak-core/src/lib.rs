@@ -44,6 +44,19 @@ mod types;
 pub mod reference;
 #[doc(hidden)]
 pub use rules::vectors;
+// Scanner types, rule catalog, and PEM constants for criterion benchmarks
+// (S7: receipts protocol — docs/04-performance.md). Benches need both
+// scanners to measure the prefilter independently and produce the
+// ScalarScanner vs AhoCorasickScanner comparison table.
+#[doc(hidden)]
+pub use engine::scanner;
+#[doc(hidden)]
+pub use rules::{CATALOG, RuleSpec};
+// PEM anchor/rule-id for prefilter bench parity (both scanners must
+// use the same anchor set). Only these two constants are re-exported —
+// the pem module itself stays pub(crate).
+#[doc(hidden)]
+pub use engine::pem::{PEM_ANCHOR, PEM_RULE_ID};
 
 pub use config::{Config, RedactionConfig, RuleConfig};
 pub use engine::{BuildError, Engine, Session};

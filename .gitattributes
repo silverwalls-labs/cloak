@@ -1,0 +1,3 @@
+# Benchmark corpora contain arbitrary bytes (binary-soup, dirty-dense truncated).
+# Prevent line-ending normalization and text-mode diff.
+corpus/* binary

@@ -35,7 +35,7 @@ use crate::types::RuleId;
 /// For context-keyed rules, the match extent is larger than the redaction
 /// span — context bytes pass through, only the redaction span is replaced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ConfirmMatch {
+pub struct ConfirmMatch {
     /// Start of the full match extent (includes context for overlap and
     /// carry-over boundary decisions).
     pub match_start: usize,

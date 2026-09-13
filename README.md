@@ -46,9 +46,20 @@ before relying on it.
 Precision stance: recall-first with **tuned, anchored rules** — no entropy
 heuristics eating your trace IDs.
 
-## Status
+## Performance
 
-**Design phase.** No code yet — the full design is agreed and documented:
+SIMD-accelerated scanning via `aho-corasick` (Teddy/AVX2/NEON). Every number
+below traces to a committed
+[criterion benchmark](docs/benchmarks/receipts-v0.1.md) — no mood-based
+"blazingly fast."
+
+| Metric | Number | Source |
+|---|---|---|
+| Clean-path throughput (single core) | [receipts](docs/benchmarks/receipts-v0.1.md) | CI-gated floor, nightly |
+| Prefilter speedup vs naive scanner | ~60–75× | [receipts](docs/benchmarks/receipts-v0.1.md) |
+| Memory | O(W) bounded | Soak test (10 GB, flat RSS) |
+
+## Design
 
 | Doc | Contents |
 |---|---|

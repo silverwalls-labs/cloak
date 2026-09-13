@@ -1,7 +1,9 @@
 pub(crate) mod confirm;
 mod overlap;
 pub(crate) mod pem;
-mod scanner;
+// `pub` (doc-hidden via lib.rs) so criterion benches can access both scanners
+// for the receipts protocol (docs/04-performance.md).
+pub mod scanner;
 
 use std::collections::BTreeMap;
 use std::io;
