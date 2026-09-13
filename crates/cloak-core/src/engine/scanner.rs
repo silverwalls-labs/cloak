@@ -94,16 +94,16 @@ impl Scanner for AhoCorasickScanner {
 /// Deliberately naive prefilter: byte-compare every anchor at every offset.
 /// Trait-level oracle for `AhoCorasickScanner` (unit tier) and the S7 bench
 /// baseline — the receipts for "SIMD-powered" (docs/04).
-pub struct ScalarScanner {
+pub struct ScalarScanner<'a> {
     /// (anchor, rule index) pairs, flattened in catalog order.
-    anchors: Vec<(&'static [u8], usize)>,
+    anchors: Vec<(&'a [u8], usize)>,
 }
 
-impl ScalarScanner {
-    pub fn new(
-        catalog: &[&'static RuleSpec],
-        extra_anchors: &[(&'static [u8], usize)],
-    ) -> Self {
+impl<'a> ScalarScanner<'a> {
+    /// Signature mirrors [`AhoCorasickScanner::new`]: catalog specs at any
+    /// lifetime (their `anchors` fields are `&'static` regardless) plus
+    /// extra anchors borrowed for `'a`.
+    pub fn new(catalog: &[&RuleSpec], extra_anchors: &[(&'a [u8], usize)]) -> Self {
         let mut anchors = Vec::new();
         for (rule, spec) in catalog.iter().enumerate() {
             for anchor in spec.anchors {
@@ -117,7 +117,7 @@ impl ScalarScanner {
     }
 }
 
-impl Scanner for ScalarScanner {
+impl Scanner for ScalarScanner<'_> {
     fn scan(&self, haystack: &[u8], out: &mut Vec<Candidate>) {
         for start in 0..haystack.len() {
             for &(anchor, rule) in &self.anchors {

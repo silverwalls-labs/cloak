@@ -329,8 +329,7 @@ fn corpus_clean_text_pipe_passthrough() {
         .unwrap()
         .join("corpus")
         .join("clean-text");
-    let corpus = std::fs::read(&corpus_path)
-        .unwrap_or_else(|e| panic!("read corpus: {e}"));
+    let corpus = std::fs::read(&corpus_path).unwrap_or_else(|e| panic!("read corpus: {e}"));
 
     Command::cargo_bin("cloak")
         .unwrap()

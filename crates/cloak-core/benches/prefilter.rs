@@ -9,7 +9,7 @@ use std::path::Path;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use cloak_core::scanner::{AhoCorasickScanner, Candidate, ScalarScanner, Scanner};
-use cloak_core::{CATALOG, RuleSpec};
+use cloak_core::{CATALOG, PEM_ANCHOR, RuleSpec};
 
 const CORPUS_NAMES: &[&str] = &[
     "clean-json",
@@ -36,27 +36,26 @@ fn catalog_refs() -> Vec<&'static RuleSpec> {
 
 fn bench_prefilter(c: &mut Criterion) {
     let refs = catalog_refs();
-    // Build both scanners with identical anchor sets (no PEM — keeps the
-    // comparison fair and avoids exposing PEM internals beyond what's needed).
-    let ac = AhoCorasickScanner::new(&refs, &[]).unwrap();
-    let scalar = ScalarScanner::new(&refs, &[]);
+    // Identical anchor sets on both scanners, mirroring the production
+    // engine build: catalog anchors + the PEM anchor at the pseudo rule
+    // index just past the catalog (engine/mod.rs `pem_rule_idx`). Receipts
+    // must measure the shipped configuration.
+    let pem_extra: Vec<(&[u8], usize)> = vec![(PEM_ANCHOR, CATALOG.len())];
+    let ac = AhoCorasickScanner::new(&refs, &pem_extra).unwrap();
+    let scalar = ScalarScanner::new(&refs, &pem_extra);
 
     let mut group = c.benchmark_group("prefilter");
     for &name in CORPUS_NAMES {
         let data = load_corpus(name);
         group.throughput(Throughput::Bytes(data.len() as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("aho-corasick", name),
-            &data,
-            |b, data| {
-                b.iter(|| {
-                    let mut candidates: Vec<Candidate> = Vec::new();
-                    ac.scan(data, &mut candidates);
-                    candidates.len()
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("aho-corasick", name), &data, |b, data| {
+            b.iter(|| {
+                let mut candidates: Vec<Candidate> = Vec::new();
+                ac.scan(data, &mut candidates);
+                candidates.len()
+            });
+        });
 
         group.bench_with_input(BenchmarkId::new("scalar", name), &data, |b, data| {
             b.iter(|| {

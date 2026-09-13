@@ -9,11 +9,7 @@
 use std::io::{self, Write};
 use std::path::Path;
 
-use cloak_core::{Config, Engine};
-
-/// Carry-over bound: max_window (2048) + PEM_BAIL_OUT (16384) + MAX_PEM_LINE (37).
-/// Same constant as fuzz/src/common.rs CARRY_BOUND.
-const CARRY_BOUND: usize = 2048 + 16_384 + 37;
+use cloak_core::{CARRY_OVER_BOUND, Config, Engine};
 
 fn load_corpus(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -62,8 +58,8 @@ fn soak_lite_bounded_carry_over() {
         for (i, chunk) in corpus.chunks(1024).enumerate() {
             session.push(chunk, &mut sink).unwrap();
             assert!(
-                session.carry_over_len() <= CARRY_BOUND,
-                "round {round} chunk {i}: carry_over {} > CARRY_BOUND {CARRY_BOUND}",
+                session.carry_over_len() <= CARRY_OVER_BOUND,
+                "round {round} chunk {i}: carry_over {} > CARRY_OVER_BOUND {CARRY_OVER_BOUND}",
                 session.carry_over_len(),
             );
         }
@@ -72,10 +68,7 @@ fn soak_lite_bounded_carry_over() {
     let stats = session.finish(&mut sink).unwrap();
     let expected_bytes = (corpus.len() as u64) * (iterations as u64);
     assert_eq!(stats.bytes_processed, expected_bytes);
-    assert!(
-        sink.bytes > 0,
-        "soak must produce output (got 0 bytes)"
-    );
+    assert!(sink.bytes > 0, "soak must produce output (got 0 bytes)");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -98,8 +91,8 @@ fn soak_lite_one_byte_chunks() {
         for &byte in corpus {
             session.push(&[byte], &mut sink).unwrap();
             assert!(
-                session.carry_over_len() <= CARRY_BOUND,
-                "carry_over {} > CARRY_BOUND {CARRY_BOUND} during 1-byte push soak",
+                session.carry_over_len() <= CARRY_OVER_BOUND,
+                "carry_over {} > CARRY_OVER_BOUND {CARRY_OVER_BOUND} during 1-byte push soak",
                 session.carry_over_len(),
             );
         }
@@ -107,7 +100,10 @@ fn soak_lite_one_byte_chunks() {
 
     let stats = session.finish(&mut sink).unwrap();
     assert_eq!(stats.bytes_processed, corpus.len() as u64);
-    assert!(stats.total_matches() > 0, "dirty corpus must produce matches even with 1-byte pushes");
+    assert!(
+        stats.total_matches() > 0,
+        "dirty corpus must produce matches even with 1-byte pushes"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -134,14 +130,14 @@ fn soak_lite_alternating_corpora() {
     for i in 0..pairs {
         session.push(clean_chunks[i], &mut sink).unwrap();
         assert!(
-            session.carry_over_len() <= 2048 + 16_384 + 37,
-            "after clean chunk {i}: carry_over {} > CARRY_BOUND {CARRY_BOUND}",
+            session.carry_over_len() <= CARRY_OVER_BOUND,
+            "after clean chunk {i}: carry_over {} > CARRY_OVER_BOUND {CARRY_OVER_BOUND}",
             session.carry_over_len(),
         );
         session.push(dirty_chunks[i], &mut sink).unwrap();
         assert!(
-            session.carry_over_len() <= 2048 + 16_384 + 37,
-            "after dirty chunk {i}: carry_over {} > CARRY_BOUND {CARRY_BOUND}",
+            session.carry_over_len() <= CARRY_OVER_BOUND,
+            "after dirty chunk {i}: carry_over {} > CARRY_OVER_BOUND {CARRY_OVER_BOUND}",
             session.carry_over_len(),
         );
     }
@@ -186,10 +182,7 @@ fn soak_lite_multi_pass_no_crash() {
     }
     let stats = session.finish(&mut sink).unwrap();
 
-    assert_eq!(
-        stats.bytes_processed,
-        corpus.len() as u64 * 6,
-    );
+    assert_eq!(stats.bytes_processed, corpus.len() as u64 * 6,);
 
     // Total matches must be >= first-pass matches (more data = more matches).
     assert!(

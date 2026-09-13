@@ -3,34 +3,15 @@
 
 Usage: python3 check_bench_regression.py <bench-output.txt> <baseline.json> <threshold_pct>
 
-Parses criterion's default output for throughput/push/* benchmarks, compares
-median MiB/s against stored values in the baseline JSON, and fails if any
-benchmark regressed beyond the threshold.
+Parses criterion's output for throughput/push/* benchmarks, compares
+median MiB/s (unit-normalized) against stored values in the baseline JSON,
+and fails if any benchmark regressed beyond the threshold.
 """
 
 import json
-import re
 import sys
 
-
-def parse_all_throughput(output: str) -> dict[str, float]:
-    """Extract median throughput (MiB/s) for all throughput/push/* benchmarks."""
-    # Match blocks like:
-    # throughput/push/clean-json
-    #                         time:   [...]
-    #                         thrpt:  [lower MiB/s median MiB/s upper MiB/s]
-    pattern = re.compile(
-        r"^(throughput/push/\S+)\s*$"
-        r".*?"
-        r"thrpt:\s*\[\s*([\d.]+)\s+MiB/s\s+([\d.]+)\s+MiB/s\s+([\d.]+)\s+MiB/s\s*\]",
-        re.MULTILINE | re.DOTALL,
-    )
-    results = {}
-    for match in pattern.finditer(output):
-        name = match.group(1)
-        median = float(match.group(3))  # middle value
-        results[name] = median
-    return results
+from bench_parse import parse_all_throughput
 
 
 def main() -> None:
@@ -55,9 +36,19 @@ def main() -> None:
         print(f"WARNING: baseline file {baseline_file} not found — skipping regression check")
         print("Run benchmarks and commit the baseline to enable regression gating.")
         sys.exit(0)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: baseline file {baseline_file} is not valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(baseline, dict):
+        print(f"ERROR: baseline file {baseline_file} must contain a JSON object", file=sys.stderr)
+        sys.exit(1)
 
     current = parse_all_throughput(output)
     stored = baseline.get("benchmarks", {})
+    if not isinstance(stored, dict):
+        print(f"ERROR: {baseline_file}: 'benchmarks' must be an object", file=sys.stderr)
+        sys.exit(1)
 
     if not current:
         print("ERROR: no throughput benchmarks found in output", file=sys.stderr)
@@ -68,7 +59,14 @@ def main() -> None:
         if name not in stored:
             print(f"  {name}: {current_mibs:.1f} MiB/s (no baseline — skipped)")
             continue
-        baseline_mibs = stored[name]["median_mibs"]
+        entry = stored[name]
+        if not isinstance(entry, dict) or "median_mibs" not in entry:
+            print(
+                f"ERROR: baseline entry for {name} must be an object with a 'median_mibs' key",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        baseline_mibs = float(entry["median_mibs"])
         change_pct = ((current_mibs - baseline_mibs) / baseline_mibs) * 100
         status = "OK" if change_pct > -threshold_pct else "REGRESSED"
         print(f"  {name}: {current_mibs:.1f} MiB/s (baseline: {baseline_mibs:.1f}, {change_pct:+.1f}%) [{status}]")

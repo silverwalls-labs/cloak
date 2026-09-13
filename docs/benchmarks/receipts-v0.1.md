@@ -20,13 +20,17 @@ KernelScanner (future) must include its own table — **no receipts, no merge.**
 
 ## Prefilter throughput: ScalarScanner vs AhoCorasickScanner
 
+Both scanners use the production anchor set: catalog anchors + the PEM
+anchor (`-----BEGIN `) at the engine's pseudo rule index — receipts measure
+the shipped configuration (docs/04, receipts protocol).
+
 | Corpus | ScalarScanner (MiB/s) | AhoCorasickScanner (MiB/s) | Speedup |
 |---|---|---|---|
-| clean-json  |   6.9 |  461 | **67×** |
-| clean-text  |   6.9 |  390 | **57×** |
-| dirty-mixed |   6.9 |  509 | **74×** |
-| dirty-dense |   6.9 |  452 | **66×** |
-| binary-soup |   7.0 |  511 | **73×** |
+| clean-json  |  6.7 |  475 | **71×** |
+| clean-text  |  6.7 |  386 | **58×** |
+| dirty-mixed |  6.7 |  502 | **75×** |
+| dirty-dense |  6.7 |  443 | **66×** |
+| binary-soup |  6.8 |  510 | **75×** |
 
 ## End-to-end throughput (Session::push, 64 KiB chunks)
 
@@ -62,3 +66,12 @@ mattering and confirm cost dominates.
 The 64 KiB CLI default is near the throughput plateau — diminishing returns
 beyond it, and significantly better than the small-chunk regime where
 carry-over churn dominates.
+
+## Soak (memory)
+
+The soak receipt (10 GB through one `Session`, flat-RSS assertion) is
+produced by the **Linux CI nightly** (`soak` job) — the RSS assertion reads
+`/proc/self/status` and is skipped on non-Linux dev machines, so no soak
+number appears in this dev-machine doc. The bound itself is
+`CARRY_OVER_BOUND` (max rule window + PEM retention), asserted per-push by
+the fuzz harness, the corpus tests, and the soak tests.

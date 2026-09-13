@@ -51,21 +51,17 @@ fn bench_chunk_sweep(c: &mut Criterion) {
     for &chunk_size in CHUNK_SIZES {
         let label = format_size(chunk_size);
         group.throughput(Throughput::Bytes(corpus.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("push", &label),
-            &chunk_size,
-            |b, &cs| {
-                b.iter(|| {
-                    let mut session = engine.session();
-                    let mut out = Vec::with_capacity(corpus.len() + corpus.len() / 4);
-                    for chunk in corpus.chunks(cs) {
-                        session.push(chunk, &mut out).unwrap();
-                    }
-                    session.finish(&mut out).unwrap();
-                    out
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("push", &label), &chunk_size, |b, &cs| {
+            b.iter(|| {
+                let mut session = engine.session();
+                let mut out = Vec::with_capacity(corpus.len() + corpus.len() / 4);
+                for chunk in corpus.chunks(cs) {
+                    session.push(chunk, &mut out).unwrap();
+                }
+                session.finish(&mut out).unwrap();
+                out
+            });
+        });
     }
     group.finish();
 }

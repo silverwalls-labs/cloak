@@ -51,7 +51,9 @@ jobs:
 
       - name: Test bench gate scripts
         run: |
-          python3 -m unittest .github/scripts/test_bench_scripts.py -v
+          # Direct execution — `python -m unittest <path>` cannot convert the
+          # dot-prefixed `.github/` path to a module name.
+          python3 .github/scripts/test_bench_scripts.py -v
 
   lint:
     name: Lint

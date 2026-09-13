@@ -62,11 +62,15 @@ fn get_rss_kb() -> Option<u64> {
     None // RSS measurement not available on this platform
 }
 
+/// Unset → default; present but unparseable → panic. This is a CI harness:
+/// a typo'd `SOAK_TARGET_GB=1O` must fail loudly, not silently run defaults.
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+    match std::env::var(key) {
+        Ok(s) => s
+            .parse()
+            .unwrap_or_else(|_| panic!("soak: invalid {key}={s:?}")),
+        Err(_) => default,
+    }
 }
 
 fn main() {
@@ -77,13 +81,19 @@ fn main() {
     let target_bytes = target_gb * 1024 * 1024 * 1024;
     let check_interval_bytes = check_interval_mb * 1024 * 1024;
 
-    eprintln!("soak: target={target_gb} GB, rss_limit={rss_limit_mb} MB, check_interval={check_interval_mb} MB");
+    eprintln!(
+        "soak: target={target_gb} GB, rss_limit={rss_limit_mb} MB, check_interval={check_interval_mb} MB"
+    );
 
     // Load corpora — concat clean-text + dirty-mixed for a realistic mix.
     let clean = load_corpus("clean-text");
     let dirty = load_corpus("dirty-mixed");
     let corpus: Vec<u8> = [clean.as_slice(), dirty.as_slice()].concat();
-    eprintln!("soak: corpus size = {} bytes ({} MB looped)", corpus.len(), corpus.len() / (1024 * 1024));
+    eprintln!(
+        "soak: corpus size = {} bytes ({} MB looped)",
+        corpus.len(),
+        corpus.len() / (1024 * 1024)
+    );
 
     let engine = Engine::new(&Config::ephemeral()).unwrap();
     let mut session = engine.session();
@@ -164,13 +174,23 @@ fn main() {
 
     eprintln!();
     eprintln!("soak: PASSED");
-    eprintln!("  total:      {:.1} GB", total_bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    eprintln!(
+        "  total:      {:.1} GB",
+        total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
     eprintln!("  elapsed:    {:.1} s", elapsed.as_secs_f64());
     eprintln!("  throughput: {throughput_mbs:.0} MB/s");
-    eprintln!("  output:     {:.1} GB", sink.bytes as f64 / (1024.0 * 1024.0 * 1024.0));
+    eprintln!(
+        "  output:     {:.1} GB",
+        sink.bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    );
     eprintln!("  matches:    {}", stats.total_matches());
     if rss_available {
-        eprintln!("  RSS range:  {} – {} KB (delta = {} KB)",
-            min_rss_kb, max_rss_kb, max_rss_kb.saturating_sub(min_rss_kb));
+        eprintln!(
+            "  RSS range:  {} – {} KB (delta = {} KB)",
+            min_rss_kb,
+            max_rss_kb,
+            max_rss_kb.saturating_sub(min_rss_kb)
+        );
     }
 }

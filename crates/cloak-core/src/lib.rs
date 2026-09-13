@@ -57,6 +57,10 @@ pub use rules::{CATALOG, RuleSpec};
 // the pem module itself stays pub(crate).
 #[doc(hidden)]
 pub use engine::pem::{PEM_ANCHOR, PEM_RULE_ID};
+// Carry-over bound asserted by the fuzz harness, corpus tests, and soak
+// tests — one definition so the bound cannot drift between tiers.
+#[doc(hidden)]
+pub use engine::CARRY_OVER_BOUND;
 
 pub use config::{Config, RedactionConfig, RuleConfig};
 pub use engine::{BuildError, Engine, Session};

@@ -4,6 +4,7 @@
 Run: python3 -m unittest .github/scripts/test_bench_scripts.py
 """
 
+import datetime
 import json
 import os
 import sys
@@ -14,8 +15,8 @@ import unittest
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS_DIR)
 
-from check_bench_floor import mib_to_mb, parse_throughput
-from check_bench_regression import parse_all_throughput
+from bench_parse import parse_all_throughput, parse_throughput
+from check_bench_floor import mib_to_mb
 
 # ── Mock criterion output ────────────────────────────────────────────
 
@@ -41,6 +42,19 @@ Benchmarking throughput/push/dirty-mixed: Analyzing
 throughput/push/dirty-mixed
                         time:   [1.5000 ms 1.6000 ms 1.7000 ms]
                         thrpt:  [588.24 MiB/s 625.00 MiB/s 666.67 MiB/s]
+"""
+
+# Criterion scales the throughput unit with magnitude — a fast corpus can
+# print GiB/s (or KiB/s when slow). The parser must normalize.
+UNIT_SCALING_OUTPUT = """\
+Benchmarking throughput/push/clean-json: Analyzing
+throughput/push/clean-json
+                        time:   [900.00 us 950.00 us 1.0000 ms]
+                        thrpt:  [1.0000 GiB/s 1.0500 GiB/s 1.1000 GiB/s]
+Benchmarking throughput/push/clean-text: Analyzing
+throughput/push/clean-text
+                        time:   [2.0000 s 2.1000 s 2.2000 s]
+                        thrpt:  [480.00 KiB/s 500.00 KiB/s 520.00 KiB/s]
 """
 
 
@@ -99,6 +113,48 @@ class TestParseRegression(unittest.TestCase):
         self.assertAlmostEqual(results["throughput/push/dirty-mixed"], 625.00, places=1)
 
 
+class TestUnitNormalization(unittest.TestCase):
+    """criterion scales the thrpt unit (KiB/s…GiB/s) — the parser must normalize."""
+
+    def test_parse_gib(self):
+        result = parse_throughput(UNIT_SCALING_OUTPUT, "throughput/push/clean-json")
+        self.assertAlmostEqual(result, 1.05 * 1024, places=1)
+
+    def test_parse_kib(self):
+        result = parse_throughput(UNIT_SCALING_OUTPUT, "throughput/push/clean-text")
+        self.assertAlmostEqual(result, 500.0 / 1024, places=4)
+
+    def test_parse_all_normalized(self):
+        results = parse_all_throughput(UNIT_SCALING_OUTPUT)
+        self.assertAlmostEqual(results["throughput/push/clean-json"], 1.05 * 1024, places=1)
+        self.assertAlmostEqual(results["throughput/push/clean-text"], 500.0 / 1024, places=4)
+
+
+class TestMakeBaseline(unittest.TestCase):
+    """Tests for make_baseline.py."""
+
+    def test_make_baseline_structure(self):
+        from make_baseline import make_baseline
+
+        baseline = make_baseline(MOCK_CRITERION_OUTPUT, "x86_64-unknown-linux-gnu")
+        self.assertEqual(baseline["target"], "x86_64-unknown-linux-gnu")
+        self.assertEqual(baseline["generated"], datetime.date.today().isoformat())
+        benchmarks = baseline["benchmarks"]
+        self.assertEqual(len(benchmarks), 3)
+        self.assertAlmostEqual(
+            benchmarks["throughput/push/clean-json"]["median_mibs"], 476.19, places=1
+        )
+        self.assertAlmostEqual(
+            benchmarks["throughput/push/dirty-mixed"]["median_mibs"], 625.00, places=1
+        )
+
+    def test_make_baseline_empty_output_raises(self):
+        from make_baseline import make_baseline
+
+        with self.assertRaises(ValueError):
+            make_baseline("", "x86_64")
+
+
 class TestFloorIntegration(unittest.TestCase):
     """Integration tests for the floor check (end-to-end with temp files)."""
 
@@ -136,13 +192,17 @@ class TestFloorIntegration(unittest.TestCase):
 class TestRegressionIntegration(unittest.TestCase):
     """Integration tests for the regression check."""
 
-    def _run_regression_check(self, output_text: str, baseline: dict, threshold: float) -> int:
+    def _run_regression_check(self, output_text: str, baseline, threshold: float) -> int:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write(output_text)
             f.flush()
             output_path = f.name
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(baseline, f)
+            # `baseline` is a dict to dump, or raw text for malformed-JSON cases.
+            if isinstance(baseline, str):
+                f.write(baseline)
+            else:
+                json.dump(baseline, f)
             f.flush()
             baseline_path = f.name
         try:
@@ -199,6 +259,20 @@ class TestRegressionIntegration(unittest.TestCase):
             self.assertEqual(return_code, 0)  # Missing baseline → warning, exit 0
         finally:
             os.unlink(output_path)
+
+    def test_invalid_json_baseline_fails(self):
+        # A malformed baseline must fail loudly, not crash with a traceback.
+        rc = self._run_regression_check(MOCK_CRITERION_OUTPUT, "not json {", 10)
+        self.assertEqual(rc, 1)
+
+    def test_baseline_entry_missing_median_mibs_fails(self):
+        baseline = {
+            "benchmarks": {
+                "throughput/push/clean-text": {"wrong_key": 300.0},
+            }
+        }
+        rc = self._run_regression_check(MOCK_CRITERION_OUTPUT, baseline, 10)
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

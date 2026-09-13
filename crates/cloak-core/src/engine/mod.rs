@@ -557,6 +557,15 @@ impl Session<'_> {
     }
 }
 
+/// Hard upper bound on [`Session::carry_over_len`] after any `push`:
+/// the largest rule window in the full catalog (2048, jwt — pinned by the
+/// `engine_max_window` unit test) plus PEM retention (`PEM_BAIL_OUT` +
+/// `MAX_PEM_LINE`). Shared by the fuzz harness, the S7 corpus tests, and
+/// the soak tests so the asserted bound cannot drift between them.
+// `pub` for the `#[doc(hidden)]` re-export in lib.rs (bench/test tier) —
+// the module itself is private, so this is not part of the public API.
+pub const CARRY_OVER_BOUND: usize = 2048 + pem::PEM_BAIL_OUT + pem::MAX_PEM_LINE;
+
 #[cfg(test)]
 mod tests {
     use super::*;

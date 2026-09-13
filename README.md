@@ -56,8 +56,8 @@ below traces to a committed
 | Metric | Number | Source |
 |---|---|---|
 | Clean-path throughput (single core) | [receipts](docs/benchmarks/receipts-v0.1.md) | CI-gated floor, nightly |
-| Prefilter speedup vs naive scanner | ~60–75× | [receipts](docs/benchmarks/receipts-v0.1.md) |
-| Memory | O(W) bounded | Soak test (10 GB, flat RSS) |
+| Prefilter speedup vs naive scanner | ~58–75× | [receipts](docs/benchmarks/receipts-v0.1.md) |
+| Memory | O(W) bounded (design + proptest) | Nightly soak on Linux CI (10 GB, RSS asserts) |
 
 ## Design
 

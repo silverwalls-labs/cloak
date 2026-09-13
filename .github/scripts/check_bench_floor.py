@@ -1,39 +1,17 @@
 #!/usr/bin/env python3
-"""Check that the clean-path throughput meets the ≥500 MB/s floor.
+"""Check that the clean-path throughput meets the floor.
 
 Usage: python3 check_bench_floor.py <bench-output.txt> <floor_mbs>
 
-Parses criterion's default output for the throughput/push/clean-json and
-throughput/push/clean-text benchmarks, extracts the median MiB/s from the
-[lower median upper] line, converts to MB/s, and asserts the WORSE of the
-two meets the floor.
+Parses criterion's output for the throughput/push/clean-json and
+throughput/push/clean-text benchmarks, extracts the median (unit-normalized
+to MiB/s), converts to MB/s, and asserts the WORSE of the two meets the
+floor.
 """
 
-import re
 import sys
 
-
-def parse_throughput(output: str, bench_id: str) -> float | None:
-    """Extract median throughput (MiB/s) for a given benchmark ID.
-
-    Criterion output looks like:
-        throughput/push/clean-json
-                                time:   [1.2345 ms 1.2500 ms 1.2600 ms]
-                                thrpt:  [345.00 MiB/s 350.00 MiB/s 355.00 MiB/s]
-
-    The median is the middle value in the thrpt line.
-    """
-    # Find the block for this benchmark.
-    pattern = re.compile(
-        rf"^{re.escape(bench_id)}\s*$"
-        r".*?"
-        r"thrpt:\s*\[\s*([\d.]+)\s+MiB/s\s+([\d.]+)\s+MiB/s\s+([\d.]+)\s+MiB/s\s*\]",
-        re.MULTILINE | re.DOTALL,
-    )
-    match = pattern.search(output)
-    if not match:
-        return None
-    return float(match.group(2))  # median (middle value)
+from bench_parse import parse_throughput
 
 
 def mib_to_mb(mib: float) -> float:

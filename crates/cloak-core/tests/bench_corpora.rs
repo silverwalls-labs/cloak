@@ -16,9 +16,15 @@ use std::path::Path;
 use std::sync::Once;
 
 use cloak_core::scanner::{AhoCorasickScanner, Candidate, ScalarScanner, Scanner};
-use cloak_core::{Config, Engine, RuleSpec, CATALOG};
+use cloak_core::{CATALOG, Config, Engine, RuleSpec};
 
-const CORPUS_NAMES: &[&str] = &["clean-json", "clean-text", "dirty-mixed", "dirty-dense", "binary-soup"];
+const CORPUS_NAMES: &[&str] = &[
+    "clean-json",
+    "clean-text",
+    "dirty-mixed",
+    "dirty-dense",
+    "binary-soup",
+];
 
 fn corpus_path(name: &str) -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -232,7 +238,8 @@ fn scanner_parity_on_all_corpora() {
         ac_cands.sort();
         sc_cands.sort();
         assert_eq!(
-            ac_cands, sc_cands,
+            ac_cands,
+            sc_cands,
             "scanner parity violated on corpus {name}: \
              AhoCorasick={}, Scalar={}",
             ac_cands.len(),
@@ -279,13 +286,13 @@ fn carry_over_bounded_on_all_corpora() {
         for (i, chunk) in data.chunks(1024).enumerate() {
             session.push(chunk, &mut out).unwrap();
             assert!(
-                // The carry-over bound accounts for max_window (2048) plus
-                // PEM state: a confirmed BEGIN line whose END hasn't arrived
-                // retains up to PEM_BAIL_OUT + BEGIN line length bytes.
-                // Same bound as the fuzz harness (fuzz/src/common.rs).
-                session.carry_over_len() <= 2048 + 16_384 + 37,
-                "corpus {name} chunk {i}: carry_over {} > carry bound 18469",
+                // Shared bound: max rule window (2048, jwt) + PEM retention
+                // (PEM_BAIL_OUT + MAX_PEM_LINE). Same constant as the fuzz
+                // harness and the soak tests (cloak_core::CARRY_OVER_BOUND).
+                session.carry_over_len() <= cloak_core::CARRY_OVER_BOUND,
+                "corpus {name} chunk {i}: carry_over {} > bound {}",
                 session.carry_over_len(),
+                cloak_core::CARRY_OVER_BOUND,
             );
         }
         session.finish(&mut out).unwrap();

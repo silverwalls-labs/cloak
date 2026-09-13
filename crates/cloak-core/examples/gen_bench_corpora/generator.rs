@@ -1,33 +1,34 @@
-//! Generate the five committed benchmark corpora (docs/04-performance.md).
+//! Corpus generation logic for the five committed benchmark corpora
+//! (docs/04-performance.md). Shared between the `gen_bench_corpora`
+//! example (writer) and `tests/corpus_determinism.rs` (pin) so the
+//! committed files cannot drift from the generator.
 //!
-//! Usage: `cargo run -p cloak-core --example gen_bench_corpora`
-//! Output: `corpus/clean-json`, `corpus/clean-text`, `corpus/dirty-mixed`,
-//!         `corpus/dirty-dense`, `corpus/binary-soup` (~1 MB each).
-//!
-//! Deterministic: seeded RNG (`rand::rngs::StdRng`). Re-run produces
-//! identical output (verify with `diff`). Avoid iteration-order-dependent
-//! collections in the generator.
+//! Deterministic: seeded RNG (`rand::rngs::StdRng`) — same seed, same
+//! bytes. Avoid iteration-order-dependent collections here.
 
 use std::fmt::Write as _;
-use std::fs;
-use std::path::{Path, PathBuf};
 
 use rand::Rng;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
 
 use cloak_core::vectors;
 
-const TARGET_SIZE: usize = 1_024 * 1_024; // ~1 MB per corpus
+pub const TARGET_SIZE: usize = 1_024 * 1_024; // ~1 MB per corpus
 
-fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap() // crates/
-        .parent()
-        .unwrap() // workspace root
-        .join("corpus")
+/// One corpus: stable name, generator, RNG seed. Shared by the writer
+/// example and the determinism pin test — the seeds are part of the
+/// committed-corpora contract.
+pub fn corpora() -> Vec<(&'static str, CorpusGen, u64)> {
+    vec![
+        ("clean-json", gen_clean_json, 1),
+        ("clean-text", gen_clean_text, 2),
+        ("dirty-mixed", gen_dirty_mixed, 3),
+        ("dirty-dense", gen_dirty_dense, 4),
+        ("binary-soup", gen_binary_soup, 5),
+    ]
 }
+
+pub type CorpusGen = fn(&mut StdRng) -> Vec<u8>;
 
 // ---------------------------------------------------------------------------
 // clean-json: synthetic JSON logs, zero anchors, zero matches
@@ -37,7 +38,11 @@ fn gen_clean_json(rng: &mut StdRng) -> Vec<u8> {
     let mut buf = String::with_capacity(TARGET_SIZE + 4096);
     let levels = ["INFO", "DEBUG", "WARN", "TRACE"];
     let services = [
-        "api-gateway", "auth-svc", "order-svc", "payment-svc", "inventory",
+        "api-gateway",
+        "auth-svc",
+        "order-svc",
+        "payment-svc",
+        "inventory",
     ];
     let messages = [
         "request completed",
@@ -132,7 +137,7 @@ fn gen_clean_text(rng: &mut StdRng) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// dirty-mixed: clean base + planted vectors at ~1/10k lines
+// dirty-mixed: clean base + planted vectors every 500 lines
 // ---------------------------------------------------------------------------
 
 fn gen_dirty_mixed(rng: &mut StdRng) -> Vec<u8> {
@@ -153,6 +158,11 @@ fn gen_dirty_mixed(rng: &mut StdRng) -> Vec<u8> {
         b"config reloaded successfully",
     ];
 
+    // Deliberate deviation from issue #10's "~1/10k lines": at ~1 MB that
+    // yields only 1-2 planted vectors — not enough to exercise multiple
+    // rules (see `dirty_mixed_detects_multiple_rule_types`). Every 500
+    // lines (~1/500, 20× denser than spec) gives a richer confirm/redact
+    // workload while staying a small fraction of total lines.
     let mut line_no: u64 = 0;
     let mut vec_idx = 0;
     while buf.len() < TARGET_SIZE {
@@ -225,37 +235,6 @@ fn gen_binary_soup(rng: &mut StdRng) -> Vec<u8> {
     buf
 }
 
-// ---------------------------------------------------------------------------
-
-fn main() {
-    let dir = corpus_dir();
-    fs::create_dir_all(&dir).expect("create corpus dir");
-
-    type CorpusGen = fn(&mut StdRng) -> Vec<u8>;
-    let corpora: Vec<(&str, CorpusGen, u64)> = vec![
-        ("clean-json", gen_clean_json, 1),
-        ("clean-text", gen_clean_text, 2),
-        ("dirty-mixed", gen_dirty_mixed, 3),
-        ("dirty-dense", gen_dirty_dense, 4),
-        ("binary-soup", gen_binary_soup, 5),
-    ];
-
-    for (name, gen_fn, seed) in &corpora {
-        let mut rng = StdRng::seed_from_u64(*seed);
-        let data = gen_fn(&mut rng);
-        let path = dir.join(name);
-        fs::write(&path, &data)
-            .unwrap_or_else(|e| panic!("write corpus {}: {e}", path.display()));
-        eprintln!(
-            "  {} ({} bytes, {} lines)",
-            name,
-            data.len(),
-            bytecount(&data, b'\n'),
-        );
-    }
-    eprintln!("done — corpus files in {}", dir.display());
-}
-
 /// Replace every 4th hex character with 'a' to ensure no digit-only run
 /// exceeds 3 characters. This prevents accidental credit-card matches
 /// (which need 13+ digits) while keeping the IDs readable hex.
@@ -263,8 +242,4 @@ fn force_hex_letters(hex: &str) -> String {
     hex.char_indices()
         .map(|(i, c)| if i % 4 == 3 { 'a' } else { c })
         .collect()
-}
-
-fn bytecount(data: &[u8], byte: u8) -> usize {
-    data.iter().filter(|&&b| b == byte).count()
 }
