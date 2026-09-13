@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for the CI bench-gate scripts (check_bench_floor.py, check_bench_regression.py).
+"""Unit tests for the CI bench-gate scripts (bench_parse.py, check_bench_floor.py, check_bench_regression.py, make_baseline.py).
 
-Run: python3 -m unittest .github/scripts/test_bench_scripts.py
+Run: python3 .github/scripts/test_bench_scripts.py
+(direct execution — `python -m unittest <path>` cannot convert the
+dot-prefixed `.github/` path to a module name)
 """
 
 import datetime
@@ -269,6 +271,15 @@ class TestRegressionIntegration(unittest.TestCase):
         baseline = {
             "benchmarks": {
                 "throughput/push/clean-text": {"wrong_key": 300.0},
+            }
+        }
+        rc = self._run_regression_check(MOCK_CRITERION_OUTPUT, baseline, 10)
+        self.assertEqual(rc, 1)
+
+    def test_baseline_entry_non_numeric_median_mibs_fails(self):
+        baseline = {
+            "benchmarks": {
+                "throughput/push/clean-text": {"median_mibs": "fast"},
             }
         }
         rc = self._run_regression_check(MOCK_CRITERION_OUTPUT, baseline, 10)

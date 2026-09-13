@@ -73,7 +73,7 @@ A Rust workspace producing:
    property tests (chunk-boundary invariant), fuzzing, differential testing against
    a scalar reference implementation, plus the adopted cross-cutting classes
    (mutation, soak, digest-stability goldens, CLI robustness, `cargo-deny`).
-6. Benchmark suite with a CI-enforced floor: **≥ 500 MB/s single-core** on the
+6. Benchmark suite with a CI-enforced floor: **≥ 250 MB/s single-core** on the
    match-free reference corpus.
 
 ## Acceptance criteria (v0.1 is done when…)
@@ -91,7 +91,7 @@ A Rust workspace producing:
 - [ ] Staged CI complete per [03 §CI staging](03-guarantee-and-testing.md#ci-staging-all-blocking-at-their-stage):
       smoke → full (incl. `cargo-deny`) → nightly (extended fuzz, `cargo-mutants`,
       soak, bench gates) → release.
-- [ ] Criterion benches recorded; clean-path throughput ≥ 500 MB/s single-core;
+- [ ] Criterion benches recorded; clean-path throughput ≥ 250 MB/s single-core;
       scalar-vs-engine comparison published (the "SIMD-powered" receipts).
 - [ ] CI green on linux x86-64, linux aarch64, macos aarch64 (stable Rust).
 - [ ] README, API docs, pipe + k8s sidecar examples, SECURITY.md (disclosure

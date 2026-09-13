@@ -66,7 +66,14 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        baseline_mibs = float(entry["median_mibs"])
+        try:
+            baseline_mibs = float(entry["median_mibs"])
+        except (TypeError, ValueError):
+            print(
+                f"ERROR: baseline entry for {name}: 'median_mibs' must be a number, got {entry['median_mibs']!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         change_pct = ((current_mibs - baseline_mibs) / baseline_mibs) * 100
         status = "OK" if change_pct > -threshold_pct else "REGRESSED"
         print(f"  {name}: {current_mibs:.1f} MiB/s (baseline: {baseline_mibs:.1f}, {change_pct:+.1f}%) [{status}]")
