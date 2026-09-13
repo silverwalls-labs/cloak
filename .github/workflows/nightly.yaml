@@ -198,23 +198,22 @@ jobs:
 
       - name: Check 250 MB/s floor
         run: |
-          python3 .github/scripts/check_bench_floor.py bench-output.txt 250
+          cargo run -p bench-gate --release -- floor --floor-mbs 250
 
       - name: Check regression against baseline
         run: |
-          python3 .github/scripts/check_bench_regression.py \
-            bench-output.txt \
-            docs/benchmarks/baselines/${{ runner.arch }}.json \
-            10
+          cargo run -p bench-gate --release -- regression \
+            --baseline docs/benchmarks/baselines/${{ runner.arch }}.json \
+            --threshold-pct 10
 
       - name: Generate baseline candidate
         # Populates the regression gate: download this artifact from a green
         # run and commit it to docs/benchmarks/baselines/${{ runner.arch }}.json
         # (see the note in the baseline files).
         run: |
-          python3 .github/scripts/make_baseline.py \
-            bench-output.txt \
-            baseline-${{ runner.arch }}.json
+          cargo run -p bench-gate --release -- emit-baseline \
+            --out baseline-${{ runner.arch }}.json \
+            --target ${{ runner.arch }}
 
       - name: Upload bench results
         if: always()

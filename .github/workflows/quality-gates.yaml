@@ -41,20 +41,6 @@ jobs:
           # The fuzz crate is workspace-excluded — check it explicitly.
           cargo fmt --manifest-path crates/cloak-core/fuzz/Cargo.toml -- --check
 
-  ci-scripts:
-    name: CI Script Tests
-    runs-on: ubuntu-24.04-arm
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Test bench gate scripts
-        run: |
-          # Direct execution — `python -m unittest <path>` cannot convert the
-          # dot-prefixed `.github/` path to a module name.
-          python3 .github/scripts/test_bench_scripts.py -v
-
   lint:
     name: Lint
     runs-on: ubuntu-24.04-arm
