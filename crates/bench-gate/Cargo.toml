@@ -6,7 +6,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-# Internal CI tooling — never published to crates.io.
 publish = false
 
 [dependencies]

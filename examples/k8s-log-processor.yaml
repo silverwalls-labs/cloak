@@ -1,16 +1,8 @@
-# cloak as a Kubernetes log processor — the two honest patterns for a
-# stdin/stdout pipe tool. cloak never tails files itself.
-#
-# A sidecar CANNOT intercept another container's stdout in Kubernetes — the
-# kubelet captures it first. So either redact before the runtime sees the
-# stream (Pattern A), or route logs through a file the sidecar tails
-# (Pattern B) and have the collector scrape the sidecar's stdout instead.
-#
-# Both patterns pull CLOAK_DIGEST_KEY from a Secret so the same secret yields
-# the same [CLOAK:rule:digest] tag across pods — correlatable in Grafana.
-#
-# Images are placeholders: no cloak image is published in v0.1 (ledger F9);
-# build one with the Dockerfile in examples/README.md.
+# cloak as a k8s log processor. A sidecar CANNOT intercept another
+# container's stdout — the kubelet captures it first. So either redact
+# inside the container (Pattern A) or tail a shared log file (Pattern B).
+# Images are placeholders: no cloak image is published in v0.1 — build one
+# with the Dockerfile in examples/README.md.
 ---
 apiVersion: v1
 kind: Secret
@@ -20,10 +12,8 @@ type: Opaque
 stringData:
   key: "pick-a-team-secret" # same key fleet-wide => fleet-wide correlation
 ---
-# ── Pattern A: in-container pipe (layer 1 — catch at the source) ──────────
-# Wrap the app command. Redaction happens inside the container, before the
-# kubelet captures the stream: nothing unredacted ever reaches disk or the
-# node collector. Requires cloak (and a shell) in the app image.
+# Pattern A: wrap the app command — redacted before the kubelet captures it.
+# The collector scrapes this container's stdout as usual.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,8 +29,6 @@ spec:
       containers:
         - name: app
           image: your-registry/your-app:latest # must contain the cloak binary
-          # `2>&1` folds stderr in; the collector scrapes this container's
-          # stdout as usual — already redacted.
           command: ["/bin/sh", "-c"]
           args: ["/usr/local/bin/app 2>&1 | cloak"]
           env:
@@ -50,12 +38,8 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
 ---
-# ── Pattern B: sidecar over a shared volume (layer 2 — catch the missed) ──
-# The app writes its log to an emptyDir; the sidecar is the pipe partner:
-# `tail -F` follows the file (surviving rotation) and cloak redacts. The
-# node collector (Alloy/Fluent Bit/promtail) scrapes the SIDECAR's stdout —
-# exclude the app container's own stdout from collection, or better, make
-# the app log only to the file.
+# Pattern B: app logs to an emptyDir file; the sidecar's stdout is the
+# redacted stream — point the node collector at the SIDECAR, not the app.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,8 +54,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: your-registry/your-app:latest
-          # app writes /var/log/app/app.log instead of stdout
+          image: your-registry/your-app:latest # logs to /var/log/app/app.log, not stdout
           securityContext:
             allowPrivilegeEscalation: false
           volumeMounts:
@@ -79,8 +62,7 @@ spec:
         - name: cloak
           image: your-registry/cloak:0.1.0 # examples/README.md Dockerfile
           command: ["/bin/sh", "-c"]
-          # -n +1: emit the whole file, not just new lines; -F: reopen on
-          # rotation. cloak's stats/warnings go to stderr, payload to stdout.
+          # -n +1: whole file, not just new lines; -F: survive rotation
           args: ["tail -n +1 -F /var/log/app/app.log | cloak"]
           env:
             - name: CLOAK_DIGEST_KEY

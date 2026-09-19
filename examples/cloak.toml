@@ -1,21 +1,10 @@
-# cloak.toml — the full v0.1 config surface.
-# Every rule is ON by default; config is opt-out. Unknown fields and unknown
-# rule ids are hard errors (the CLI exits 1 and lists the known rules).
+# cloak.toml — full v0.1 surface. Rules are on by default (opt-out);
+# unknown fields/rule ids are hard errors. Rule ids: docs/02-rules.md.
 
 [redaction]
-# Keyed digest for correlation. Env-indirection only — inline keys are rejected.
-# Unset/empty env var ⇒ ephemeral per-process key (+ a stderr warning):
-# redaction still works, but digests won't match across runs or hosts.
+# env-indirection only (inline keys rejected); unset var ⇒ ephemeral
+# per-process key: still redacts, but digests don't correlate across runs
 digest_key = "env:CLOAK_DIGEST_KEY"
 
-# The FP-riskiest PII rules are the usual candidates to disable per environment.
 [rules.phone-intl]
 enabled = false
-
-[rules.ipv4]
-enabled = true
-
-# Any catalog id works here — see docs/02-rules.md for the full list:
-# github-token gitlab-token npm-token aws-access-key aws-secret-key gcp-api-key
-# pypi-token azure-style-token jwt connection-string email ipv4 ipv6
-# credit-card phone-intl pem-private-key

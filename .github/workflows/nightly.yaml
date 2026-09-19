@@ -113,12 +113,8 @@ jobs:
 
       - name: Mutation testing
         run: |
-          # Exit 2 = surviving mutants, exit 3 = timeouts (mutant runs that
-          # exceeded the per-test budget on shared runners): both reported
-          # non-blocking initially (docs/03 — "surviving mutants filed as
-          # findings"); flip to blocking against a committed baseline once
-          # the first runs are triaged. Any other non-zero exit (e.g. 4 =
-          # baseline tests broken) is a real failure.
+          # cargo-mutants exit 2 = missed mutants, 3 = timeouts: non-blocking
+          # per docs/03; any other non-zero (e.g. 4 = broken baseline) is real.
           rc=0
           cargo mutants -p cloak-core --shard ${{ matrix.shard }}/4 --no-shuffle -vV || rc=$?
           if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then

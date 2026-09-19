@@ -83,16 +83,12 @@ jobs:
 
       - name: Doc build (missing docs + broken links are errors)
         run: |
-          # cloak-core opts into #![warn(missing_docs)]; -D warnings promotes
-          # it and rustdoc lints (broken intra-doc links) to hard failures.
           RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 
   # ── Build ────────────────────────────────────────────────────────
 
-  # Test jobs run on all three stable targets: x86-64 and aarch64 take
-  # different SIMD paths inside aho-corasick/regex-automata, and macOS
-  # (ledger F14, landed S8) is a third ABI/SIMD environment — cross-target
-  # divergence is asserted absent (docs/03).
+  # Three stable targets: x86-64/aarch64 take different SIMD paths inside
+  # aho-corasick; macOS (F14) is a third ABI/SIMD environment (docs/03).
   build:
     name: Build
     strategy:
@@ -196,8 +192,7 @@ jobs:
           # without editing this workflow (matches integration job).
           cargo test -p cloak-cli --test '*'
 
-  # Fuzz stays Linux-only: it needs the pinned nightly toolchain, and the
-  # macOS acceptance criterion is scoped to stable Rust (docs/00-scope).
+  # Linux-only: needs the pinned nightly; the macOS criterion covers stable Rust only.
   fuzz:
     name: Fuzz — replay + smoke
     strategy:
