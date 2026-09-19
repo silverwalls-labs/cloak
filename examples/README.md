@@ -35,7 +35,7 @@ secret yields the same `[CLOAK:rule:digest]` tag across runs and hosts — so yo
 can group by tag in Grafana without ever storing the plaintext:
 
 ```sh
-export CLOAK_DIGEST_KEY="pick-a-team-secret"
+export CLOAK_DIGEST_KEY="$(openssl rand -hex 32)"
 echo 'key=AKIAIOSFODNN7EXAMPLE' | cloak    # key=[CLOAK:aws-access-key:xxxx]
 echo 'key=AKIAIOSFODNN7EXAMPLE' | cloak    # same xxxx — correlatable
 ```

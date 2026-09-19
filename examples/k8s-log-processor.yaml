@@ -10,7 +10,10 @@ metadata:
   name: cloak-digest-key
 type: Opaque
 stringData:
-  key: "pick-a-team-secret" # same key fleet-wide => fleet-wide correlation
+  # generate a real key (openssl rand -hex 32) — a copied literal key lets
+  # anyone confirm guessed secrets against your tags. Same key fleet-wide
+  # => fleet-wide correlation.
+  key: "REPLACE_ME"
 ---
 # Pattern A: wrap the app command — redacted before the kubelet captures it.
 # The collector scrapes this container's stdout as usual.
