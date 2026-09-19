@@ -8,6 +8,7 @@ use std::fmt;
 pub struct RuleId(String);
 
 impl RuleId {
+    /// Constructs a rule id. Catalog ids (e.g. `"aws-access-key"`) are canonical.
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
@@ -27,6 +28,7 @@ impl fmt::Display for RuleId {
 pub struct Digest([u8; 2]);
 
 impl Digest {
+    /// Wraps 2 raw digest bytes, as produced by [`compute_digest`](crate::compute_digest).
     pub fn new(bytes: [u8; 2]) -> Self {
         Self(bytes)
     }
@@ -48,7 +50,9 @@ impl fmt::Display for Digest {
 /// must not escape through the reporting side-channel.
 #[derive(Debug, Clone)]
 pub struct MatchEvent {
+    /// The rule that matched.
     pub rule: RuleId,
+    /// Correlation digest of the matched bytes — never the plaintext itself.
     pub digest: Digest,
 }
 
