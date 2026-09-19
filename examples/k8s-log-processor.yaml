@@ -47,6 +47,8 @@ spec:
             - name: CLOAK_DIGEST_KEY
               valueFrom:
                 secretKeyRef: { name: cloak-digest-key, key: key }
+          securityContext:
+            allowPrivilegeEscalation: false
 ---
 # ── Pattern B: sidecar over a shared volume (layer 2 — catch the missed) ──
 # The app writes its log to an emptyDir; the sidecar is the pipe partner:
@@ -70,6 +72,8 @@ spec:
         - name: app
           image: your-registry/your-app:latest
           # app writes /var/log/app/app.log instead of stdout
+          securityContext:
+            allowPrivilegeEscalation: false
           volumeMounts:
             - { name: logs, mountPath: /var/log/app }
         - name: cloak
@@ -82,6 +86,9 @@ spec:
             - name: CLOAK_DIGEST_KEY
               valueFrom:
                 secretKeyRef: { name: cloak-digest-key, key: key }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
           volumeMounts:
             - { name: logs, mountPath: /var/log/app, readOnly: true }
       volumes:
