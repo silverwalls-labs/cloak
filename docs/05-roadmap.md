@@ -17,7 +17,7 @@ Workspace (`crates/cloak-core`, `crates/cloak-cli`); staged CI per
 (`Engine`, `Session`, `RuleId`, `MatchEvent`, `Stats`); redaction writer with
 `[CLOAK:<rule>:<digest4>]` tag + keyed BLAKE3 digest (env key, ephemeral fallback).
 Decide & record the deliberately-open stack choices (arg parsing, error crates,
-CI provider, MSRV — [01-architecture](01-architecture.md#deliberately-left-open--decided-in-s1));
+CI provider, MSRV — [01-architecture](01-architecture.md#decided-in-s1));
 keep the core API binding-shaped ([06-embedding](06-embedding.md#milestone-placement--session-split)).
 **Done when:** `app | cloak` pipes stdin→stdout byte-identical through full engine
 plumbing (zero rules compiled in); CI green on all targets.
@@ -78,8 +78,8 @@ run triages from the first nightly artifact.*
 ### S7 — Performance
 Criterion suites (`push` end-to-end, prefilter-only, chunk-size sweep); five
 reference corpora ([04](04-performance.md#reference-corpora-committed-versioned));
-scalar-vs-engine receipts table (first entry in `docs/benchmarks/`); ≥ 500 MB/s
-clean-path CI gate + 10 % regression gate against stored baselines; nightly soak
+scalar-vs-engine receipts table (first entry in `docs/benchmarks/`); ≥ 250 MB/s
+clean-path CI gate (renegotiated from 500 after measurement — [04](04-performance.md)) + 10 % regression gate against stored baselines; nightly soak
 (tens of GB looped through one `Session`, flat-RSS assertion).
 **Done when:** floor gate green on CI; receipts committed; numbers in README are
 benchmark-traceable.
@@ -113,7 +113,7 @@ issue when its milestone opens.
 | F11 | **Escaped-content decode layer, opt-in** — JSON-string unescape pass (later: base64 spans) so multi-line/escaped-char patterns (PEM!) match inside structured log fields. Must preserve the guarantee (decode is a defined transform, not a heuristic) and byte-exact passthrough of non-matching input | Full-setup review 2026-09-06: JSON logs are the norm in the k8s/Grafana stack, PEM-in-JSON is missed by byte patterns ([03 §threat model](03-guarantee-and-testing.md#threat-model)) | v0.2+ |
 | F12 | ~~**CRC32 checksum validation for `github-token` classic prefixes + `npm-token`**~~ — **Landed.** CRC32 (ISO-HDLC) + base62 validation for classic prefixes (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`) and `npm_`; checksum-fail ⇒ reject (FP reduction). `github_pat_` stays shape-only. Engine uses `crc32fast` crate; reference oracle has independent hand-rolled CRC32 + base62. Valid-CRC positive vectors, wrong-checksum negative vectors, overlap vectors redesigned around `github_pat_`. | S2 scoping 2026-09-07 | **Landed (issue #31)** |
 | F13 | **CRC near-miss observability** — per-rule counter in `Stats` for "shape-matched but checksum-rejected" candidates (skip-serialized when empty), so upstream format drift by GitHub/npm surfaces as a near-miss spike in operator stats instead of silent missed redactions. Needs a `ConfirmOutcome`-style extension of the `ConfirmSpec::Custom` signature — cross-cutting (all custom validators, `Stats`, CLI stats output), deliberately kept out of the F12 PR | PR #32 review 2026-09-11 (finding R2): checksum validation fails open on format drift; no signal exists today | v0.2 (issue #33) |
-| F14 | **macOS CI runners** — extend the test/fuzz matrix (currently linux x86-64 + aarch64) with macos aarch64 per [00-scope.md](00-scope.md) "CI green on three targets" | S6 scoping 2026-09-12: Linux-only matrix shipped to bound runner cost; macOS adds a third SIMD/ABI environment before v0.1.0 | S8 |
+| F14 | **macOS CI runners** — extend the test/fuzz matrix (currently linux x86-64 + aarch64) with macos aarch64 per [00-scope.md](00-scope.md) "CI green on three targets" | S6 scoping 2026-09-12: Linux-only matrix shipped to bound runner cost; macOS adds a third SIMD/ABI environment before v0.1.0 | **landed S8** (stable-Rust jobs on `macos-15`; fuzz stays Linux) |
 
 ## Versioning & policy
 

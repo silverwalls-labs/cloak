@@ -75,8 +75,8 @@ lives, what tooling drives it, and when it runs.
 | Tier | Lives in | Tooling | Exercises | Runs |
 |---|---|---|---|---|
 | **Unit** | `#[cfg(test)]` modules beside the code | libtest | one unit in isolation: a confirmer regex, Luhn, carry-over arithmetic, digest formatting, overlap resolution, config deserialization | every build |
-| **Integration** | `crates/cloak-core/tests/` | libtest + `proptest` | the assembled engine through its **public API**: per-rule vector suites, property invariants, differential engine ≡ reference | every PR, both Linux targets¹ |
-| **E2E** | `crates/cloak-cli/tests/` | `assert_cmd` | the **real binary** through the process boundary: pipe stdin→stdout, file args, `--config` loading, stderr stats (text + JSON), exit codes | every PR, both Linux targets¹ |
+| **Integration** | `crates/cloak-core/tests/` | libtest + `proptest` | the assembled engine through its **public API**: per-rule vector suites, property invariants, differential engine ≡ reference | every PR, all 3 targets¹ |
+| **E2E** | `crates/cloak-cli/tests/` | `assert_cmd` | the **real binary** through the process boundary: pipe stdin→stdout, file args, `--config` loading, stderr stats (text + JSON), exit codes | every PR, all 3 targets¹ |
 | **Fuzz** | `crates/cloak-core/fuzz/` | `cargo-fuzz` | adversarial robustness: the three targets below | smoke + corpus replay every PR; long runs nightly |
 | **Smoke** | tagged subset of the above | — | cheapest always-green signal: build + unit + one golden e2e pipe test (vector corpus in → redacted golden out, byte-compared) | first CI stage, every push |
 
@@ -100,9 +100,11 @@ Rules of the split:
   Raised in S6 after the coverage gap-fill: unit ≥96%, integration ≥92%,
   e2e ≥90%, total ≥94%.
 
-¹ *"All 3 targets" (linux x86-64, linux aarch64, macos aarch64) is the design
-goal; S6 shipped the two Linux ISAs (different SIMD paths asserted equivalent)
-and deferred macOS runners to [ledger F14](05-roadmap.md#follow-ups-ledger).*
+¹ *linux x86-64, linux aarch64, macos aarch64 — S6 shipped the two Linux ISAs
+(different SIMD paths asserted equivalent); S8 added macOS runners
+([ledger F14](05-roadmap.md#follow-ups-ledger), landed). Static analysis,
+coverage, and fuzz jobs stay Linux-only: fuzzing needs the pinned nightly
+toolchain, and the macOS acceptance criterion is scoped to stable Rust.*
 
 ### Cross-cutting test classes (adopted, v0.1)
 
@@ -152,7 +154,7 @@ The load-bearing invariants:
 Engine vs scalar reference on: all vector corpora, proptest-generated corpora, and
 the fuzz corpus. Any divergence is a guarantee bug by definition. Runs in CI on all
 targets (x86-64 and aarch64 take different SIMD paths inside the crates —
-divergence between targets is also asserted absent; macOS deferred, F14).
+divergence between targets is also asserted absent; macOS since S8, F14).
 
 ### 4. Fuzzing (`cargo-fuzz`)
 Targets:
@@ -187,10 +189,10 @@ default (`fuzz/src/common.rs`).
 
 | Stage | When | Contents |
 |---|---|---|
-| **0 — Smoke** | every push, fail-fast, both Linux targets¹ | fmt, clippy `-D warnings`, build, unit tests, golden e2e pipe test |
-| **1 — Full** | every PR, both Linux targets¹ | integration (vectors, property invariants, differential engine ≡ reference — cross-target divergence asserted absent, digest-stability goldens, thread-share), full e2e suite (incl. I/O robustness + `insta` snapshots), doc build + doc tests, fuzz smoke (time-boxed minutes) + committed-corpus regression replay, `cargo-deny` (advisories/licenses/dupes), coverage report published |
+| **0 — Smoke** | every push, fail-fast, all 3 targets¹ | fmt, clippy `-D warnings`, build, unit tests, golden e2e pipe test |
+| **1 — Full** | every PR, all 3 targets¹ | integration (vectors, property invariants, differential engine ≡ reference — cross-target divergence asserted absent, digest-stability goldens, thread-share), full e2e suite (incl. I/O robustness + `insta` snapshots), doc build + doc tests, fuzz smoke (time-boxed minutes) + committed-corpus regression replay, `cargo-deny` (advisories/licenses/dupes), coverage report published |
 | **2 — Nightly** | scheduled (S6 ships fuzz + mutants; soak + criterion land in S7) | extended fuzz (≥ 1 h/target × both ISAs, findings uploaded as artifacts and back-ported to the corpus), `cargo-mutants` over `cloak-core` (4-way shard; surviving mutants reported non-blocking initially, filed as findings), multi-GB soak with flat-RSS assertion, full criterion suite: [≥ 250 MB/s floor + 10 % regression gate](04-performance.md#the-floor-ci-enforced), chunk-size sweep |
-| **3 — Release** | tag | everything above + receipts table refresh + released-artifact golden smoke |
+| **3 — Release** | tag | everything above + receipts table refresh + released-artifact golden smoke. v0.1: performed manually at tag time (nightly dispatch + local golden smoke against the release build) — no tag-triggered workflow yet |
 
 Bench gates live in nightly/release rather than per-PR — criterion on shared PR
 runners is noise, and a perf regression can't hide longer than a day. A PR that

@@ -35,7 +35,7 @@ pub enum ConfirmSpec {
 /// Static specification of one detection rule.
 ///
 /// Compiled at engine build time into a prefilter pattern set and an
-/// anchored confirm DFA or custom function (see [`ConfirmSpec`]).
+/// anchored confirm DFA or custom function (see `ConfirmSpec`).
 pub struct RuleSpec {
     /// Stable rule id (docs/02-rules.md — renaming is a breaking change).
     pub id: &'static str,

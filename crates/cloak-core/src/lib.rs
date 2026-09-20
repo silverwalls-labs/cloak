@@ -29,6 +29,7 @@
 //! ```
 
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 mod config;
 mod engine;

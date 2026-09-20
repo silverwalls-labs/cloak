@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+keywords = ["redaction", "secrets", "pii", "logging", "security"]
+categories = ["text-processing"]
 
 [dependencies]
 aho-corasick = { workspace = true }

@@ -1,0 +1,10 @@
+# cloak.toml — full v0.1 surface. Rules are on by default (opt-out);
+# unknown fields/rule ids are hard errors. Rule ids: docs/02-rules.md.
+
+[redaction]
+# env-indirection only (inline keys rejected); unset var ⇒ ephemeral
+# per-process key: still redacts, but digests don't correlate across runs
+digest_key = "env:CLOAK_DIGEST_KEY"
+
+[rules.phone-intl]
+enabled = false

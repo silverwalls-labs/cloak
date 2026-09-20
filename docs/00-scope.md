@@ -78,24 +78,39 @@ A Rust workspace producing:
 
 ## Acceptance criteria (v0.1 is done when…)
 
-- [ ] `app | cloak | collector` redacts every rule in the catalog, streaming, with
+- [x] `app | cloak | collector` redacts every rule in the catalog, streaming, with
       bounded memory.
 - [ ] Chunk-boundary property test passes: any split of any corpus produces
-      byte-identical output to a whole-buffer scan.
-- [ ] Fuzz targets run clean (time-boxed) in CI; invalid UTF-8 and binary input
+      byte-identical output to a whole-buffer scan. *(The proptest is green, but
+      "any corpus" is not yet true: on dense-concatenation corpora larger than
+      the engine's max_window, 1-byte chunking diverges from whole-buffer —
+      the #27 flush-boundary context loss; the `#[ignore]`d regression tests in
+      tests/differential.rs pin the underlying engine bug. Ticks when #27
+      closes.)*
+- [x] Fuzz targets run clean (time-boxed) in CI; invalid UTF-8 and binary input
       have defined, tested behavior.
-- [ ] Differential tests: engine output ≡ scalar reference output on all corpora.
-- [ ] Full e2e suite through the real binary (incl. I/O robustness: broken pipe,
+- [ ] Differential tests: engine output ≡ scalar reference output on all corpora
+      *(4 dense-concatenation cases `#[ignore]`d pending #27/#34 — the tests
+      still fail when run; documented known limitations, see CHANGELOG. Ticks
+      when #27/#34 close and strict fuzz equivalence is the default.)*
+- [x] Full e2e suite through the real binary (incl. I/O robustness: broken pipe,
       closed stdout) and `insta` snapshots of output contracts.
-- [ ] Digest-stability goldens committed (correlation promise across releases).
+- [x] Digest-stability goldens committed (correlation promise across releases).
 - [ ] Staged CI complete per [03 §CI staging](03-guarantee-and-testing.md#ci-staging-all-blocking-at-their-stage):
       smoke → full (incl. `cargo-deny`) → nightly (extended fuzz, `cargo-mutants`,
-      soak, bench gates) → release.
+      soak, bench gates) → release. *(Stages 0–2 are wired up and running;
+      stage 3 release is the manual tag-time validation — box ticks when the
+      v0.1.0 tag lands and that validation runs.)*
 - [ ] Criterion benches recorded; clean-path throughput ≥ 250 MB/s single-core;
       scalar-vs-engine comparison published (the "SIMD-powered" receipts).
-- [ ] CI green on linux x86-64, linux aarch64, macos aarch64 (stable Rust).
+      *(Benches + receipts landed in S7; the nightly floor gate is green on
+      linux aarch64 but red on shared x86-64 runners — clean-text ≈ 215 MB/s
+      vs the 250 floor calibrated on dev hardware. Floor policy for x86
+      shared runners is an open release decision.)*
+- [x] CI green on linux x86-64, linux aarch64, macos aarch64 (stable Rust).
 - [ ] README, API docs, pipe + k8s sidecar examples, SECURITY.md (disclosure
-      policy), CHANGELOG, tag `v0.1.0`.
+      policy), CHANGELOG, tag `v0.1.0`. *(All landed in S8 — box ticks when
+      the maintainer pushes the tag.)*
 
 ## Non-goals for v0.1
 

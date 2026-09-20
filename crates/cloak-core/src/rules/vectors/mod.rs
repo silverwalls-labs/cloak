@@ -5,6 +5,8 @@
 //! Re-exported `#[doc(hidden)]` from lib.rs purely so integration tests can
 //! reach it — this module is **not** part of the public API contract.
 
+#![allow(missing_docs)]
+
 pub mod aws_access_key;
 pub mod aws_secret_key;
 pub mod azure_style_token;

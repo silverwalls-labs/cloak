@@ -28,6 +28,11 @@ clean path (`clean-text`, heavy anchor noise) at ~280 MB/s, so the floor is
 set at 250 MB/s with margin for slower CI runners. It is a floor, not a
 target — measured numbers are recorded per release.
 
+Known calibration gap (v0.1): the margin is not enough for GitHub's shared
+x86-64 runners, where `clean-text` measures ~215 MB/s — the nightly gate is
+green on linux aarch64 and red on x86-64. Recalibrating the x86 floor (or
+splitting it per target) is an open release decision.
+
 ## Reference corpora (committed, versioned)
 
 | Corpus | Content | Purpose |
