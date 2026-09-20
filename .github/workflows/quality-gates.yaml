@@ -194,7 +194,8 @@ jobs:
           # without editing this workflow (matches integration job).
           cargo test -p cloak-cli --test '*'
 
-  # Linux-only: needs the pinned nightly; the macOS criterion covers stable Rust only.
+  # Linux-only: needs the pinned nightly; the macOS acceptance criterion
+  # covers stable Rust only.
   fuzz:
     name: Fuzz — replay + smoke
     strategy:

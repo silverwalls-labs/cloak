@@ -55,11 +55,15 @@ build your own:
 
 ```dockerfile
 FROM rust:1.98 AS build
-RUN cargo install --locked --git https://github.com/silverwalls-labs/cloak cloak-cli
+RUN cargo install --locked --git https://github.com/silverwalls-labs/cloak \
+    --rev v0.1.0 cloak-cli
 
 # slim, not distroless: the sidecar pattern needs `sh` and `tail` in the image
 FROM debian:stable-slim
 COPY --from=build /usr/local/cargo/bin/cloak /usr/local/bin/cloak
+# non-root (65534 = `nobody` in debian): pairs with `runAsNonRoot: true` in the
+# k8s example — the kubelet refuses a root-user image when runAsNonRoot is set
+USER 65534:65534
 ENTRYPOINT ["/usr/local/bin/cloak"]
 ```
 

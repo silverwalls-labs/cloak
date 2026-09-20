@@ -29,6 +29,8 @@ spec:
     metadata:
       labels: { app: app-inline-cloak }
     spec:
+      # cloak never talks to the Kubernetes API
+      automountServiceAccountToken: false
       containers:
         - name: app
           image: your-registry/your-app:latest # must contain the cloak binary
@@ -55,6 +57,8 @@ spec:
     metadata:
       labels: { app: app-cloak-sidecar }
     spec:
+      # cloak never talks to the Kubernetes API
+      automountServiceAccountToken: false
       containers:
         - name: app
           image: your-registry/your-app:latest # logs to /var/log/app/app.log, not stdout
@@ -74,6 +78,9 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            # the examples/README.md Dockerfile sets USER 65534 — runAsNonRoot
+            # refuses to start a root-user image
+            runAsNonRoot: true
           volumeMounts:
             - { name: logs, mountPath: /var/log/app, readOnly: true }
       volumes:

@@ -115,15 +115,27 @@ jobs:
         run: |
           # cargo-mutants exit 2 = missed mutants, 3 = timeouts: non-blocking
           # per docs/03; any other non-zero (e.g. 4 = broken baseline) is real.
+          # rc=3 can carry missed mutants too, so each section keys on its own
+          # file, not the exit code.
           rc=0
           cargo mutants -p cloak-core --shard ${{ matrix.shard }}/4 --no-shuffle -vV || rc=$?
           if [ "$rc" -eq 2 ] || [ "$rc" -eq 3 ]; then
             echo "::warning::surviving/timed-out mutants in shard ${{ matrix.shard }} — see artifact"
             {
-              echo "## Surviving mutants (shard ${{ matrix.shard }}/4)"
-              echo '```'
-              cat mutants.out/missed.txt 2>/dev/null || echo "(missed.txt not found)"
-              echo '```'
+              echo "## Mutation testing (shard ${{ matrix.shard }}/4)"
+              if [ -s mutants.out/missed.txt ]; then
+                echo "### Surviving mutants"
+                echo '```'
+                cat mutants.out/missed.txt
+                echo '```'
+              fi
+              if [ -s mutants.out/timeout.txt ]; then
+                echo "### Timed-out mutants"
+                echo '```'
+                cat mutants.out/timeout.txt
+                echo '```'
+                echo "Per-mutant logs: \`mutants.out/logs/\` in the mutants-shard-${{ matrix.shard }} artifact."
+              fi
             } >> "$GITHUB_STEP_SUMMARY"
           elif [ "$rc" -ne 0 ]; then
             exit "$rc"
