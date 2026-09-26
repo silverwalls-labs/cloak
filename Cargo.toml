@@ -42,5 +42,5 @@ insta = { version = "1", features = ["json"] }
 rand = "0.9"
 tempfile = "3"
 proptest = "1"
-wasmtime = "44"
-wasmtime-wasi = { version = "44", features = ["p1"] }
+wasmtime = "49"
+wasmtime-wasi = { version = "49", features = ["p1"] }
