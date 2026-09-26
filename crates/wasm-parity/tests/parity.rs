@@ -118,12 +118,20 @@ impl WasmCloak {
         handle
     }
 
-    fn engine_free(&mut self, handle: u32) {
+    fn engine_free(&mut self, handle: u32) -> u32 {
         let func = self
             .instance
-            .get_typed_func::<u32, ()>(&mut self.store, "cloakwasm_engine_free")
+            .get_typed_func::<u32, u32>(&mut self.store, "cloakwasm_engine_free")
             .expect("cloakwasm_engine_free export");
-        func.call(&mut self.store, handle).expect("engine_free");
+        func.call(&mut self.store, handle).expect("engine_free")
+    }
+
+    fn session_free(&mut self, handle: u32) -> u32 {
+        let func = self
+            .instance
+            .get_typed_func::<u32, u32>(&mut self.store, "cloakwasm_session_free")
+            .expect("cloakwasm_session_free export");
+        func.call(&mut self.store, handle).expect("session_free")
     }
 
     fn session_new(&mut self, engine_handle: u32) -> u32 {
@@ -220,6 +228,20 @@ impl WasmCloak {
         self.last_error()
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_else(|| "(no error)".to_string())
+    }
+
+    fn finish_stats(&mut self) -> Option<Vec<u8>> {
+        let func = self
+            .instance
+            .get_typed_func::<(), u32>(&mut self.store, "cloakwasm_finish_stats")
+            .expect("cloakwasm_finish_stats export");
+        let ptr = func.call(&mut self.store, ()).expect("finish_stats call");
+        if ptr == 0 {
+            return None;
+        }
+        let data = self.read_buf_result(ptr);
+        self.buf_free(ptr);
+        Some(data)
     }
 
     // ── Linear memory helpers ───────────────────────────────────────
@@ -383,4 +405,144 @@ fn invalid_handle_returns_error() {
 
     let err = cloak.last_error_string();
     assert!(err.contains("invalid engine handle"), "error: {err}");
+}
+
+#[test]
+fn empty_null_pairs_through_wasm() {
+    let mut cloak = WasmCloak::new();
+    let engine = cloak.engine_new(CONFIG_TOML);
+
+    // redact with (null, 0) — exactly the pair cloakwasm_alloc(0)
+    // leaves the host holding.
+    let redact = cloak
+        .instance
+        .get_typed_func::<(u32, u32, u32), u32>(&mut cloak.store, "cloakwasm_redact")
+        .expect("cloakwasm_redact export");
+    let result = redact
+        .call(&mut cloak.store, (engine, 0, 0))
+        .expect("redact (null, 0) call");
+    assert!(
+        result != 0,
+        "redact (null, 0) failed: {}",
+        cloak.last_error_string()
+    );
+    let out = cloak.read_buf_result(result);
+    cloak.buf_free(result);
+    assert!(out.is_empty(), "empty input must produce empty output");
+
+    // push with (null, 0) mid-stream.
+    let session = cloak.session_new(engine);
+    let push = cloak
+        .instance
+        .get_typed_func::<(u32, u32, u32), u32>(&mut cloak.store, "cloakwasm_push")
+        .expect("cloakwasm_push export");
+    let result = push
+        .call(&mut cloak.store, (session, 0, 0))
+        .expect("push (null, 0) call");
+    assert!(
+        result != 0,
+        "push (null, 0) failed: {}",
+        cloak.last_error_string()
+    );
+    let out = cloak.read_buf_result(result);
+    cloak.buf_free(result);
+    assert!(out.is_empty());
+
+    let tail = cloak.finish(session);
+    assert!(tail.is_empty());
+
+    assert_eq!(cloak.engine_free(engine), 1);
+}
+
+#[test]
+fn finish_stats_through_wasm() {
+    let mut cloak = WasmCloak::new();
+    let engine = cloak.engine_new(CONFIG_TOML);
+    let session = cloak.session_new(engine);
+    cloak.push(session, b"token=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\n");
+    cloak.finish(session);
+
+    let stats = cloak
+        .finish_stats()
+        .expect("stats must be set after finish");
+    let json = String::from_utf8(stats).expect("stats must be UTF-8 JSON");
+    assert!(json.contains("bytes_processed"), "unexpected: {json}");
+
+    // The stash is taken — a second call returns null.
+    assert!(cloak.finish_stats().is_none());
+
+    assert_eq!(cloak.engine_free(engine), 1);
+}
+
+#[test]
+fn session_free_aborts_through_wasm() {
+    let mut cloak = WasmCloak::new();
+    let engine = cloak.engine_new(CONFIG_TOML);
+    let session = cloak.session_new(engine);
+
+    // A live session pins the engine.
+    assert_eq!(cloak.engine_free(engine), 0);
+    assert!(
+        cloak.last_error_string().contains("live sessions"),
+        "refusal must set an error"
+    );
+
+    // Aborting lifts the pin; a repeated abort reports a dead handle.
+    assert_eq!(cloak.session_free(session), 1);
+    assert_eq!(cloak.engine_free(engine), 1);
+    assert_eq!(cloak.session_free(session), 0);
+    assert!(
+        cloak.last_error_string().contains("invalid session handle"),
+        "second abort must fail"
+    );
+}
+
+#[test]
+fn stale_and_cross_type_handles_through_wasm() {
+    let mut cloak = WasmCloak::new();
+    let engine = cloak.engine_new(CONFIG_TOML);
+
+    // Finish consumes session A; a fresh session may reuse its slot,
+    // but A's stale handle must no longer match it.
+    let session_a = cloak.session_new(engine);
+    cloak.finish(session_a);
+    let session_b = cloak.session_new(engine);
+    assert_ne!(session_a, session_b, "reused slot must bump the generation");
+
+    let push = cloak
+        .instance
+        .get_typed_func::<(u32, u32, u32), u32>(&mut cloak.store, "cloakwasm_push")
+        .expect("cloakwasm_push export");
+    let (ptr, alloc_size) = cloak.write_bytes(b"x");
+    let result = push
+        .call(&mut cloak.store, (session_a, ptr, 1))
+        .expect("stale push call");
+    cloak.dealloc(ptr, alloc_size);
+    assert_eq!(result, 0, "stale session handle must be rejected");
+    assert!(
+        cloak.last_error_string().contains("invalid session handle"),
+        "stale handle must set an error"
+    );
+
+    // Cross-type: a session handle must not pass as an engine handle.
+    let session_new = cloak
+        .instance
+        .get_typed_func::<u32, u32>(&mut cloak.store, "cloakwasm_session_new")
+        .expect("cloakwasm_session_new export");
+    let handle = session_new
+        .call(&mut cloak.store, session_b)
+        .expect("cross-type session_new call");
+    assert_eq!(
+        handle, 0,
+        "session handle must not pass as an engine handle"
+    );
+    assert!(
+        cloak.last_error_string().contains("invalid engine handle"),
+        "cross-type use must set an error"
+    );
+
+    // The fresh session still works; cleanup.
+    cloak.push(session_b, b"clean\n");
+    cloak.finish(session_b);
+    assert_eq!(cloak.engine_free(engine), 1);
 }

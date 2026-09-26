@@ -194,12 +194,12 @@ impl WasmCloak {
         data
     }
 
-    fn engine_free(&mut self, handle: u32) {
+    fn engine_free(&mut self, handle: u32) -> u32 {
         self.instance
-            .get_typed_func::<u32, ()>(&mut self.store, "cloakwasm_engine_free")
+            .get_typed_func::<u32, u32>(&mut self.store, "cloakwasm_engine_free")
             .unwrap()
             .call(&mut self.store, handle)
-            .unwrap();
+            .unwrap()
     }
 }
 

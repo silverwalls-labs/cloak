@@ -18,8 +18,16 @@
 //! # Handle protocol
 //!
 //! Engines and sessions are stored in per-type handle tables and
-//! referenced by opaque `u32` handles. A handle value of `0` is
-//! reserved as an error sentinel — valid handles start at `1`.
+//! referenced by opaque `u32` handles with three fields:
+//!
+//! - tag (1 bit): `0` for engines, `1` for sessions — a handle from
+//!   one table can never address an object of the other kind.
+//! - generation (7 bits): bumped each time a table slot is reused, so
+//!   a stale handle held from a removed object no longer matches.
+//! - index (24 bits, never `0`): the table slot.
+//!
+//! A handle value of `0` is reserved as the error sentinel — the
+//! first table slot is a placeholder and is never issued.
 //!
 //! # Safety contract for callers
 //!
@@ -36,11 +44,50 @@ use std::panic;
 
 use cloak_core::{Config, Engine, Session, Stats};
 
+// ── Handle encoding ─────────────────────────────────────────────────
+
+/// Opaque handle layout: `[tag:1][generation:7][idx:24]`.
+///
+/// - The tag separates engines from sessions, so a handle of one kind
+///   can never address the other table.
+/// - The generation is bumped on slot reuse, so a stale handle from a
+///   removed object no longer matches once the slot is reissued.
+/// - Index 0 is never issued, keeping `0` a pure error sentinel.
+mod handle {
+    pub const ENGINE: u32 = 0;
+    pub const SESSION: u32 = 1;
+
+    pub const GEN_BITS: u32 = 7;
+    pub const GEN_MASK: u32 = (1 << GEN_BITS) - 1;
+    const IDX_BITS: u32 = 24;
+    /// Highest issuable index; the table holds at most `MAX_IDX` slots.
+    pub const MAX_IDX: u32 = (1 << IDX_BITS) - 1;
+
+    pub fn encode(tag: u32, generation: u32, idx: u32) -> u32 {
+        (tag << 31) | ((generation & GEN_MASK) << IDX_BITS) | (idx & MAX_IDX)
+    }
+
+    /// Returns `(tag, generation, idx)`, or `None` for the error sentinel.
+    pub fn decode(handle: u32) -> Option<(u32, u32, u32)> {
+        if handle == 0 {
+            return None;
+        }
+        Some((
+            handle >> 31,
+            (handle >> IDX_BITS) & GEN_MASK,
+            handle & MAX_IDX,
+        ))
+    }
+}
+
 // ── Handle table ────────────────────────────────────────────────────
 
-/// Simple slab: index 0 is unused (sentinel), entries start at 1.
+/// Slab with per-slot generations: index 0 is unused (sentinel),
+/// and lookups carry a generation so stale handles cannot alias a
+/// reissued slot.
 struct Slab<T> {
     entries: Vec<Option<T>>,
+    gens: Vec<u32>,
     free: Vec<u32>,
 }
 
@@ -49,33 +96,51 @@ impl<T> Slab<T> {
         Self {
             // Index 0 reserved — push a placeholder.
             entries: vec![None],
+            gens: vec![0],
             free: Vec::new(),
         }
     }
 
-    fn insert(&mut self, value: T) -> u32 {
+    /// Insert `value`, returning `(idx, generation)` for the handle, or `None`
+    /// when the 24-bit index space is exhausted.
+    fn insert(&mut self, value: T) -> Option<(u32, u32)> {
         if let Some(idx) = self.free.pop() {
+            let generation = (self.gens[idx as usize] + 1) & handle::GEN_MASK;
+            self.gens[idx as usize] = generation;
             self.entries[idx as usize] = Some(value);
-            idx
+            Some((idx, generation))
         } else {
+            if self.entries.len() > handle::MAX_IDX as usize {
+                return None;
+            }
             let idx = self.entries.len() as u32;
             self.entries.push(Some(value));
-            idx
+            self.gens.push(0);
+            Some((idx, 0))
         }
     }
 
-    fn get(&self, handle: u32) -> Option<&T> {
-        self.entries.get(handle as usize)?.as_ref()
+    fn get(&self, idx: u32, generation: u32) -> Option<&T> {
+        if self.gens.get(idx as usize).copied() != Some(generation) {
+            return None;
+        }
+        self.entries.get(idx as usize)?.as_ref()
     }
 
-    fn get_mut(&mut self, handle: u32) -> Option<&mut T> {
-        self.entries.get_mut(handle as usize)?.as_mut()
+    fn get_mut(&mut self, idx: u32, generation: u32) -> Option<&mut T> {
+        if self.gens.get(idx as usize).copied() != Some(generation) {
+            return None;
+        }
+        self.entries.get_mut(idx as usize)?.as_mut()
     }
 
-    fn remove(&mut self, handle: u32) -> Option<T> {
-        let entry = self.entries.get_mut(handle as usize)?;
+    fn remove(&mut self, idx: u32, generation: u32) -> Option<T> {
+        if self.gens.get(idx as usize).copied() != Some(generation) {
+            return None;
+        }
+        let entry = self.entries.get_mut(idx as usize)?;
         let value = entry.take()?;
-        self.free.push(handle);
+        self.free.push(idx);
         Some(value)
     }
 }
@@ -112,9 +177,11 @@ thread_local! {
 ///
 /// The host reads `ptr` and `len` to access the data, then calls
 /// [`cloakwasm_buf_free`] to release both the data and the struct.
+/// `ptr` is null exactly when `len == 0` — always check `len` before
+/// dereferencing.
 #[repr(C)]
 pub struct BufResult {
-    /// Pointer to the data bytes.
+    /// Pointer to the data bytes; null when `len == 0`.
     ptr: *mut u8,
     /// Length of the data in bytes.
     len: u32,
@@ -122,6 +189,14 @@ pub struct BufResult {
 
 /// Allocate a `BufResult` on the heap from a `Vec<u8>`.
 fn buf_result_from_vec(v: Vec<u8>) -> *mut BufResult {
+    if v.is_empty() {
+        // Empty results carry a null ptr — a dangling-but-aligned
+        // pointer here would confuse null-checking host adapters.
+        return Box::into_raw(Box::new(BufResult {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        }));
+    }
     let len = v.len() as u32;
     let mut boxed = v.into_boxed_slice();
     let ptr = boxed.as_mut_ptr();
@@ -151,12 +226,27 @@ fn clear_last_stats() {
     });
 }
 
+/// Decode and type-check a handle; on mismatch, records the error and
+/// returns `None`.
+fn decode_handle(handle: u32, want_tag: u32, kind: &str) -> Option<(u32, u32, u32)> {
+    match handle::decode(handle) {
+        Some((tag, generation, idx)) if tag == want_tag => Some((tag, generation, idx)),
+        _ => {
+            set_last_error(format!("invalid {kind} handle: {handle}"));
+            None
+        }
+    }
+}
+
 // ── Exported functions ──────────────────────────────────────────────
 
 /// Allocate `size` bytes in the module's linear memory.
 ///
 /// The host uses this to write config TOML or input chunks before
-/// calling [`cloakwasm_engine_new`] or [`cloakwasm_push`].
+/// calling [`cloakwasm_engine_new`] or [`cloakwasm_push`]. Returns
+/// null when `size == 0` or when the allocation fails — distinguish
+/// the two by only passing non-zero sizes (allocating zero bytes is
+/// never useful; an empty `(ptr, len)` pair is valid everywhere).
 #[unsafe(no_mangle)]
 pub extern "C" fn cloakwasm_alloc(size: u32) -> *mut u8 {
     let layout = match std::alloc::Layout::from_size_align(size as usize, 1) {
@@ -223,7 +313,13 @@ pub unsafe extern "C" fn cloakwasm_engine_new(config_ptr: *const u8, config_len:
     });
 
     match result {
-        Ok(Ok(engine)) => ENGINES.with(|e| e.borrow_mut().insert(Box::new(engine))),
+        Ok(Ok(engine)) => ENGINES.with(|e| match e.borrow_mut().insert(Box::new(engine)) {
+            Some((idx, generation)) => handle::encode(handle::ENGINE, generation, idx),
+            None => {
+                set_last_error("engine handle table exhausted");
+                0
+            }
+        }),
         Ok(Err(msg)) => {
             set_last_error(msg);
             0
@@ -237,15 +333,20 @@ pub unsafe extern "C" fn cloakwasm_engine_new(config_ptr: *const u8, config_len:
 
 /// Free an engine and release its handle.
 ///
-/// If any sessions created from this engine are still live, the call
-/// is refused and the error is available via [`cloakwasm_last_error`].
-/// Finish or drop all sessions before freeing the engine.
+/// Returns `1` on success, `0` on error: refused while any sessions
+/// created from this engine are still live (finish or abort them
+/// first), or an unknown handle. The error is available via
+/// [`cloakwasm_last_error`].
 #[unsafe(no_mangle)]
-pub extern "C" fn cloakwasm_engine_free(handle: u32) {
+pub extern "C" fn cloakwasm_engine_free(handle: u32) -> u32 {
     // A successful free must not leave an error from an earlier call
     // pending — hosts reading last_error after the free would report a
     // failure that did not occur.
     clear_last_error();
+
+    let Some((_, generation, idx)) = decode_handle(handle, handle::ENGINE, "engine") else {
+        return 0;
+    };
 
     let has_live_sessions = SESSIONS.with(|sessions| {
         sessions
@@ -256,13 +357,27 @@ pub extern "C" fn cloakwasm_engine_free(handle: u32) {
     });
     if has_live_sessions {
         set_last_error(format!(
-            "engine {handle} still has live sessions; finish them first"
+            "engine {handle} still has live sessions; finish or abort them first"
         ));
-        return;
+        return 0;
     }
-    ENGINES.with(|e| {
-        e.borrow_mut().remove(handle);
-    });
+
+    // catch_unwind: the Engine's Drop runs here — a panicking Drop must
+    // not cross the WASM boundary.
+    let removed =
+        panic::catch_unwind(|| ENGINES.with(|e| e.borrow_mut().remove(idx, generation).is_some()));
+
+    match removed {
+        Ok(true) => 1,
+        Ok(false) => {
+            set_last_error(format!("invalid engine handle: {handle}"));
+            0
+        }
+        Err(_) => {
+            set_last_error("engine_free panicked");
+            0
+        }
+    }
 }
 
 /// Create a new scanning session from an engine.
@@ -274,8 +389,12 @@ pub extern "C" fn cloakwasm_session_new(engine_handle: u32) -> u32 {
 
     let result = panic::catch_unwind(|| {
         ENGINES.with(|engines| {
+            let Some((_, generation, idx)) = decode_handle(engine_handle, handle::ENGINE, "engine")
+            else {
+                return 0;
+            };
             let engines = engines.borrow();
-            let engine: &Engine = match engines.get(engine_handle) {
+            let engine: &Engine = match engines.get(idx, generation) {
                 Some(e) => e,
                 None => {
                     set_last_error(format!("invalid engine handle: {engine_handle}"));
@@ -298,7 +417,13 @@ pub extern "C" fn cloakwasm_session_new(engine_handle: u32) -> u32 {
                 output: Vec::new(),
             };
 
-            SESSIONS.with(|sessions| sessions.borrow_mut().insert(state))
+            SESSIONS.with(|sessions| match sessions.borrow_mut().insert(state) {
+                Some((idx, generation)) => handle::encode(handle::SESSION, generation, idx),
+                None => {
+                    set_last_error("session handle table exhausted");
+                    0
+                }
+            })
         })
     });
 
@@ -306,6 +431,43 @@ pub extern "C" fn cloakwasm_session_new(engine_handle: u32) -> u32 {
         Ok(handle) => handle,
         Err(_) => {
             set_last_error("session_new panicked");
+            0
+        }
+    }
+}
+
+/// Abort a session without finishing it.
+///
+/// Drops the session and any carry-over it holds — nothing is flushed
+/// or returned. Use this when a stream is abandoned mid-way; use
+/// [`cloakwasm_finish`] to flush and collect output. This also lifts
+/// the engine pin the session created (see [`cloakwasm_engine_free`]).
+///
+/// Returns `1` on success, `0` on an unknown handle — call
+/// [`cloakwasm_last_error`].
+#[unsafe(no_mangle)]
+pub extern "C" fn cloakwasm_session_free(session_handle: u32) -> u32 {
+    clear_last_error();
+
+    let result = panic::catch_unwind(|| {
+        SESSIONS.with(|sessions| {
+            let Some((_, generation, idx)) =
+                decode_handle(session_handle, handle::SESSION, "session")
+            else {
+                return false;
+            };
+            sessions.borrow_mut().remove(idx, generation).is_some()
+        })
+    });
+
+    match result {
+        Ok(true) => 1,
+        Ok(false) => {
+            set_last_error(format!("invalid session handle: {session_handle}"));
+            0
+        }
+        Err(_) => {
+            set_last_error("session_free panicked");
             0
         }
     }
@@ -345,7 +507,12 @@ pub unsafe extern "C" fn cloakwasm_push(
 
         SESSIONS.with(|sessions| {
             let mut sessions = sessions.borrow_mut();
-            let state = match sessions.get_mut(session_handle) {
+            let Some((_, generation, idx)) =
+                decode_handle(session_handle, handle::SESSION, "session")
+            else {
+                return std::ptr::null_mut();
+            };
+            let state = match sessions.get_mut(idx, generation) {
                 Some(s) => s,
                 None => {
                     set_last_error(format!("invalid session handle: {session_handle}"));
@@ -357,6 +524,9 @@ pub unsafe extern "C" fn cloakwasm_push(
             match state.session.push(input, &mut state.output) {
                 Ok(()) => {
                     let out = std::mem::take(&mut state.output);
+                    // Seed the next chunk's buffer so it doesn't regrow
+                    // from zero capacity on every push.
+                    state.output = Vec::with_capacity(input.len());
                     buf_result_from_vec(out)
                 }
                 Err(e) => {
@@ -380,7 +550,10 @@ pub unsafe extern "C" fn cloakwasm_push(
 ///
 /// The returned [`BufResult`] contains the final flushed bytes. Stats
 /// are returned as a separate call to [`cloakwasm_finish_stats`] (JSON).
-/// The session handle is consumed — do not reuse it after this call.
+/// The session handle is always consumed, successful or not — do not
+/// reuse it after this call. (Finish errors are practically impossible
+/// here — the output sink is an in-memory buffer — but on one, the
+/// session and its carry-over are dropped.)
 ///
 /// Returns null on error — call [`cloakwasm_last_error`].
 #[unsafe(no_mangle)]
@@ -391,7 +564,11 @@ pub extern "C" fn cloakwasm_finish(session_handle: u32) -> *mut BufResult {
     clear_last_stats();
 
     let result = panic::catch_unwind(|| {
-        let state = SESSIONS.with(|sessions| sessions.borrow_mut().remove(session_handle));
+        let Some((_, generation, idx)) = decode_handle(session_handle, handle::SESSION, "session")
+        else {
+            return (std::ptr::null_mut(), None);
+        };
+        let state = SESSIONS.with(|sessions| sessions.borrow_mut().remove(idx, generation));
 
         let mut state = match state {
             Some(s) => s,
@@ -434,17 +611,24 @@ pub extern "C" fn cloakwasm_finish(session_handle: u32) -> *mut BufResult {
 /// Retrieve stats from the most recent [`cloakwasm_finish`] call as JSON.
 ///
 /// Returns a [`BufResult`] containing UTF-8 JSON, or null if no stats
-/// are available. The caller must free the result with [`cloakwasm_buf_free`].
+/// are available (distinct from a serialization failure, which also
+/// returns null but sets [`cloakwasm_last_error`]). The caller must
+/// free the result with [`cloakwasm_buf_free`].
 #[unsafe(no_mangle)]
 pub extern "C" fn cloakwasm_finish_stats() -> *mut BufResult {
+    clear_last_error();
+
     LAST_STATS.with(|s| {
         let stats = s.borrow_mut().take();
-        match stats {
-            Some(stats) => {
-                let json = serde_json::to_vec(&stats).unwrap_or_default();
-                buf_result_from_vec(json)
+        let Some(stats) = stats else {
+            return std::ptr::null_mut();
+        };
+        match serde_json::to_vec(&stats) {
+            Ok(json) => buf_result_from_vec(json),
+            Err(e) => {
+                set_last_error(format!("stats serialization failed: {e}"));
+                std::ptr::null_mut()
             }
-            None => std::ptr::null_mut(),
         }
     })
 }
@@ -525,8 +709,12 @@ pub unsafe extern "C" fn cloakwasm_redact(
         };
 
         ENGINES.with(|engines| {
+            let Some((_, generation, idx)) = decode_handle(engine_handle, handle::ENGINE, "engine")
+            else {
+                return std::ptr::null_mut();
+            };
             let engines = engines.borrow();
-            let engine: &Engine = match engines.get(engine_handle) {
+            let engine: &Engine = match engines.get(idx, generation) {
                 Some(e) => e,
                 None => {
                     set_last_error(format!("invalid engine handle: {engine_handle}"));
@@ -535,7 +723,7 @@ pub unsafe extern "C" fn cloakwasm_redact(
             };
 
             let mut session = engine.session();
-            let mut out = Vec::new();
+            let mut out = Vec::with_capacity(input.len());
             if let Err(e) = session.push(input, &mut out) {
                 set_last_error(format!("redact push failed: {e}"));
                 return std::ptr::null_mut();
@@ -616,11 +804,17 @@ mod tests {
             return None;
         }
         // SAFETY: ptr came from a cloakwasm_* call; the data is read
-        // before the struct and buffer are freed.
+        // before the struct and buffer are freed. The data ptr is null
+        // exactly when len is 0.
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             let r = &*ptr;
-            let data = std::slice::from_raw_parts(r.ptr, r.len as usize).to_vec();
+            let data = if r.len == 0 {
+                assert!(r.ptr.is_null(), "empty results must carry a null ptr");
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(r.ptr, r.len as usize).to_vec()
+            };
             cloakwasm_buf_free(ptr);
             Some(data)
         }
@@ -652,19 +846,27 @@ mod tests {
     // ── Slab ────────────────────────────────────────────────────────
 
     #[test]
-    fn slab_insert_get_remove_reuse() {
+    fn slab_insert_get_remove_generation_reuse() {
         let mut slab: Slab<u8> = Slab::new();
-        assert_eq!(slab.insert(10), 1);
-        assert_eq!(slab.insert(20), 2);
-        assert_eq!(slab.get(1), Some(&10));
-        assert_eq!(slab.get_mut(2), Some(&mut 20));
-        assert_eq!(slab.get(3), None); // out of range
-        assert_eq!(slab.get(0), None); // sentinel slot
-        assert_eq!(slab.remove(1), Some(10));
-        assert_eq!(slab.remove(1), None); // already taken
-        assert_eq!(slab.remove(0), None); // sentinel slot
-        assert_eq!(slab.insert(30), 1); // freed index reused
-        assert_eq!(slab.get(1), Some(&30));
+        let (i1, g1) = slab.insert(10).unwrap();
+        let (i2, g2) = slab.insert(20).unwrap();
+        assert_eq!((i1, g1), (1, 0));
+        assert_eq!((i2, g2), (2, 0));
+        assert_eq!(slab.get(1, g1), Some(&10));
+        assert_eq!(slab.get_mut(2, g2), Some(&mut 20));
+        assert_eq!(slab.get(3, 0), None); // out of range
+        assert_eq!(slab.get(0, 0), None); // sentinel slot
+        assert_eq!(slab.get(1, g1 + 1), None); // stale generation
+        assert_eq!(slab.remove(1, g1), Some(10));
+        assert_eq!(slab.remove(1, g1), None); // already taken
+        assert_eq!(slab.remove(0, 0), None); // sentinel slot
+
+        // The freed index is reissued with a bumped generation, so the
+        // old (idx, generation) pair no longer matches.
+        let (i3, g3) = slab.insert(30).unwrap();
+        assert_eq!((i3, g3), (1, 1));
+        assert_eq!(slab.get(1, g1), None); // stale handle rejected
+        assert_eq!(slab.get(1, g3), Some(&30));
     }
 
     // ── alloc / dealloc / buf_free ───────────────────────────────────
@@ -729,7 +931,7 @@ mod tests {
         assert!(session > 0, "session_new failed: {:?}", last_error());
 
         // Must be refused while a session is live.
-        cloakwasm_engine_free(engine);
+        assert_eq!(cloakwasm_engine_free(engine), 0);
         let err = last_error().expect("refusal must set an error");
         assert!(err.contains("live sessions"), "unexpected: {err}");
 
@@ -739,13 +941,15 @@ mod tests {
         assert_eq!(finish(session), Some(b"hello world".to_vec()));
 
         // Now the free succeeds and the handle is gone.
-        cloakwasm_engine_free(engine);
+        assert_eq!(cloakwasm_engine_free(engine), 1);
         assert_eq!(cloakwasm_session_new(engine), 0);
         let err = last_error().expect("error must be set");
         assert!(err.contains("invalid engine handle"), "unexpected: {err}");
 
-        // Freeing an unknown handle is a no-op (slab remove → None).
-        cloakwasm_engine_free(9999);
+        // Freeing an unknown handle reports an error, not a silent no-op.
+        assert_eq!(cloakwasm_engine_free(9999), 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid engine handle"), "unexpected: {err}");
     }
 
     // ── streaming vs one-shot parity, stats ─────────────────────────
@@ -880,7 +1084,7 @@ mod tests {
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let handle = unsafe { cloakwasm_engine_new(std::ptr::null(), 0) };
         assert!(handle > 0, "engine_new failed: {:?}", last_error());
-        cloakwasm_engine_free(handle);
+        assert_eq!(cloakwasm_engine_free(handle), 1);
     }
 
     // ── stale state across lifecycle calls ──────────────────────────
@@ -893,7 +1097,7 @@ mod tests {
         assert_eq!(cloakwasm_session_new(4242), 0);
         assert!(last_error().is_some());
 
-        cloakwasm_engine_free(engine);
+        assert_eq!(cloakwasm_engine_free(engine), 1);
         assert!(
             last_error().is_none(),
             "successful engine_free must clear stale errors"
@@ -931,5 +1135,108 @@ mod tests {
             cloakwasm_finish_stats().is_null(),
             "failed redact must clear previous stats"
         );
+    }
+
+    // ── session_free: abort path ─────────────────────────────────────
+
+    #[test]
+    fn session_free_aborts_and_lifts_engine_pin() {
+        let engine = default_engine();
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0, "session_new failed: {:?}", last_error());
+
+        // The live session pins the engine.
+        assert_eq!(cloakwasm_engine_free(engine), 0);
+        let err = last_error().expect("refusal must set an error");
+        assert!(err.contains("live sessions"), "unexpected: {err}");
+
+        // Aborting drops the session and its carry-over without flushing.
+        assert!(push(session, INPUT).is_some());
+        assert_eq!(cloakwasm_session_free(session), 1);
+
+        // The pin is lifted and the aborted handle is dead.
+        assert_eq!(cloakwasm_engine_free(engine), 1);
+        assert_eq!(cloakwasm_session_free(session), 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid session handle"), "unexpected: {err}");
+    }
+
+    // ── handle staleness across slot reuse ──────────────────────────
+
+    #[test]
+    fn stale_session_handle_cannot_alias_reissued_slot() {
+        let engine = default_engine();
+        let session_a = cloakwasm_session_new(engine);
+        assert!(session_a > 0);
+        assert!(finish(session_a).is_some());
+
+        // A new session may reuse A's slot, but A's handle must no
+        // longer match it (generation bump on reissue).
+        let session_b = cloakwasm_session_new(engine);
+        assert!(session_b > 0);
+        assert_ne!(session_a, session_b);
+        assert!(push_raw(session_a, b"x").is_null());
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid session handle"), "unexpected: {err}");
+
+        // The fresh handle still works.
+        assert!(push(session_b, b"x").is_some());
+        assert!(finish(session_b).is_some());
+        assert_eq!(cloakwasm_engine_free(engine), 1);
+    }
+
+    #[test]
+    fn cross_type_handles_are_rejected() {
+        let engine = default_engine();
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0);
+
+        // A session handle must not work where an engine is expected.
+        assert_eq!(cloakwasm_session_new(session), 0);
+        assert!(
+            last_error()
+                .expect("error")
+                .contains("invalid engine handle")
+        );
+
+        assert!(redact_raw(session, b"x").is_null());
+        assert!(
+            last_error()
+                .expect("error")
+                .contains("invalid engine handle")
+        );
+
+        assert_eq!(cloakwasm_engine_free(session), 0);
+        assert!(
+            last_error()
+                .expect("error")
+                .contains("invalid engine handle")
+        );
+
+        // An engine handle must not work where a session is expected.
+        assert!(push_raw(engine, b"x").is_null());
+        assert!(
+            last_error()
+                .expect("error")
+                .contains("invalid session handle")
+        );
+
+        assert!(cloakwasm_finish(engine).is_null());
+        assert!(
+            last_error()
+                .expect("error")
+                .contains("invalid session handle")
+        );
+
+        assert_eq!(cloakwasm_session_free(engine), 0);
+        assert!(
+            last_error()
+                .expect("error")
+                .contains("invalid session handle")
+        );
+
+        // Cleanup.
+        assert_eq!(cloakwasm_session_free(session), 1);
+        assert_eq!(cloakwasm_engine_free(engine), 1);
     }
 }
