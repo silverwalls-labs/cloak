@@ -26,7 +26,8 @@
 //! All pointer-taking exports are `unsafe extern "C"` — the caller
 //! (WASM host) is responsible for passing valid `(ptr, len)` pairs
 //! obtained from [`cloakwasm_alloc`], and for freeing results via
-//! [`cloakwasm_buf_free`].
+//! [`cloakwasm_buf_free`]. A pair with `len == 0` is valid with any
+//! pointer, including the null returned by `cloakwasm_alloc(0)`.
 
 #![allow(unsafe_code)]
 
@@ -144,6 +145,12 @@ fn clear_last_error() {
     });
 }
 
+fn clear_last_stats() {
+    LAST_STATS.with(|s| {
+        *s.borrow_mut() = None;
+    });
+}
+
 // ── Exported functions ──────────────────────────────────────────────
 
 /// Allocate `size` bytes in the module's linear memory.
@@ -189,15 +196,23 @@ pub unsafe extern "C" fn cloakwasm_dealloc(ptr: *mut u8, size: u32) {
 /// # Safety
 ///
 /// `config_ptr` must point to `config_len` valid bytes (a UTF-8 TOML
-/// string allocated via [`cloakwasm_alloc`]).
+/// string allocated via [`cloakwasm_alloc`]). A pair with
+/// `config_len == 0` is valid with any pointer, including null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cloakwasm_engine_new(config_ptr: *const u8, config_len: u32) -> u32 {
     clear_last_error();
 
     let result = panic::catch_unwind(|| {
-        // SAFETY: caller guarantees valid ptr/len.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-        let config_bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len as usize) };
+        // An empty (ptr, len) pair is valid regardless of the pointer:
+        // cloakwasm_alloc(0) returns null, and from_raw_parts requires a
+        // non-null pointer even for zero-length slices.
+        let config_bytes: &[u8] = if config_len == 0 {
+            &[]
+        } else {
+            // SAFETY: caller guarantees valid ptr/len; len > 0 here.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            unsafe { std::slice::from_raw_parts(config_ptr, config_len as usize) }
+        };
 
         let config_str = std::str::from_utf8(config_bytes)
             .map_err(|e| format!("config is not valid UTF-8: {e}"))?;
@@ -227,6 +242,11 @@ pub unsafe extern "C" fn cloakwasm_engine_new(config_ptr: *const u8, config_len:
 /// Finish or drop all sessions before freeing the engine.
 #[unsafe(no_mangle)]
 pub extern "C" fn cloakwasm_engine_free(handle: u32) {
+    // A successful free must not leave an error from an earlier call
+    // pending — hosts reading last_error after the free would report a
+    // failure that did not occur.
+    clear_last_error();
+
     let has_live_sessions = SESSIONS.with(|sessions| {
         sessions
             .borrow()
@@ -301,7 +321,8 @@ pub extern "C" fn cloakwasm_session_new(engine_handle: u32) -> u32 {
 ///
 /// # Safety
 ///
-/// `in_ptr` must point to `in_len` valid bytes.
+/// `in_ptr` must point to `in_len` valid bytes. A pair with
+/// `in_len == 0` is valid with any pointer, including null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cloakwasm_push(
     session_handle: u32,
@@ -311,9 +332,16 @@ pub unsafe extern "C" fn cloakwasm_push(
     clear_last_error();
 
     let result = panic::catch_unwind(|| {
-        // SAFETY: caller guarantees valid ptr/len.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-        let input = unsafe { std::slice::from_raw_parts(in_ptr, in_len as usize) };
+        // An empty (ptr, len) pair is valid regardless of the pointer:
+        // cloakwasm_alloc(0) returns null, and from_raw_parts requires a
+        // non-null pointer even for zero-length slices.
+        let input: &[u8] = if in_len == 0 {
+            &[]
+        } else {
+            // SAFETY: caller guarantees valid ptr/len; len > 0 here.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            unsafe { std::slice::from_raw_parts(in_ptr, in_len as usize) }
+        };
 
         SESSIONS.with(|sessions| {
             let mut sessions = sessions.borrow_mut();
@@ -358,6 +386,9 @@ pub unsafe extern "C" fn cloakwasm_push(
 #[unsafe(no_mangle)]
 pub extern "C" fn cloakwasm_finish(session_handle: u32) -> *mut BufResult {
     clear_last_error();
+    // A failed finish attempt must not leave a previous session's stats
+    // claimable via cloakwasm_finish_stats.
+    clear_last_stats();
 
     let result = panic::catch_unwind(|| {
         let state = SESSIONS.with(|sessions| sessions.borrow_mut().remove(session_handle));
@@ -468,7 +499,8 @@ pub extern "C" fn cloakwasm_last_error() -> *mut BufResult {
 ///
 /// # Safety
 ///
-/// `in_ptr` must point to `in_len` valid bytes.
+/// `in_ptr` must point to `in_len` valid bytes. A pair with
+/// `in_len == 0` is valid with any pointer, including null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cloakwasm_redact(
     engine_handle: u32,
@@ -476,11 +508,21 @@ pub unsafe extern "C" fn cloakwasm_redact(
     in_len: u32,
 ) -> *mut BufResult {
     clear_last_error();
+    // Same rule as cloakwasm_finish: a failed attempt must not leave a
+    // previous pass's stats claimable via cloakwasm_finish_stats.
+    clear_last_stats();
 
     let result = panic::catch_unwind(|| {
-        // SAFETY: caller guarantees valid ptr/len.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
-        let input = unsafe { std::slice::from_raw_parts(in_ptr, in_len as usize) };
+        // An empty (ptr, len) pair is valid regardless of the pointer:
+        // cloakwasm_alloc(0) returns null, and from_raw_parts requires a
+        // non-null pointer even for zero-length slices.
+        let input: &[u8] = if in_len == 0 {
+            &[]
+        } else {
+            // SAFETY: caller guarantees valid ptr/len; len > 0 here.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            unsafe { std::slice::from_raw_parts(in_ptr, in_len as usize) }
+        };
 
         ENGINES.with(|engines| {
             let engines = engines.borrow();
@@ -797,6 +839,97 @@ mod tests {
         assert!(
             cloakwasm_last_error().is_null(),
             "clear_last_error must run on every entry point"
+        );
+    }
+
+    // ── empty (ptr, len) pairs ───────────────────────────────────────
+
+    #[test]
+    fn empty_pairs_with_null_ptr_are_valid() {
+        let engine = default_engine();
+
+        // alloc(0) returns null — the host can legitimately hold that
+        // pointer alongside len 0.
+        assert!(cloakwasm_alloc(0).is_null());
+
+        // push with (null, 0) must be a valid empty chunk.
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0);
+        // SAFETY: (null, 0) is a documented valid empty pair.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let r = unsafe { cloakwasm_push(session, std::ptr::null(), 0) };
+        assert!(!r.is_null(), "push failed: {:?}", last_error());
+        assert_eq!(read_buf(r), Some(Vec::new()));
+        assert_eq!(finish(session), Some(Vec::new()));
+
+        // redact with (null, 0) must succeed as a no-op pass.
+        // SAFETY: (null, 0) is a documented valid empty pair.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let r = unsafe { cloakwasm_redact(engine, std::ptr::null(), 0) };
+        assert!(!r.is_null(), "redact failed: {:?}", last_error());
+        assert_eq!(read_buf(r), Some(Vec::new()));
+    }
+
+    #[test]
+    fn empty_config_with_null_ptr_parses() {
+        init();
+
+        // (null, 0) as a config: empty TOML parses to the default config
+        // (ephemeral digest key), so a handle must come back.
+        // SAFETY: (null, 0) is a documented valid empty pair.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        let handle = unsafe { cloakwasm_engine_new(std::ptr::null(), 0) };
+        assert!(handle > 0, "engine_new failed: {:?}", last_error());
+        cloakwasm_engine_free(handle);
+    }
+
+    // ── stale state across lifecycle calls ──────────────────────────
+
+    #[test]
+    fn engine_free_clears_stale_error() {
+        let engine = default_engine();
+
+        // Leave an error pending from an unrelated failed call.
+        assert_eq!(cloakwasm_session_new(4242), 0);
+        assert!(last_error().is_some());
+
+        cloakwasm_engine_free(engine);
+        assert!(
+            last_error().is_none(),
+            "successful engine_free must clear stale errors"
+        );
+    }
+
+    #[test]
+    fn failed_finish_invalidates_previous_stats() {
+        let engine = default_engine();
+
+        // Session A finishes successfully — its stats are claimable once.
+        let session_a = cloakwasm_session_new(engine);
+        assert!(session_a > 0);
+        assert!(push(session_a, INPUT).is_some());
+        assert!(finish(session_a).is_some());
+        assert!(read_buf(cloakwasm_finish_stats()).is_some());
+
+        // A failed finish attempt must invalidate the stash, not leave
+        // session A's stats claimable as if they were the latest result.
+        assert!(cloakwasm_finish(4242).is_null());
+        assert!(
+            cloakwasm_finish_stats().is_null(),
+            "failed finish must clear previous stats"
+        );
+
+        // Same rule for a failed redact after a successful finish.
+        let session_b = cloakwasm_session_new(engine);
+        assert!(session_b > 0);
+        assert!(push(session_b, INPUT).is_some());
+        assert!(finish(session_b).is_some());
+        assert!(read_buf(cloakwasm_finish_stats()).is_some());
+
+        assert!(redact_raw(4242, b"x").is_null());
+        assert!(
+            cloakwasm_finish_stats().is_null(),
+            "failed redact must clear previous stats"
         );
     }
 }

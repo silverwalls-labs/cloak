@@ -222,7 +222,9 @@ proptest! {
     #[test]
     fn chunked_push_matches_single_push(
         vector_idx in 0..proptest_vectors().len(),
-        split_seed in proptest::collection::vec(0..100usize, 1..=5),
+        // Index resolves against the full input length, so split points
+        // cover chunk boundaries anywhere in the vector, not just its start.
+        split_seed in proptest::collection::vec(any::<prop::sample::Index>(), 1..=5),
     ) {
         let vecs = proptest_vectors();
         let v = vecs[vector_idx];
@@ -241,7 +243,7 @@ proptest! {
 
         let mut points: Vec<usize> = split_seed
             .iter()
-            .map(|s| s % len)
+            .map(|s| s.index(len))
             .collect();
         points.sort_unstable();
         points.dedup();

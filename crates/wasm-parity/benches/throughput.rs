@@ -176,6 +176,14 @@ impl WasmBench {
                 (self.cloak_engine, ptr, input.len() as u32),
             )
             .unwrap();
+        // A null result means the call failed — reading the BufResult at
+        // address 0 would silently time the failure path as throughput.
+        assert_ne!(
+            result_ptr,
+            0,
+            "cloakwasm_redact failed: {}",
+            self.last_error()
+        );
 
         let dealloc = self
             .instance
@@ -207,6 +215,43 @@ impl WasmBench {
         buf_free.call(&mut self.store, result_ptr).unwrap();
 
         out
+    }
+
+    /// Read the guest's last error, for assertion messages.
+    fn last_error(&mut self) -> String {
+        let last_error = self
+            .instance
+            .get_typed_func::<(), u32>(&mut self.store, "cloakwasm_last_error")
+            .unwrap();
+        let result_ptr = last_error.call(&mut self.store, ()).unwrap();
+        if result_ptr == 0 {
+            return "<no error recorded>".to_string();
+        }
+
+        let mem = self.instance.get_memory(&mut self.store, "memory").unwrap();
+        let data = mem.data(&self.store);
+        let data_ptr = u32::from_le_bytes(
+            data[result_ptr as usize..result_ptr as usize + 4]
+                .try_into()
+                .unwrap(),
+        );
+        let data_len = u32::from_le_bytes(
+            data[result_ptr as usize + 4..result_ptr as usize + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let msg = String::from_utf8_lossy(
+            &data[data_ptr as usize..data_ptr as usize + data_len as usize],
+        )
+        .into_owned();
+
+        let buf_free = self
+            .instance
+            .get_typed_func::<u32, ()>(&mut self.store, "cloakwasm_buf_free")
+            .unwrap();
+        buf_free.call(&mut self.store, result_ptr).unwrap();
+
+        msg
     }
 }
 

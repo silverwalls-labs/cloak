@@ -5,7 +5,7 @@
 > WASM target: wasm32-wasip1, RUSTFLAGS="-Ctarget-feature=+simd128"
 > WASM runtime: wasmtime 44.0.3 (Cranelift backend, simd enabled)
 > Host CPU: Apple Silicon (M-series, aarch64-apple-darwin)
-> Corpus: mixed log lines (~3.8 KiB, 2 embedded secrets)
+> Corpus: mixed log lines (4,064 B ≈ 4.0 KiB, 2 embedded secrets)
 >
 > **First native-vs-WASM receipts entry** (docs/06-embedding.md, E1 acceptance).
 > "simd128 benefit measured, not assumed."
@@ -50,6 +50,6 @@ is deferred to E2–E4 where host-specific runtime differences matter.
   via `wasmtime::Module`, instantiating with WASI env, calling exports through
   the wasmtime embedding API.
 - **Corpus**: ~60 clean log lines interspersed with 2 secrets (GitHub token,
-  AWS access key). Total ~3.8 KiB — representative of structured logging
-  workloads where secrets appear sparsely.
+  AWS access key). Total 4,064 B (~4.0 KiB) — representative of structured
+  logging workloads where secrets appear sparsely.
 - **Environment**: single-threaded, engine created once, session per iteration.
