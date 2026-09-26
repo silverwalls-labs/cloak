@@ -48,6 +48,7 @@ fn corpus() -> Vec<u8> {
 fn bench_native(c: &mut Criterion) {
     // Set up engine with deterministic key.
     // SAFETY: bench-only, single var, set once.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { std::env::set_var(KEY_VAR, KEY_MATERIAL) };
 
     let config = cloak_core::Config {

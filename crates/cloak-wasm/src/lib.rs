@@ -157,6 +157,7 @@ pub extern "C" fn cloakwasm_alloc(size: u32) -> *mut u8 {
         _ => return std::ptr::null_mut(),
     };
     // SAFETY: layout is non-zero and aligned.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { std::alloc::alloc(layout) }
 }
 
@@ -176,6 +177,7 @@ pub unsafe extern "C" fn cloakwasm_dealloc(ptr: *mut u8, size: u32) {
         Err(_) => return,
     };
     // SAFETY: caller guarantees ptr/size match a prior cloakwasm_alloc.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { std::alloc::dealloc(ptr, layout) };
 }
 
@@ -194,6 +196,7 @@ pub unsafe extern "C" fn cloakwasm_engine_new(config_ptr: *const u8, config_len:
 
     let result = panic::catch_unwind(|| {
         // SAFETY: caller guarantees valid ptr/len.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let config_bytes = unsafe { std::slice::from_raw_parts(config_ptr, config_len as usize) };
 
         let config_str = std::str::from_utf8(config_bytes)
@@ -265,6 +268,7 @@ pub extern "C" fn cloakwasm_session_new(engine_handle: u32) -> u32 {
             // 1. The engine won't be freed while sessions exist (caller contract).
             // 2. WASM is single-threaded — no concurrent mutation.
             // 3. The session is removed from SESSIONS before the engine is freed.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             let engine_ref: &'static Engine = unsafe { &*(engine as *const Engine) };
 
             let session = engine_ref.session();
@@ -308,6 +312,7 @@ pub unsafe extern "C" fn cloakwasm_push(
 
     let result = panic::catch_unwind(|| {
         // SAFETY: caller guarantees valid ptr/len.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let input = unsafe { std::slice::from_raw_parts(in_ptr, in_len as usize) };
 
         SESSIONS.with(|sessions| {
@@ -427,6 +432,7 @@ pub unsafe extern "C" fn cloakwasm_buf_free(result: *mut BufResult) {
         return;
     }
     // SAFETY: result was allocated by buf_result_from_vec.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         let r = Box::from_raw(result);
         if !r.ptr.is_null() && r.len > 0 {
@@ -473,6 +479,7 @@ pub unsafe extern "C" fn cloakwasm_redact(
 
     let result = panic::catch_unwind(|| {
         // SAFETY: caller guarantees valid ptr/len.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let input = unsafe { std::slice::from_raw_parts(in_ptr, in_len as usize) };
 
         ENGINES.with(|engines| {
