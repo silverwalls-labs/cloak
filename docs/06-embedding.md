@@ -130,9 +130,10 @@ E1 wasm build ─┬─ E2 Node adapter ──── E6 cloak-node (napi-rs)
 
 ### E1 — `cloak-wasm` build + buffer ABI
 `cloak-wasm` crate exporting a linear-memory API over core (`engine_new(config
-ptr/len)`, `session_new`, `push(ptr,len) → (ptr,len)`, `finish`); build
-`wasm32-wasip1` with `+simd128`; parity vector runner executing the module
-(wasmtime) in CI; first native-vs-WASM receipts entry.
+ptr/len)`, `session_new`, `push(ptr,len) → (ptr,len)`, `finish`,
+`session_free` abort path); build `wasm32-wasip1` with `+simd128`; parity
+vector runner executing the module (wasmtime) in CI; first native-vs-WASM
+receipts entry.
 **Done when:** the `.wasm` artifact passes the full vector parity suite + a
 chunk-boundary proptest subset; CI builds and gates it.
 

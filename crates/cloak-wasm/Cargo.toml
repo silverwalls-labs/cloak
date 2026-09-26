@@ -1,0 +1,19 @@
+[package]
+name = "cloak-wasm"
+description = "WASM linear-memory ABI over cloak-core — embedding artifact for host adapters"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cloak-core = { path = "../cloak-core" }
+# Feature unification activates wasm32_simd for cloak-core's blake3 dep
+# when building for wasm32. The feature is a no-op on native targets.
+blake3 = { workspace = true, features = ["wasm32_simd"] }
+serde_json = { workspace = true }

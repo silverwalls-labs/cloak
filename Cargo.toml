@@ -11,7 +11,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/cloak-core", "crates/cloak-cli", "crates/bench-gate"]
+members = ["crates/cloak-core", "crates/cloak-cli", "crates/cloak-wasm", "crates/wasm-parity", "crates/bench-gate"]
 # The fuzz crate is deliberately outside the workspace (standard cargo-fuzz
 # layout): it needs the nightly toolchain + libFuzzer link flags and must not
 # drag libfuzzer-sys into cargo-deny/workspace builds. CI runs fmt/clippy on
@@ -42,3 +42,13 @@ insta = { version = "1", features = ["json"] }
 rand = "0.9"
 tempfile = "3"
 proptest = "1"
+wasmtime = "49"
+wasmtime-wasi = { version = "49", features = ["p1"] }
+
+# WASM panic containment: cloak-wasm's catch_unwind boundary handlers
+# require unwinding — under panic=abort they would be dead code and any
+# panic would trap the whole instance. Explicit (the current default on
+# every workspace target) so a future toolchain or profile change
+# cannot silently flip the strategy.
+[profile.release]
+panic = "unwind"

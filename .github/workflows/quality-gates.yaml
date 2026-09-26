@@ -296,6 +296,72 @@ jobs:
           out=$(printf '%s\n' "$in" | CLOAK_DIGEST_KEY=smoke-test-key ./target/debug/cloak)
           [ "$out" = "$want" ]
 
+  # ── WASM build + parity ───────────────────────────────────────────
+
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+          targets: wasm32-wasip1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Build WASM artifact
+        run: |
+          RUSTFLAGS="-Ctarget-feature=+simd128" \
+            cargo build -p cloak-wasm --target wasm32-wasip1 --release
+
+      - name: Verify +simd128 landed in the artifact
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq wabt
+          wasm-objdump -d target/wasm32-wasip1/release/cloak_wasm.wasm \
+            | grep -m1 -E 'v128\.|i8x16\.|i16x8\.|i32x4\.|i64x2\.|f32x4\.|f64x2\.' \
+            || { echo "artifact contains no SIMD instructions — +simd128 did not apply"; exit 1; }
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloak-wasm
+          path: target/wasm32-wasip1/release/cloak_wasm.wasm
+
+  wasm-parity:
+    name: WASM Parity
+    needs: wasm-build
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cloak-wasm
+          path: wasm-artifact
+
+      - name: Parity + streaming tests
+        env:
+          CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
+        run: |
+          cargo test -p wasm-parity
+
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
   # main.rs coverage via instrumented binary + inherited LLVM_PROFILE_FILE).

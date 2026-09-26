@@ -1,0 +1,21 @@
+[package]
+name = "wasm-parity"
+description = "Parity test runner — exercises cloak-wasm artifact through wasmtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+cloak-core = { path = "../cloak-core" }
+blake3 = { workspace = true }
+wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "throughput"
+harness = false
