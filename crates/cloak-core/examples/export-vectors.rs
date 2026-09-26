@@ -11,7 +11,7 @@
 //! ```
 
 use cloak_core::vectors;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Same key material as the parity test suites (`wasm-parity`,
 /// `adapters/node`) — changing it breaks all downstream fixtures.
