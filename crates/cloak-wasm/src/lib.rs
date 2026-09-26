@@ -521,3 +521,282 @@ pub unsafe extern "C" fn cloakwasm_redact(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Once;
+
+    const KEY_VAR: &str = "CLOAK_DIGEST_KEY";
+    const KEY_MATERIAL: &str = "cloak-wasm-unit-test-key";
+
+    const CONFIG_TOML: &str = "[redaction]\ndigest_key = \"env:CLOAK_DIGEST_KEY\"\n";
+
+    /// A GitHub token long enough to span chunk boundaries when split.
+    const INPUT: &[u8] = b"token=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 done\n";
+
+    static INIT: Once = Once::new();
+
+    fn init() {
+        INIT.call_once(|| {
+            // SAFETY: test-only; single dedicated var, set exactly once
+            // before any engine is built, never removed.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+            unsafe { std::env::set_var(KEY_VAR, KEY_MATERIAL) };
+        });
+    }
+
+    // ── Helpers ─────────────────────────────────────────────────────
+
+    fn engine_new_raw(config: &[u8]) -> u32 {
+        // SAFETY: ptr/len describe a valid slice for the call's duration.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { cloakwasm_engine_new(config.as_ptr(), config.len() as u32) }
+    }
+
+    fn push_raw(session: u32, input: &[u8]) -> *mut BufResult {
+        // SAFETY: ptr/len describe a valid slice for the call's duration.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { cloakwasm_push(session, input.as_ptr(), input.len() as u32) }
+    }
+
+    fn redact_raw(engine: u32, input: &[u8]) -> *mut BufResult {
+        // SAFETY: ptr/len describe a valid slice for the call's duration.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { cloakwasm_redact(engine, input.as_ptr(), input.len() as u32) }
+    }
+
+    /// Read a `BufResult`'s bytes, free it, and return the bytes.
+    /// `None` for a null pointer.
+    fn read_buf(ptr: *mut BufResult) -> Option<Vec<u8>> {
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: ptr came from a cloakwasm_* call; the data is read
+        // before the struct and buffer are freed.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            let r = &*ptr;
+            let data = std::slice::from_raw_parts(r.ptr, r.len as usize).to_vec();
+            cloakwasm_buf_free(ptr);
+            Some(data)
+        }
+    }
+
+    fn push(session: u32, input: &[u8]) -> Option<Vec<u8>> {
+        read_buf(push_raw(session, input))
+    }
+
+    fn finish(session: u32) -> Option<Vec<u8>> {
+        read_buf(cloakwasm_finish(session))
+    }
+
+    fn redact(engine: u32, input: &[u8]) -> Option<Vec<u8>> {
+        read_buf(redact_raw(engine, input))
+    }
+
+    fn last_error() -> Option<String> {
+        read_buf(cloakwasm_last_error()).map(|b| String::from_utf8(b).expect("UTF-8 error"))
+    }
+
+    fn default_engine() -> u32 {
+        init();
+        let handle = engine_new_raw(CONFIG_TOML.as_bytes());
+        assert!(handle > 0, "engine_new failed: {:?}", last_error());
+        handle
+    }
+
+    // ── Slab ────────────────────────────────────────────────────────
+
+    #[test]
+    fn slab_insert_get_remove_reuse() {
+        let mut slab: Slab<u8> = Slab::new();
+        assert_eq!(slab.insert(10), 1);
+        assert_eq!(slab.insert(20), 2);
+        assert_eq!(slab.get(1), Some(&10));
+        assert_eq!(slab.get_mut(2), Some(&mut 20));
+        assert_eq!(slab.get(3), None); // out of range
+        assert_eq!(slab.get(0), None); // sentinel slot
+        assert_eq!(slab.remove(1), Some(10));
+        assert_eq!(slab.remove(1), None); // already taken
+        assert_eq!(slab.remove(0), None); // sentinel slot
+        assert_eq!(slab.insert(30), 1); // freed index reused
+        assert_eq!(slab.get(1), Some(&30));
+    }
+
+    // ── alloc / dealloc / buf_free ───────────────────────────────────
+
+    #[test]
+    fn alloc_dealloc_roundtrip() {
+        assert!(cloakwasm_alloc(0).is_null(), "zero-size must be rejected");
+
+        let ptr = cloakwasm_alloc(16);
+        assert!(!ptr.is_null());
+        // SAFETY: ptr from cloakwasm_alloc(16), written and freed with the
+        // same size; never dereferenced after the free.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            std::ptr::write_bytes(ptr, 0xAB, 16);
+            assert_eq!(*ptr, 0xAB);
+            cloakwasm_dealloc(ptr, 16);
+            // Null and zero-size are no-ops (the dangling ptr is never
+            // dereferenced — both guards return first).
+            cloakwasm_dealloc(ptr, 0);
+            cloakwasm_dealloc(std::ptr::null_mut(), 16);
+        }
+
+        // SAFETY: null is a documented no-op.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe { cloakwasm_buf_free(std::ptr::null_mut()) };
+    }
+
+    // ── engine_new: config rejection paths ──────────────────────────
+
+    #[test]
+    fn engine_new_rejects_bad_configs() {
+        init();
+
+        // Not valid UTF-8.
+        let h = engine_new_raw(&[0xFF, 0xFE]);
+        assert_eq!(h, 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("not valid UTF-8"), "unexpected: {err}");
+        assert!(last_error().is_none(), "error must be taken by the read");
+
+        // Malformed TOML — fails inside Config::from_toml.
+        let h = engine_new_raw(b"not toml at all [[[");
+        assert_eq!(h, 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid config"), "unexpected: {err}");
+
+        // Parses but fails validation inside Engine::new (inline keys
+        // are rejected by cloak-core).
+        let h = engine_new_raw(b"[redaction]\ndigest_key = \"inline-not-allowed\"\n");
+        assert_eq!(h, 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("engine build failed"), "unexpected: {err}");
+    }
+
+    // ── engine_free: live-session refusal + removal ──────────────────
+
+    #[test]
+    fn engine_free_refused_while_sessions_live() {
+        let engine = default_engine();
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0, "session_new failed: {:?}", last_error());
+
+        // Must be refused while a session is live.
+        cloakwasm_engine_free(engine);
+        let err = last_error().expect("refusal must set an error");
+        assert!(err.contains("live sessions"), "unexpected: {err}");
+
+        // The session still works after the refused free. All 11 bytes sit
+        // in the carry-over window, so push flushes nothing; finish does.
+        assert_eq!(push(session, b"hello world"), Some(Vec::new()));
+        assert_eq!(finish(session), Some(b"hello world".to_vec()));
+
+        // Now the free succeeds and the handle is gone.
+        cloakwasm_engine_free(engine);
+        assert_eq!(cloakwasm_session_new(engine), 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid engine handle"), "unexpected: {err}");
+
+        // Freeing an unknown handle is a no-op (slab remove → None).
+        cloakwasm_engine_free(9999);
+    }
+
+    // ── streaming vs one-shot parity, stats ─────────────────────────
+
+    #[test]
+    fn streamed_chunks_match_one_shot_redact() {
+        let engine = default_engine();
+
+        let one_shot = redact(engine, INPUT).expect("redact failed");
+        assert!(
+            one_shot.starts_with(b"token=[CLOAK:github-token:"),
+            "token not redacted: {:?}",
+            String::from_utf8_lossy(&one_shot)
+        );
+
+        // Same input in three chunks must concatenate to the same bytes,
+        // regardless of where the engine flushes internally.
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0);
+        let mut streamed = Vec::new();
+        for chunk in [&INPUT[..15], &INPUT[15..30], &INPUT[30..]] {
+            streamed.extend_from_slice(&push(session, chunk).expect("push failed"));
+        }
+        streamed.extend_from_slice(&finish(session).expect("finish failed"));
+        assert_eq!(streamed, one_shot);
+    }
+
+    #[test]
+    fn finish_stats_json_then_exhausted() {
+        let engine = default_engine();
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0);
+        assert!(push(session, INPUT).is_some());
+        assert!(finish(session).is_some());
+
+        // First call returns the stashed stats as JSON.
+        let json = read_buf(cloakwasm_finish_stats()).expect("stats must be set");
+        let json = String::from_utf8(json).expect("stats must be UTF-8 JSON");
+        assert!(json.contains("bytes_processed"), "unexpected: {json}");
+
+        // The stash is take()-n — a second call returns null.
+        assert!(cloakwasm_finish_stats().is_null());
+    }
+
+    // ── invalid handles across the surface ──────────────────────────
+
+    #[test]
+    fn invalid_handles_report_errors() {
+        let engine = default_engine();
+
+        assert_eq!(cloakwasm_session_new(4242), 0);
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid engine handle"), "unexpected: {err}");
+
+        assert!(push_raw(4242, b"x").is_null());
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid session handle"), "unexpected: {err}");
+
+        assert!(cloakwasm_finish(4242).is_null());
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid session handle"), "unexpected: {err}");
+
+        assert!(redact_raw(4242, b"x").is_null());
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid engine handle"), "unexpected: {err}");
+
+        // Finish consumes the session handle — reuse must fail.
+        let session = cloakwasm_session_new(engine);
+        assert!(session > 0);
+        assert!(finish(session).is_some());
+        assert!(push_raw(session, b"x").is_null());
+        let err = last_error().expect("error must be set");
+        assert!(err.contains("invalid session handle"), "unexpected: {err}");
+    }
+
+    // ── last_error lifecycle ────────────────────────────────────────
+
+    #[test]
+    fn last_error_cleared_on_success() {
+        let engine = default_engine();
+        assert!(
+            cloakwasm_last_error().is_null(),
+            "no error may be pending after a successful engine_new"
+        );
+
+        // session_new on a bad handle sets one; the next successful call
+        // clears it again.
+        assert_eq!(cloakwasm_session_new(4242), 0);
+        assert!(last_error().is_some());
+        assert!(cloakwasm_session_new(engine) > 0);
+        assert!(
+            cloakwasm_last_error().is_null(),
+            "clear_last_error must run on every entry point"
+        );
+    }
+}
