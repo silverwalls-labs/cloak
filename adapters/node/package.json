@@ -1,0 +1,28 @@
+{
+  "name": "cloak-node",
+  "version": "0.1.0",
+  "description": "Node.js adapter for cloak — guarantee-grade secrets redaction via WASM",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "example:basic": "node --experimental-strip-types --no-warnings examples/basic-redact.ts",
+    "example:transform": "node --experimental-strip-types --no-warnings examples/transform-pipe.ts",
+    "example:pino": "node --experimental-strip-types --no-warnings examples/pino-destination.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "pino": "^9"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/silverwalls-labs/cloak",
+    "directory": "adapters/node"
+  }
+}
