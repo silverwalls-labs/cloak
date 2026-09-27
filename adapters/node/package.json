@@ -8,7 +8,7 @@
     ".": "./src/index.ts"
   },
   "engines": {
-    "node": ">=24"
+    "node": ">=26"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -18,8 +18,8 @@
     "example:pino": "node --experimental-strip-types --no-warnings examples/pino-destination.ts"
   },
   "devDependencies": {
-    "@types/node": "^22",
-    "pino": "^9",
+    "@types/node": "^24",
+    "pino": "^10",
     "typescript": "^7.0.2"
   },
   "license": "MIT",

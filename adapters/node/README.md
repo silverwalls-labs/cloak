@@ -6,7 +6,7 @@ dependencies.
 
 ## Prerequisites
 
-- **Node.js 24+** — uses `node:wasi` (preview1) for WASM instantiation
+- **Node.js 26+** — uses `node:wasi` (preview1) for WASM instantiation
 - **cloak WASM artifact** — built from the repo or downloaded from CI:
   ```sh
   RUSTFLAGS="-Ctarget-feature=+simd128" \
