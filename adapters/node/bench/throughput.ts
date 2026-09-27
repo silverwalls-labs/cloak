@@ -140,10 +140,10 @@ console.log(`  ${stream256UsPerOp.toFixed(2)} µs/op`);
 console.log(`  ${stream256.mibPerSec.toFixed(1)} MiB/s`);
 console.log(`  ${stream256.opsPerSec.toFixed(0)} ops/sec\n`);
 
-// Comparison table
-console.log(`── comparison (same corpus, same machine) ──`);
-console.log(`  Rust native (criterion):        ~229 MiB/s  (~17 µs/op)`);
-console.log(`  Rust WASM-via-wasmtime:          ~134 MiB/s  (~29 µs/op)`);
+// Summary of the Node numbers measured on this machine. For the native
+// and wasmtime figures on the same corpus, see
+// docs/benchmarks/receipts-wasm-e1.md.
+console.log(`── summary (Node WASM, measured here) ──`);
 console.log(`  Node WASM (one-shot):            ~${redactResult.mibPerSec.toFixed(0)} MiB/s  (~${redactUsPerOp.toFixed(0)} µs/op)`);
 console.log(`  Node WASM (streaming 1K):        ~${stream1k.mibPerSec.toFixed(0)} MiB/s  (~${stream1kUsPerOp.toFixed(0)} µs/op)`);
 

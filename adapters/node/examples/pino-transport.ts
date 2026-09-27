@@ -32,9 +32,10 @@
  * logger.info({ token: 'ghp_...' }, 'hello');
  * ```
  *
- * Run:
- *   npm install pino  # (devDependency in package.json)
- *   CLOAK_DIGEST_KEY=my-key node --experimental-strip-types examples/pino-transport-demo.ts
+ * This file is not executed directly — it is the transport *target* that
+ * `pino.transport()` loads in a worker thread (see the Usage snippet
+ * above). The transport reads CLOAK_DIGEST_KEY from the worker's env, so
+ * that variable must be set where the parent process runs.
  */
 
 import { Transform } from "node:stream";

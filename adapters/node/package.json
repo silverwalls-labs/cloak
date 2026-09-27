@@ -1,6 +1,7 @@
 {
   "name": "cloak-node",
   "version": "0.1.0",
+  "private": true,
   "description": "Node.js adapter for cloak — guarantee-grade secrets redaction via WASM",
   "type": "module",
   "exports": {

@@ -56,6 +56,7 @@ function tomlString(value: string): string {
  */
 const VALID_RULE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
+/** Reject rule IDs that would produce an invalid or misinterpreted TOML section header. */
 function validateRuleId(ruleId: string): void {
   if (!VALID_RULE_ID.test(ruleId)) {
     throw new Error(

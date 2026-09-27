@@ -37,8 +37,16 @@ export function createCloakTransformStream(
         controller.error(new Error("cloak transform already finished"));
         return;
       }
-      const out = session.push(Buffer.from(chunk));
-      if (out.length > 0) controller.enqueue(new Uint8Array(out));
+      try {
+        const out = session.push(Buffer.from(chunk));
+        if (out.length > 0) controller.enqueue(new Uint8Array(out));
+      } catch (err) {
+        // `transformer.cancel()` is NOT invoked when `transform()` throws,
+        // so release the session here or it blocks `engine.dispose()`.
+        session.abort();
+        session = null;
+        throw err;
+      }
     },
 
     flush(

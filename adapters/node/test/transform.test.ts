@@ -167,4 +167,39 @@ describe("createCloakTransformStream", () => {
     const text = Buffer.concat(chunks).toString();
     assert.equal(text, CLEAN_INPUT);
   });
+
+  it("aborts the session when push throws, so the stream errors without leaking", async () => {
+    let aborted = false;
+    const mockEngine: CloakEngine = {
+      redact() {
+        throw new Error("not used in this test");
+      },
+      session() {
+        return {
+          push() {
+            throw new Error("push failed");
+          },
+          finish() {
+            throw new Error("not used in this test");
+          },
+          abort() {
+            aborted = true;
+          },
+        };
+      },
+      dispose() {},
+    };
+
+    const transform = createCloakTransformStream(mockEngine);
+    const source = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(DIRTY_INPUT));
+        controller.close();
+      },
+    });
+
+    const reader = source.pipeThrough(transform).getReader();
+    await assert.rejects(() => reader.read(), /push failed/);
+    assert.ok(aborted, "session must be aborted when push throws");
+  });
 });
