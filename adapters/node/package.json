@@ -11,6 +11,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
     "example:basic": "node --experimental-strip-types --no-warnings examples/basic-redact.ts",
     "example:transform": "node --experimental-strip-types --no-warnings examples/transform-pipe.ts",
@@ -18,7 +19,8 @@
   },
   "devDependencies": {
     "@types/node": "^22",
-    "pino": "^9"
+    "pino": "^9",
+    "typescript": "^7.0.2"
   },
   "license": "MIT",
   "repository": {

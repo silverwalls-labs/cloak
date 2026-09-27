@@ -28,7 +28,12 @@ export function createCloakTransformStream(
 ): TransformStream<Uint8Array, Uint8Array> {
   let session: CloakSession | null = engine.session();
 
-  return new TransformStream<Uint8Array, Uint8Array>({
+  // The Transformer type in @types/node omits `cancel` even though the
+  // Web Streams spec includes it and Node implements it. We define the
+  // object with `cancel` and assert the type so tsc accepts it.
+  const transformer: Transformer<Uint8Array, Uint8Array> & {
+    cancel?(): void;
+  } = {
     transform(
       chunk: Uint8Array,
       controller: TransformStreamDefaultController<Uint8Array>,
@@ -64,5 +69,7 @@ export function createCloakTransformStream(
         session = null;
       }
     },
-  });
+  };
+
+  return new TransformStream<Uint8Array, Uint8Array>(transformer);
 }

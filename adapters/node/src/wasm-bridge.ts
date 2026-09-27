@@ -106,7 +106,7 @@ export class WasmBridge {
     const module = await WebAssembly.compile(wasmBuffer);
     const instance = await WebAssembly.instantiate(
       module,
-      wasi.getImportObject(),
+      wasi.getImportObject() as WebAssembly.Imports,
     );
     wasi.initialize(instance);
 
