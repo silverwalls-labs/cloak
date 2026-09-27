@@ -13,7 +13,7 @@
  * });
  *
  * // One-shot
- * const redacted = engine.redact('token=ghp_AAAA...AAAA');
+ * const { output } = engine.redact('token=ghp_AAAA...AAAA');
  *
  * // Streaming
  * const transform = createCloakTransform(engine);

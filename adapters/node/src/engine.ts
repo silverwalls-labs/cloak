@@ -110,7 +110,7 @@ function toBytes(input: string | Buffer | Uint8Array): Uint8Array {
  * const engine = await createEngine({
  *   redaction: { digestKey: 'env:CLOAK_DIGEST_KEY' },
  * });
- * const redacted = engine.redact('token=ghp_AAAA...AAAA');
+ * const { output } = engine.redact('token=ghp_AAAA...AAAA');
  * engine.dispose();
  * ```
  */
