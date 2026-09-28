@@ -69,4 +69,11 @@ pub static NEGATIVE: &[Vector] = &[
         input: b"aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfi",
         spans: &[],
     },
+    Vector {
+        name: "aws-secret-excessive-whitespace",
+        // F04: 50 spaces between key and separator exceeds the bounded gap —
+        // must NOT match. The streaming engine would split this across chunks.
+        input: b"aws_secret_access_key                                                  = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        spans: &[],
+    },
 ];

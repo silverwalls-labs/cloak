@@ -35,6 +35,9 @@ spec:
         - name: app
           image: your-registry/your-app:latest # must contain the cloak binary
           command: ["/bin/sh", "-c"]
+          # NOTE: in a shell pipeline `app | cloak`, the exit code is
+          # cloak's (zero unless it hits an error). To propagate the app's
+          # exit code, use `set -o pipefail` (bash) or check PIPESTATUS.
           args: ["/usr/local/bin/app 2>&1 | cloak"]
           env:
             - name: CLOAK_DIGEST_KEY

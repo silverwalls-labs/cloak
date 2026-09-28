@@ -303,6 +303,10 @@ fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
 // redact sub-span is what gets replaced. Mirrors engine ConfirmMatch. ---
 
 fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
+    /// F04: max bytes of quotes/whitespace allowed per gap — matches the
+    /// engine's `confirm_aws_secret` bound.
+    const MAX_SEP_GAP: usize = 15;
+
     if start >= input.len() {
         return None;
     }
@@ -320,8 +324,10 @@ fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
         return None;
     }
     let mut pos = key_end;
-    // Skip closing quotes and whitespace before separator.
+    // Skip closing quotes and whitespace before separator (bounded — F04).
+    let gap_start = pos;
     while pos < input.len()
+        && pos - gap_start < MAX_SEP_GAP
         && (input[pos] == b'"' || input[pos] == b'\'' || input[pos] == b' ' || input[pos] == b'\t')
     {
         pos += 1;
@@ -330,7 +336,9 @@ fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
         return None;
     }
     pos += 1;
+    let gap2_start = pos;
     while pos < input.len()
+        && pos - gap2_start < MAX_SEP_GAP
         && (input[pos] == b' ' || input[pos] == b'\t' || input[pos] == b'"' || input[pos] == b'\'')
     {
         pos += 1;
@@ -476,13 +484,15 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<RefSpans> {
         return None;
     }
     let after = start + 3;
-    let at_pos = input[after..]
+    // F09: bound the search window FIRST, then F08: stop at non-userinfo chars.
+    let search_end = (after + 300).min(input.len());
+    let at_pos = input[after..search_end]
         .iter()
-        .position(|&b| b == b'@')
-        .map(|p| after + p)?;
-    if at_pos - after > 300 {
-        return None;
-    }
+        .position(|&b| b == b'@' || !is_userinfo_oracle(b));
+    let at_pos = match at_pos {
+        Some(p) if input[after + p] == b'@' => after + p,
+        _ => return None,
+    };
     let userinfo = &input[after..at_pos];
     let colon_pos = userinfo.iter().position(|&b| b == b':')?;
     let pw_start = after + colon_pos + 1;
@@ -502,6 +512,30 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<RefSpans> {
 
 fn is_scheme_oracle(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.'
+}
+
+/// RFC 3986 userinfo character — mirrors `is_userinfo_char` in validators.rs.
+fn is_userinfo_oracle(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'%'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+        )
 }
 
 fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<RefSpans> {
@@ -524,10 +558,13 @@ fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<RefSpans> {
     if local_start > 0 && (input[local_start - 1] == b':' || input[local_start - 1] == b'/') {
         return None;
     }
-    // Forward: domain.
+    // Forward: domain (capped at 253 bytes per RFC 5321 — F03).
     let domain_start = at_pos + 1;
     let mut domain_end = domain_start;
-    while domain_end < input.len() && is_email_domain_oracle(input[domain_end]) {
+    while domain_end < input.len()
+        && domain_end - domain_start < 253
+        && is_email_domain_oracle(input[domain_end])
+    {
         domain_end += 1;
     }
     let domain = &input[domain_start..domain_end];
@@ -616,19 +653,30 @@ fn parse_u8_ref(bytes: &[u8]) -> u16 {
     v
 }
 
-fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<RefSpans> {
-    // The anchor `::` is 2 bytes — need at least 2 bytes at dc_pos.
-    if dc_pos + 1 >= input.len() || input[dc_pos] != b':' || input[dc_pos + 1] != b':' {
+/// F01: IPv6 anchors — must match the catalog in `rules/mod.rs`.
+const IPV6_ANCHORS: &[&[u8]] = &[
+    b"::", b"2001:", b"2002:", b"2003:", b"2600:", b"2607:", b"2a00:", b"2a01:", b"fe80:", b"fd00:",
+];
+
+/// The oracle only triggers IPv6 at positions where one of the engine's
+/// prefilter anchors matches — aligns with the engine's behavior (a valid
+/// IPv6 address at an un-anchored position is NOT detected, by design).
+fn confirm_ipv6_oracle(input: &[u8], pos: usize) -> Option<RefSpans> {
+    if pos >= input.len() {
         return None;
     }
-    let mut start = dc_pos;
+    // Check that one of the IPv6 anchors matches at this position.
+    if !IPV6_ANCHORS.iter().any(|a| input[pos..].starts_with(a)) {
+        return None;
+    }
+    let mut start = pos;
     while start > 0 && is_ipv6_char_oracle(input[start - 1]) {
         start -= 1;
     }
     if start > 0 && input[start - 1].is_ascii_alphanumeric() {
         return None;
     }
-    let mut end = dc_pos + 2;
+    let mut end = pos;
     while end < input.len() && is_ipv6_ext_oracle(input[end]) {
         end += 1;
     }
@@ -639,6 +687,10 @@ fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<RefSpans> {
         return None;
     }
     let addr = &input[start..end];
+    let total_colons = addr.iter().filter(|&&b| b == b':').count();
+    if total_colons < 2 {
+        return None;
+    }
     if !validate_ipv6_oracle(addr) {
         return None;
     }
@@ -712,11 +764,13 @@ fn is_v4_suffix_oracle(bytes: &[u8]) -> bool {
 }
 
 /// Literal credit-card IIN anchors (catalog: Big Four prefixes).
-const CC_ANCHORS: [&[u8]; 10] = [
+/// F02: added Mastercard 2-series (22-27) and Discover 644-649.
+const CC_ANCHORS: [&[u8]; 22] = [
+    b"22", b"23", b"24", b"25", b"26", b"27", // Mastercard 2-series (2221-2720)
     b"34", b"37", // Amex
     b"4",  // Visa
-    b"51", b"52", b"53", b"54", b"55", // Mastercard
-    b"6011", b"65", // Discover
+    b"51", b"52", b"53", b"54", b"55", // Mastercard 51-55
+    b"6011", b"644", b"645", b"646", b"647", b"648", b"649", b"65", // Discover
 ];
 
 fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
@@ -785,17 +839,29 @@ fn luhn_oracle(digits: &[u8]) -> bool {
     sum.is_multiple_of(10)
 }
 
+/// F02: mirrors `iin_check` in validators.rs — includes Mastercard 2-series
+/// (2221–2720) and Discover 644–649.
 fn iin_oracle(digits: &[u8]) -> bool {
     if digits.is_empty() {
         return false;
     }
     match digits[0] {
-        b'4' => true,
+        b'2' if digits.len() >= 4 => {
+            let prefix = (digits[0] - b'0') as u16 * 1000
+                + (digits[1] - b'0') as u16 * 100
+                + (digits[2] - b'0') as u16 * 10
+                + (digits[3] - b'0') as u16;
+            (2221..=2720).contains(&prefix)
+        }
         b'3' if digits.len() >= 2 && (digits[1] == b'4' || digits[1] == b'7') => true,
+        b'4' => true,
         b'5' if digits.len() >= 2 && digits[1] >= b'1' && digits[1] <= b'5' => true,
         b'6' if digits.len() >= 2 => {
             if digits[1] == b'5' {
                 return true;
+            }
+            if digits.len() >= 3 && digits[1] == b'4' && digits[2] >= b'4' && digits[2] <= b'9' {
+                return true; // 644-649
             }
             digits.len() >= 4 && digits[1] == b'0' && digits[2] == b'1' && digits[3] == b'1'
         }

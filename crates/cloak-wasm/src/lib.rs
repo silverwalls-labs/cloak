@@ -46,20 +46,22 @@ use cloak_core::{Config, Engine, Session, Stats};
 
 // ── Handle encoding ─────────────────────────────────────────────────
 
-/// Opaque handle layout: `[tag:1][generation:7][idx:24]`.
+/// Opaque handle layout: `[tag:1][generation:15][idx:16]`.
 ///
 /// - The tag separates engines from sessions, so a handle of one kind
 ///   can never address the other table.
 /// - The generation is bumped on slot reuse, so a stale handle from a
 ///   removed object no longer matches once the slot is reissued.
+///   15-bit generation wraps after 32 768 reuses per slot (issue #41,
+///   F11: the previous 7-bit layout wrapped after only 128).
 /// - Index 0 is never issued, keeping `0` a pure error sentinel.
 mod handle {
     pub const ENGINE: u32 = 0;
     pub const SESSION: u32 = 1;
 
-    pub const GEN_BITS: u32 = 7;
+    pub const GEN_BITS: u32 = 15;
     pub const GEN_MASK: u32 = (1 << GEN_BITS) - 1;
-    const IDX_BITS: u32 = 24;
+    const IDX_BITS: u32 = 16;
     /// Highest issuable index; the table holds at most `MAX_IDX` slots.
     pub const MAX_IDX: u32 = (1 << IDX_BITS) - 1;
 
@@ -102,7 +104,7 @@ impl<T> Slab<T> {
     }
 
     /// Insert `value`, returning `(idx, generation)` for the handle, or `None`
-    /// when the 24-bit index space is exhausted.
+    /// when the 16-bit index space is exhausted.
     fn insert(&mut self, value: T) -> Option<(u32, u32)> {
         if let Some(idx) = self.free.pop() {
             let generation = (self.gens[idx as usize] + 1) & handle::GEN_MASK;
@@ -1238,5 +1240,30 @@ mod tests {
         // Cleanup.
         assert_eq!(cloakwasm_session_free(session), 1);
         assert_eq!(cloakwasm_engine_free(engine), 1);
+    }
+
+    // ── F11: generation-wrap stale-handle rejection ───────────────
+
+    #[test]
+    fn stale_handle_rejected_past_old_gen_wrap() {
+        // F11: with the old 7-bit generation, cycle 128 would wrap and
+        // alias a live object. With 15-bit generations the handle from
+        // cycle 0 must still be stale after 200 reuses of the same slot.
+        let mut slab: Slab<u32> = Slab::new();
+        let (idx, gen0) = slab.insert(42).unwrap();
+
+        // Remove and re-insert 200 times (past old 128 wrap boundary).
+        for i in 0..200u32 {
+            let current_gen = slab.gens[idx as usize];
+            slab.remove(idx, current_gen).expect("remove must succeed");
+            let (reused_idx, _) = slab.insert(i).unwrap();
+            assert_eq!(reused_idx, idx, "slot must be reused from the free list");
+        }
+
+        // The original handle's generation must no longer match.
+        assert!(
+            slab.get(idx, gen0).is_none(),
+            "stale handle from 200 cycles ago must not alias a live object"
+        );
     }
 }

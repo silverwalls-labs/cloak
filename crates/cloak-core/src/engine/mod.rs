@@ -1233,4 +1233,19 @@ mod tests {
             "PEM body must be redacted: {out_str}"
         );
     }
+
+    #[test]
+    fn f01_ipv6_fully_expanded_detected() {
+        // F01: fully expanded 8-group IPv6 with no `::` must be detected.
+        let engine = test_engine();
+        let input = b"2001:0db8:85a3:0000:0000:8a2e:0370:7334";
+        let (out, stats) = push_all(&engine, input);
+        let ipv6 = crate::types::RuleId::new("ipv6");
+        assert_eq!(
+            stats.matches.get(&ipv6),
+            Some(&1),
+            "fully expanded IPv6 must be detected: {}",
+            String::from_utf8_lossy(&out)
+        );
+    }
 }

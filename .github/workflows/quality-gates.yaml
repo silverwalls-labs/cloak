@@ -237,6 +237,7 @@ jobs:
           # (currently #[ignore]d) tests in tests/differential.rs. Set
           # CLOAK_FUZZ_STRICT=1 to replay them with full equivalence checks
           # once those bugs are fixed.
+          # F15: add CLOAK_FUZZ_STRICT=1 here once #27 and #34 are resolved.
           for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do
             cargo fuzz run "$t" "fuzz/corpus/$t" -O --debug-assertions -- -runs=0 -timeout=10
           done
@@ -397,6 +398,14 @@ jobs:
           cargo run --example export-vectors -p cloak-core > /tmp/vectors-fresh.json
           diff adapters/node/test/fixtures/vectors.json /tmp/vectors-fresh.json \
             || { echo "::error::vectors.json is stale — regenerate with: cargo run --example export-vectors -p cloak-core > adapters/node/test/fixtures/vectors.json"; exit 1; }
+
+      - name: Install Node dependencies
+        working-directory: adapters/node
+        run: npm install
+
+      - name: TypeScript type check (F17)
+        working-directory: adapters/node
+        run: npm run typecheck
 
       - name: Node parity + streaming + transform tests
         env:
@@ -593,6 +602,10 @@ jobs:
           read -r e2e_l e2e_f e2e_b e2e_raw <<< "$(parse_lcov coverage/e2e.lcov)"
 
           # ── Total (merge all LCOV files) ──
+          # NOTE: The total sums LF/LH across tiers, which double-counts lines
+          # covered by multiple tiers. This is an upper bound; a proper merge
+          # (e.g. llvm-profdata merge or lcov --add-tracefile) is tracked as a
+          # follow-up (issue #41, F16). The per-tier percentages are accurate.
           total_lf=0 total_lh=0 total_fnf=0 total_fnh=0 total_brf=0 total_brh=0
           for f in coverage/*.lcov; do
             [ -f "$f" ] || continue

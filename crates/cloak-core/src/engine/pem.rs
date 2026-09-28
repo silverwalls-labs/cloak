@@ -36,6 +36,12 @@ pub const PEM_RULE_ID: &str = "pem-private-key";
 
 /// Default body-size bail-out (bytes). If the body between BEGIN and END
 /// exceeds this limit, the engine emits a tag and resumes normal scanning.
+///
+/// **Limitation (F05):** after bail-out, the body tail between the
+/// truncation point and the END marker is handed back for normal
+/// scanning — those bytes may contain private key material that is not
+/// redacted as PEM. A future improvement would add a `DrainToEnd` state
+/// that suppresses the tail until the END marker is found.
 pub(crate) const PEM_BAIL_OUT: usize = 16_384; // 16 KiB
 
 /// Suffix that closes both BEGIN and END lines.

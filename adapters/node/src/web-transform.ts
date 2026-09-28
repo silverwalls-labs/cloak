@@ -58,9 +58,16 @@ export function createCloakTransformStream(
       controller: TransformStreamDefaultController<Uint8Array>,
     ): void {
       if (!session) return;
-      const { output } = session.finish();
-      if (output.length > 0) controller.enqueue(new Uint8Array(output));
-      session = null;
+      try {
+        const { output } = session.finish();
+        if (output.length > 0) controller.enqueue(new Uint8Array(output));
+      } catch (err) {
+        // Release the session so `engine.dispose()` is not blocked.
+        session.abort();
+        throw err;
+      } finally {
+        session = null;
+      }
     },
 
     cancel(): void {

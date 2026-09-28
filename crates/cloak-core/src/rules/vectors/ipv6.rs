@@ -1,6 +1,7 @@
 //! Vectors for `ipv6` (docs/02-rules.md).
 //!
-//! RFC-4291 grammar with `::` compression. Anchor: `::`.
+//! RFC-4291 grammar with `::` compression and fully expanded form.
+//! Anchors: `::` plus common IPv6 prefix patterns (F01: `2001:`, `fe80:`, etc.).
 
 use super::{ExpectedSpan, Vector};
 
@@ -60,6 +61,26 @@ pub static POSITIVE: &[Vector] = &[
             rule: "ipv6",
         }],
     },
+    // F01: fully expanded 8-group addresses (no `::`).
+    Vector {
+        name: "ipv6-fully-expanded",
+        input: b"2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 39,
+            rule: "ipv6",
+        }],
+    },
+    Vector {
+        name: "ipv6-fully-expanded-embedded",
+        // "addr=" = 5 bytes, then 39-byte expanded IPv6.
+        input: b"addr=2001:0db8:85a3:0000:0000:8a2e:0370:7334 ok\n",
+        spans: &[ExpectedSpan {
+            start: 5,
+            end: 44,
+            rule: "ipv6",
+        }],
+    },
 ];
 
 pub static NEGATIVE: &[Vector] = &[
@@ -79,6 +100,18 @@ pub static NEGATIVE: &[Vector] = &[
         name: "ipv6-alnum-boundary",
         // Preceded by an alnum — not a clean boundary.
         input: b"x::1",
+        spans: &[],
+    },
+    Vector {
+        name: "ipv6-json-key-value",
+        // F01: JSON key:value must not trigger IPv6 detection.
+        input: b"{\"host\":\"example.com\"}",
+        spans: &[],
+    },
+    Vector {
+        name: "ipv6-timestamp",
+        // F01: timestamp with colons must not trigger IPv6 detection.
+        input: b"2024-01-15T10:30:45Z",
         spans: &[],
     },
 ];

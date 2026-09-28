@@ -147,7 +147,15 @@ pub(crate) fn confirm_npm_token(haystack: &[u8], anchor: usize) -> Option<Confir
 /// Looks forward from the anchor for a separator (`_access_key` suffix if
 /// needed, then `=`, `:`, or `":`), optional whitespace and quotes, then
 /// a 40-char base64 value. Returns the value sub-span only.
+///
+/// F04: whitespace/quote scanning is bounded to 15 bytes per gap to
+/// prevent arbitrarily long whitespace from exceeding the rule's window.
 pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+    /// Max bytes of quotes/whitespace allowed between key name and
+    /// separator, and between separator and value. Keeps the total scan
+    /// well within the rule's 70-byte window.
+    const MAX_SEP_GAP: usize = 15;
+
     let rest = &haystack[anchor..];
     // Determine key name end — skip past the full key name.
     let key_end = if rest.starts_with(b"aws_secret_access_key") {
@@ -164,7 +172,9 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
     // Scan for separator: skip optional quotes, whitespace, then `=`, `:`.
     let mut pos = key_end;
     // Skip closing quote if JSON key: `"SecretAccessKey":`
+    let gap_start = pos;
     while pos < haystack.len()
+        && pos - gap_start < MAX_SEP_GAP
         && (haystack[pos] == b'"'
             || haystack[pos] == b'\''
             || haystack[pos] == b' '
@@ -182,7 +192,9 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
         return None;
     }
     // Skip whitespace and optional quotes after separator.
+    let gap2_start = pos;
     while pos < haystack.len()
+        && pos - gap2_start < MAX_SEP_GAP
         && (haystack[pos] == b' '
             || haystack[pos] == b'\t'
             || haystack[pos] == b'"'
@@ -277,6 +289,11 @@ const CONN_SCHEMES: &[&[u8]] = &[
 ///
 /// Anchor: `://`. Looks backward for a known scheme, forward for
 /// `user:PASSWORD@host`. Returns the PASSWORD sub-span only.
+///
+/// F08: the `@` search is bounded to valid userinfo characters (RFC 3986)
+/// so unrelated `@` signs in later text cannot cause false redaction.
+/// F09: the 300-byte limit is applied BEFORE the search, not after, to
+/// prevent quadratic CPU on repeated `://` anchors.
 pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
     // Anchor is `://` at `anchor`. Look backward for a scheme.
     let scheme_end = anchor;
@@ -290,15 +307,19 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     }
     // After `://`, find `user:password@host` structure.
     let after_scheme = anchor + 3; // skip `://`
-    // Find the `@` that separates credentials from host.
-    let at_pos = haystack[after_scheme..]
+    // F09: bound the search window FIRST — never scan past 300 bytes.
+    let search_end = (after_scheme + 300).min(haystack.len());
+    // F08: find the `@` but stop at any character that is not valid in
+    // RFC 3986 userinfo (unreserved / pct-encoded / sub-delims / `:`).
+    // This prevents the search from crossing into unrelated text.
+    let at_pos = haystack[after_scheme..search_end]
         .iter()
-        .position(|&b| b == b'@')
-        .map(|p| after_scheme + p)?;
-    // Cap the search window — don't scan past 300 bytes.
-    if at_pos - after_scheme > 300 {
-        return None;
-    }
+        .position(|&b| b == b'@' || !is_userinfo_char(b));
+    // Must have found `@` specifically, not just a terminator.
+    let at_pos = match at_pos {
+        Some(p) if haystack[after_scheme + p] == b'@' => after_scheme + p,
+        _ => return None,
+    };
     // Find the `:` that separates user from password (first `:` after `://`).
     let userinfo = &haystack[after_scheme..at_pos];
     let colon_pos = userinfo.iter().position(|&b| b == b':')?;
@@ -324,6 +345,30 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
 
 fn is_scheme_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.'
+}
+
+/// RFC 3986 userinfo character: unreserved / pct-encoded / sub-delims / `:`.
+fn is_userinfo_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'%'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+        )
 }
 
 // ── jwt ─────────────────────────────────────────────────────────────
@@ -489,30 +534,50 @@ fn luhn_check(digits: &[u8]) -> bool {
 }
 
 /// Big Four IIN prefix check.
+///
+/// F02: includes Mastercard 2-series (2221–2720) and Discover 644–649
+/// ranges that were previously missing.
 fn iin_check(digits: &[u8]) -> bool {
     if digits.is_empty() {
         return false;
     }
     let d0 = digits[0];
     match d0 {
-        // Visa
-        b'4' => true,
+        // Mastercard 2-series (2221–2720): 4-digit range check.
+        b'2' if digits.len() >= 4 => {
+            let prefix = iin_prefix_4(digits);
+            (2221..=2720).contains(&prefix)
+        }
         // Amex
         b'3' if digits.len() >= 2 && (digits[1] == b'4' || digits[1] == b'7') => true,
+        // Visa
+        b'4' => true,
         // Mastercard 51-55
         b'5' if digits.len() >= 2 && digits[1] >= b'1' && digits[1] <= b'5' => true,
-        // Discover 6011 or 65
+        // Discover 6011, 644-649, 65
         b'6' if digits.len() >= 2 => {
             if digits[1] == b'5' {
                 return true;
             }
+            if digits.len() >= 3 && digits[1] == b'4' && digits[2] >= b'4' && digits[2] <= b'9' {
+                return true; // 644-649
+            }
             if digits.len() >= 4 && digits[1] == b'0' && digits[2] == b'1' && digits[3] == b'1' {
-                return true;
+                return true; // 6011
             }
             false
         }
         _ => false,
     }
+}
+
+/// Parse the first 4 ASCII digits as a u16 for IIN range checks.
+fn iin_prefix_4(digits: &[u8]) -> u16 {
+    debug_assert!(digits.len() >= 4);
+    (digits[0] - b'0') as u16 * 1000
+        + (digits[1] - b'0') as u16 * 100
+        + (digits[2] - b'0') as u16 * 10
+        + (digits[3] - b'0') as u16
 }
 
 // ── email ───────────────────────────────────────────────────────────
@@ -538,10 +603,13 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
     if local_start > 0 && (haystack[local_start - 1] == b':' || haystack[local_start - 1] == b'/') {
         return None;
     }
-    // Forward: domain.
+    // Forward: domain (capped at 253 bytes per RFC 5321 — F03).
     let domain_start = anchor + 1;
     let mut domain_end = domain_start;
-    while domain_end < haystack.len() && is_email_domain_char(haystack[domain_end]) {
+    while domain_end < haystack.len()
+        && domain_end - domain_start < 253
+        && is_email_domain_char(haystack[domain_end])
+    {
         domain_end += 1;
     }
     let domain = &haystack[domain_start..domain_end];
@@ -646,9 +714,14 @@ fn parse_u8_unchecked(bytes: &[u8]) -> u16 {
 
 /// Custom confirm for `ipv6`.
 ///
-/// Anchor: `::`. Scans backward and forward to collect hex groups
-/// separated by `:`. Validates bounded RFC-4291 grammar including `::`
-/// compression. Also handles `::ffff:1.2.3.4` (v4-mapped).
+/// Anchors: `::` plus common IPv6 prefix patterns (F01: `2001:`, `fe80:`,
+/// etc.). Scans backward and forward to collect hex groups separated by
+/// `:`. Validates bounded RFC-4291 grammar including `::` compression.
+/// Also handles `::ffff:1.2.3.4` (v4-mapped).
+///
+/// F01: prefix-based anchors detect fully expanded 8-group addresses
+/// that contain no `::`. The confirm function scans bidirectionally from
+/// the anchor to collect the full address.
 pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
     // Find the start of the IPv6 address: back up through hex chars and colons.
     let mut start = anchor;
@@ -659,8 +732,8 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     if start > 0 && haystack[start - 1].is_ascii_alphanumeric() {
         return None;
     }
-    // Find the end: forward through hex chars, colons, dots (v4-mapped).
-    let mut end = anchor + 2; // skip `::`
+    // Find the end: scan forward through hex chars, colons, dots (v4-mapped).
+    let mut end = anchor;
     while end < haystack.len() && is_ipv6_ext_char(haystack[end]) {
         end += 1;
     }
@@ -672,8 +745,13 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     if end < haystack.len() && haystack[end].is_ascii_alphanumeric() {
         return None;
     }
-    // Parse and validate the address.
+    // The span must contain at least 2 colons to be a valid IPv6 address.
     let addr = &haystack[start..end];
+    let total_colons = addr.iter().filter(|&&b| b == b':').count();
+    if total_colons < 2 {
+        return None;
+    }
+    // Parse and validate the address.
     if !validate_ipv6(addr) {
         return None;
     }

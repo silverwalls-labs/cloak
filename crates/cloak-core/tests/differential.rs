@@ -194,7 +194,7 @@ fn every_vector_various_chunk_sizes() {
 /// The fuzz harness therefore gates all three equivalences behind strict
 /// mode (`fuzz/src/common.rs`).
 #[test]
-#[ignore = "flush-boundary context loss beyond max_window — issue #27"]
+#[ignore = "flush-boundary context loss beyond max_window — issue #27 (F06: re-enable once #27 is fixed)"]
 fn concatenated_corpora_1byte_chunks() {
     let (engine, key) = engine_and_key();
     let separators: [&[u8]; 4] = [b"\n", b" ", b"\x00\xff\x80", b""];
@@ -355,7 +355,7 @@ fn redaction_is_idempotent() {
 /// `+` in pass 1 (preceded by alphanumeric), but after redaction it is
 /// preceded by the tag's `]` and matches in pass 2.
 #[test]
-#[ignore = "backward-guard context erased by adjacent redaction — issue #34"]
+#[ignore = "backward-guard context erased by adjacent redaction — issue #34 (F06: re-enable once #34 is fixed)"]
 fn idempotence_survives_tag_adjacent_context() {
     let (engine, _key) = engine_and_key();
     let mut input = Vec::from(&b"\x00\xff"[..]);

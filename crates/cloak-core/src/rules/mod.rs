@@ -148,7 +148,23 @@ pub static CATALOG: &[RuleSpec] = &[
     },
     RuleSpec {
         id: "ipv6",
-        anchors: &[b"::"],
+        // F01: added common IPv6 prefix anchors (≥4 bytes each) to catch
+        // fully expanded 8-group addresses that contain no `::`. Short
+        // anchors (fd, fc, ff0) are omitted — they trigger too frequently
+        // on binary data and expose the known streaming flush-boundary
+        // divergence (#27). This is a best-effort coverage tradeoff.
+        anchors: &[
+            b"::",    // compressed (original)
+            b"2001:", // global unicast (IANA 2001::/16)
+            b"2002:", // 6to4 relay
+            b"2003:", // global unicast
+            b"2600:", // global unicast
+            b"2607:", // global unicast (common US providers)
+            b"2a00:", // global unicast (RIPE)
+            b"2a01:", // global unicast (RIPE)
+            b"fe80:", // link-local
+            b"fd00:", // unique local (common ULA prefix)
+        ],
         confirm: ConfirmSpec::Custom(validators::confirm_ipv6),
         // Max IPv6 text: ~45.
         window: 50,
@@ -156,11 +172,15 @@ pub static CATALOG: &[RuleSpec] = &[
     RuleSpec {
         id: "credit-card",
         // Big Four IIN prefixes.
+        // F02: added Mastercard 2-series (22-27) and Discover 644-649.
+        // 2-digit anchors are used for the 2-series to cover the full
+        // 2221-2720 range; the IIN check validates the 4-digit prefix.
         anchors: &[
+            b"22", b"23", b"24", b"25", b"26", b"27", // Mastercard 2-series (2221-2720)
             b"34", b"37", // Amex
             b"4",  // Visa
-            b"51", b"52", b"53", b"54", b"55", // Mastercard
-            b"6011", b"65", // Discover
+            b"51", b"52", b"53", b"54", b"55", // Mastercard 51-55
+            b"6011", b"644", b"645", b"646", b"647", b"648", b"649", b"65", // Discover
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_credit_card),
         // 19 digits + 6 separators.

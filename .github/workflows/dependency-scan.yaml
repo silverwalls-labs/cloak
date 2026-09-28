@@ -39,6 +39,9 @@ jobs:
           echo "${OSV_SHA256}  osv-scanner" | sha256sum -c -
           chmod +x osv-scanner
           ./osv-scanner --lockfile=Cargo.lock
+          # The fuzz crate is workspace-excluded with its own lockfile —
+          # scan it separately (issue #41, F19).
+          ./osv-scanner --lockfile=crates/cloak-core/fuzz/Cargo.lock
 
   cargo-audit:
     name: Cargo Audit
@@ -63,3 +66,6 @@ jobs:
       - name: Audit
         run: |
           cargo audit
+          # The fuzz crate is workspace-excluded with its own lockfile —
+          # audit it separately (issue #41, F19).
+          cargo audit --file crates/cloak-core/fuzz/Cargo.lock

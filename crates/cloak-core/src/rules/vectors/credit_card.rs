@@ -70,6 +70,35 @@ pub static POSITIVE: &[Vector] = &[
             rule: "credit-card",
         }],
     },
+    // F02: Mastercard 2-series (2221-2720) — previously missed.
+    Vector {
+        name: "cc-mastercard-2series-low",
+        input: b"2223000000000007",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 16,
+            rule: "credit-card",
+        }],
+    },
+    Vector {
+        name: "cc-mastercard-2series-high",
+        input: b"2720000000000005",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 16,
+            rule: "credit-card",
+        }],
+    },
+    // F02: Discover 644x — previously missed.
+    Vector {
+        name: "cc-discover-644",
+        input: b"6440000000000005",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 16,
+            rule: "credit-card",
+        }],
+    },
 ];
 
 pub static NEGATIVE: &[Vector] = &[
@@ -109,6 +138,19 @@ pub static NEGATIVE: &[Vector] = &[
         // fuzz_engine_stream: the oracle used to strip separators before
         // the IIN check and diverged from the engine's prefilter).
         input: b"g3 745676234567",
+        spans: &[],
+    },
+    // F02: Mastercard 2-series out-of-range boundaries (Luhn-valid but wrong IIN).
+    Vector {
+        name: "cc-2series-below-range",
+        // 2100 is below the 2221-2720 range.
+        input: b"2100000000000005",
+        spans: &[],
+    },
+    Vector {
+        name: "cc-2series-above-range",
+        // 2721 is above the 2221-2720 range.
+        input: b"2721000000000004",
         spans: &[],
     },
 ];

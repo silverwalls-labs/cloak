@@ -108,4 +108,18 @@ pub static NEGATIVE: &[Vector] = &[
         input: b"redis://default:[CLOAK:connection-string:aea0]@redis:6379",
         spans: &[],
     },
+    Vector {
+        name: "connstring-distant-at-no-redact",
+        // F08: whitespace terminates userinfo — the connection-string rule
+        // must NOT match here. (The email rule still fires on user@example.com.)
+        input: b"postgres://admin:pass then data",
+        spans: &[],
+    },
+    Vector {
+        name: "connstring-path-terminates-userinfo",
+        // F08: a `/` after the password terminates the userinfo search;
+        // the `@` in the path must not be used as the userinfo delimiter.
+        input: b"postgres://admin:pass/path@unrelated",
+        spans: &[],
+    },
 ];
