@@ -69,6 +69,9 @@ pub(crate) struct CompiledRule {
     pub id: RuleId,
     /// Max match window `W` (bounds the candidate window; S3 carry-over).
     pub window: usize,
+    /// Backward reach `B` — the confirm step never examines bytes before
+    /// `anchor_start - back`. Used by the carry-over boundary logic (#27).
+    pub back: usize,
     confirm_impl: ConfirmImpl,
 }
 
@@ -107,6 +110,7 @@ pub(crate) fn compile_rule(spec: &RuleSpec) -> Result<CompiledRule, BuildError> 
     Ok(CompiledRule {
         id: RuleId::new(spec.id),
         window: spec.window,
+        back: spec.back,
         confirm_impl,
     })
 }
@@ -317,6 +321,7 @@ mod tests {
             anchors: &[b"x_"],
             confirm: ConfirmSpec::Pattern("("), // unclosed group — cannot compile
             window: 10,
+            back: 0,
         };
         match compile_rule(&bad) {
             Err(BuildError::Confirm { rule, .. }) => {

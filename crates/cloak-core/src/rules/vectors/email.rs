@@ -51,7 +51,33 @@ pub static POSITIVE: &[Vector] = &[
             rule: "email",
         }],
     },
+    Vector {
+        name: "email-long-local-capped",
+        // #41 review: locals beyond the 64-byte cap are CAPPED, not
+        // rejected — the span covers the final 64 local bytes plus `@`
+        // and the domain: @ at 100, span [36, 112).
+        input: LONG_LOCAL_INPUT,
+        spans: &[ExpectedSpan {
+            start: 36,
+            end: 112,
+            rule: "email",
+        }],
+    },
 ];
+
+/// `b"a"*100 + b"@example.com"` — a local part longer than the 64-byte
+/// RFC 5321 cap (#41 review). Built in a const block: vectors are static.
+const LONG_LOCAL_ARR: [u8; 112] = {
+    let mut v = [b'a'; 112];
+    v[100] = b'@';
+    let mut i = 0;
+    while i < 11 {
+        v[101 + i] = b"example.com"[i];
+        i += 1;
+    }
+    v
+};
+const LONG_LOCAL_INPUT: &[u8] = &LONG_LOCAL_ARR;
 
 pub static NEGATIVE: &[Vector] = &[
     Vector {

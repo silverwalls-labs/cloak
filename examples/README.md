@@ -15,9 +15,10 @@ cloak --config examples/cloak.toml < in   # per-rule enable/disable
 
 Exit codes: `0` clean — including a broken pipe downstream (cloak catches
 SIGPIPE and exits 0), so `app | cloak | head` exits cleanly when `head`
-finishes. Note: the shell may still deliver SIGPIPE to earlier pipeline
-stages depending on buffering and timing. `1` operational error (bad config,
-missing file), `2` usage error.
+finishes — this assumes `pipefail` is DISABLED (the default): with
+`set -o pipefail`, `app` receiving SIGPIPE from the early-closing `head`
+can make the whole pipeline exit non-zero. `1` operational error (bad
+config, missing file), `2` usage error.
 
 ## Stats
 

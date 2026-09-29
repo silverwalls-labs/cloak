@@ -295,31 +295,46 @@ const CONN_SCHEMES: &[&[u8]] = &[
 /// F09: the 300-byte limit is applied BEFORE the search, not after, to
 /// prevent quadratic CPU on repeated `://` anchors.
 pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
-    // Anchor is `://` at `anchor`. Look backward for a scheme.
+    // Anchor is `://` at `anchor`. Look backward for a scheme — bounded
+    // at 12 bytes (the longest scheme, `mongodb+srv`, is 11). The bound
+    // keeps the confirm independent of the carry buffer start (#27); it
+    // cannot change the outcome because every accepted scheme is fully
+    // covered by the bound.
     let scheme_end = anchor;
+    let scheme_earliest = anchor.saturating_sub(12);
     let mut scheme_start = anchor;
-    while scheme_start > 0 && is_scheme_char(haystack[scheme_start - 1]) {
+    while scheme_start > scheme_earliest && is_scheme_char(haystack[scheme_start - 1]) {
         scheme_start -= 1;
     }
     let scheme = &haystack[scheme_start..scheme_end];
     if !CONN_SCHEMES.iter().any(|s| scheme.eq_ignore_ascii_case(s)) {
         return None;
     }
-    // After `://`, find `user:password@host` structure.
+    // After `://`, find the authority segment `user[:password]@host`.
     let after_scheme = anchor + 3; // skip `://`
     // F09: bound the search window FIRST — never scan past 300 bytes.
     let search_end = (after_scheme + 300).min(haystack.len());
-    // F08: find the `@` but stop at any character that is not valid in
-    // RFC 3986 userinfo (unreserved / pct-encoded / sub-delims / `:`).
-    // This prevents the search from crossing into unrelated text.
-    let at_pos = haystack[after_scheme..search_end]
-        .iter()
-        .position(|&b| b == b'@' || !is_userinfo_char(b));
-    // Must have found `@` specifically, not just a terminator.
-    let at_pos = match at_pos {
-        Some(p) if haystack[after_scheme + p] == b'@' => after_scheme + p,
-        _ => return None,
-    };
+    // F08: the segment scan stops at any byte that is not valid in an
+    // RFC 3986 authority (userinfo, `@`, or the `[`/`]` of IPv6 host
+    // literals) — this prevents the search from crossing into
+    // unrelated text or past the host.
+    let mut seg_end = after_scheme;
+    while seg_end < search_end && is_authority_char(haystack[seg_end]) {
+        seg_end += 1;
+    }
+    let segment = &haystack[after_scheme..seg_end];
+    // The `@` that separates userinfo from host is the LAST `@` in the
+    // segment — passwords may themselves contain `@` (e.g.
+    // `postgres://admin:p@ss@db`): masking must cover the complete
+    // password, so the split is at the final `@`, not the first.
+    let rel_at = segment.iter().rposition(|&b| b == b'@')?;
+    let at_pos = after_scheme + rel_at;
+    // Require a host after the `@` (#41 review): `user:pass@` with
+    // nothing after it is not a credential-bearing URL, and redacting
+    // `pass` there is a false positive (F08).
+    if at_pos + 1 >= seg_end {
+        return None;
+    }
     // Find the `:` that separates user from password (first `:` after `://`).
     let userinfo = &haystack[after_scheme..at_pos];
     let colon_pos = userinfo.iter().position(|&b| b == b':')?;
@@ -345,6 +360,13 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
 
 fn is_scheme_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.'
+}
+
+/// RFC 3986 authority character: userinfo (unreserved / pct-encoded /
+/// sub-delims / `:`), the `@` separator itself, and the brackets of
+/// IPv6 host literals.
+fn is_authority_char(b: u8) -> bool {
+    b == b'@' || b == b'[' || b == b']' || is_userinfo_char(b)
 }
 
 /// RFC 3986 userinfo character: unreserved / pct-encoded / sub-delims / `:`.
@@ -587,9 +609,16 @@ fn iin_prefix_4(digits: &[u8]) -> u16 {
 /// Anchor: `@`. Backward-looking: scans left for the local part and
 /// right for the domain. RFC-5322-practical subset.
 pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
-    // Backward: local part.
+    // Backward: local part — capped at 64 bytes (RFC 5321, #41 review).
+    // The cap is load-bearing for streaming parity: an unbounded scan
+    // makes the span depend on where the carry buffer starts, so the
+    // same input redacts differently whole-buffer vs chunked. Locals
+    // longer than 64 bytes are capped, not rejected — the span covers
+    // the final 64 local bytes plus `@` and the domain.
+    let local_cap = 64;
+    let earliest = anchor.saturating_sub(local_cap);
     let mut local_start = anchor;
-    while local_start > 0 && is_email_local_char(haystack[local_start - 1]) {
+    while local_start > earliest && is_email_local_char(haystack[local_start - 1]) {
         local_start -= 1;
     }
     if local_start == anchor {
@@ -723,34 +752,59 @@ fn parse_u8_unchecked(bytes: &[u8]) -> u16 {
 /// that contain no `::`. The confirm function scans bidirectionally from
 /// the anchor to collect the full address.
 pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
-    // Find the start of the IPv6 address: back up through hex chars and colons.
+    // Both scans are capped at 45 bytes from the anchor (the max IPv6
+    // text length). The caps are load-bearing for streaming parity
+    // (#27/#41): with a generic `:` anchor the confirm fires on every
+    // colon, and unbounded scans would make the span depend on where the
+    // carry buffer starts — the same input would redact differently
+    // whole-buffer vs chunked.
+    let cap = 45;
+    // Colons seen before and at/after the anchor — counted during the
+    // scans so the (frequent) `< 2 colons` reject needs no extra pass
+    // over the span. The anchor byte itself is always a colon.
+    let mut colons_before = 1;
+    // Find the start of the IPv6 address: back up through hex chars and
+    // colons, at most `cap` bytes.
+    let earliest = anchor.saturating_sub(cap);
     let mut start = anchor;
-    while start > 0 && is_ipv6_char(haystack[start - 1]) {
+    while start > earliest && is_ipv6_char(haystack[start - 1]) {
+        colons_before += (haystack[start - 1] == b':') as u8;
         start -= 1;
     }
     // Non-hex/colon boundary before.
     if start > 0 && haystack[start - 1].is_ascii_alphanumeric() {
         return None;
     }
-    // Find the end: scan forward through hex chars, colons, dots (v4-mapped).
+    // Mid-run truncation: the backward scan hit the cap but the run
+    // continues — the full run exceeds 45 bytes, so no slice of it is a
+    // valid address. (`earliest == 0` needs no check: the engine never
+    // confirms a candidate whose 45-byte backward window is truncated by
+    // the carry buffer start, and at the stream start 0 IS the run start.)
+    if earliest > 0 && start == earliest && is_ipv6_char(haystack[start - 1]) {
+        return None;
+    }
+    // Find the end: scan forward through hex chars, colons, dots
+    // (v4-mapped), at most `cap` bytes from the start.
     let mut end = anchor;
-    while end < haystack.len() && is_ipv6_ext_char(haystack[end]) {
+    let mut colons_after = 0;
+    while end < haystack.len() && end - start < cap && is_ipv6_ext_char(haystack[end]) {
+        colons_after += (haystack[end] == b':') as u8;
         end += 1;
     }
-    // Cap at 45 bytes.
-    if end - start > 45 {
+    // Mid-run truncation on the forward side, same reasoning.
+    if end - start == cap && end < haystack.len() && is_ipv6_ext_char(haystack[end]) {
         return None;
     }
     // Non-hex boundary after.
     if end < haystack.len() && haystack[end].is_ascii_alphanumeric() {
         return None;
     }
-    // The span must contain at least 2 colons to be a valid IPv6 address.
-    let addr = &haystack[start..end];
-    let total_colons = addr.iter().filter(|&&b| b == b':').count();
-    if total_colons < 2 {
+    // The span must contain at least 2 colons to be a valid IPv6
+    // address (cheap reject for the bulk of colon-anchor noise).
+    if (colons_before + colons_after) < 2 {
         return None;
     }
+    let addr = &haystack[start..end];
     // Parse and validate the address.
     if !validate_ipv6(addr) {
         return None;
@@ -768,56 +822,63 @@ fn is_ipv6_ext_char(b: u8) -> bool {
 
 /// Validate an IPv6 address byte slice.
 fn validate_ipv6(addr: &[u8]) -> bool {
-    // Split on `::` — at most one occurrence.
-    let parts: Vec<&[u8]> = split_on_double_colon(addr);
-    match parts.len() {
-        1 => {
-            // No `::` compression — must have exactly 8 groups.
-            let groups: Vec<&[u8]> = parts[0].split(|&b| b == b':').collect();
-            groups.len() == 8 && groups.iter().all(|g| is_hex_group(g))
-        }
-        2 => {
-            // `::` compression — left + right groups ≤ 8.
-            let left: Vec<&[u8]> = if parts[0].is_empty() {
-                vec![]
+    // The no-`::` fast path is allocation-free: it runs on every
+    // colon-shaped prefilter candidate (timestamps, JSON, C++ scope
+    // operators) and per-candidate Vec splitting dominated the
+    // clean-path cost with the generic colon anchors (#41 review).
+    // The `::` path is rare in noise and keeps the split-based form.
+    let Some(pos) = addr.windows(2).position(|w| w == b"::") else {
+        // No `::` compression — must be exactly 8 groups of 1-4 hex
+        // digits, checked in a single pass.
+        let mut groups = 0u16;
+        let mut len = 0u16;
+        for &b in addr {
+            if b == b':' {
+                if len == 0 || len > 4 {
+                    return false; // empty or oversized group
+                }
+                groups += 1;
+                len = 0;
+            } else if b.is_ascii_hexdigit() {
+                len += 1;
             } else {
-                parts[0].split(|&b| b == b':').collect()
-            };
-            let right: Vec<&[u8]> = if parts[1].is_empty() {
-                vec![]
-            } else {
-                parts[1].split(|&b| b == b':').collect()
-            };
-            let total = left.len() + right.len();
-            if total > 7 {
-                return false;
+                return false; // e.g. the dots of a v4 suffix
             }
-            // Check if the last right group is v4-mapped (contains dots).
-            if let Some(last) = right.last()
-                && last.contains(&b'.')
-            {
-                // v4-mapped: last group is an IPv4 address.
-                let v4_groups = left.len() + right.len() - 1;
-                return v4_groups <= 6
-                    && left.iter().all(|g| is_hex_group(g))
-                    && right[..right.len() - 1].iter().all(|g| is_hex_group(g))
-                    && is_valid_v4_suffix(last);
-            }
-            left.iter().all(|g| is_hex_group(g)) && right.iter().all(|g| is_hex_group(g))
         }
-        _ => false, // multiple `::`
+        groups += (len > 0) as u16; // the trailing group
+        return groups == 8 && (1..=4).contains(&len);
+    };
+    // At most one `::`.
+    if addr[pos + 2..].windows(2).any(|w| w == b"::") {
+        return false;
     }
-}
-
-fn split_on_double_colon(addr: &[u8]) -> Vec<&[u8]> {
-    let mut result = Vec::new();
-    if let Some(pos) = addr.windows(2).position(|w| w == b"::") {
-        result.push(&addr[..pos]);
-        result.push(&addr[pos + 2..]);
+    // `::` compression — left + right groups ≤ 8.
+    let left: Vec<&[u8]> = if pos == 0 {
+        vec![]
     } else {
-        result.push(addr);
+        addr[..pos].split(|&b| b == b':').collect()
+    };
+    let right: Vec<&[u8]> = if addr.len() <= pos + 2 {
+        vec![]
+    } else {
+        addr[pos + 2..].split(|&b| b == b':').collect()
+    };
+    let total = left.len() + right.len();
+    if total > 7 {
+        return false;
     }
-    result
+    // Check if the last right group is v4-mapped (contains dots).
+    if let Some(last) = right.last()
+        && last.contains(&b'.')
+    {
+        // v4-mapped: last group is an IPv4 address.
+        let v4_groups = left.len() + right.len() - 1;
+        return v4_groups <= 6
+            && left.iter().all(|g| is_hex_group(g))
+            && right[..right.len() - 1].iter().all(|g| is_hex_group(g))
+            && is_valid_v4_suffix(last);
+    }
+    left.iter().all(|g| is_hex_group(g)) && right.iter().all(|g| is_hex_group(g))
 }
 
 fn is_hex_group(g: &[u8]) -> bool {

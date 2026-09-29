@@ -474,9 +474,11 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<RefSpans> {
     {
         return None;
     }
-    // `://` at start. Look backward for scheme.
+    // `://` at start. Look backward for a scheme — bounded at 12 bytes
+    // (mirrors the engine's bounded scan; #27).
+    let scheme_earliest = start.saturating_sub(12);
     let mut scheme_start = start;
-    while scheme_start > 0 && is_scheme_oracle(input[scheme_start - 1]) {
+    while scheme_start > scheme_earliest && is_scheme_oracle(input[scheme_start - 1]) {
         scheme_start -= 1;
     }
     let scheme = &input[scheme_start..start];
@@ -484,15 +486,22 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<RefSpans> {
         return None;
     }
     let after = start + 3;
-    // F09: bound the search window FIRST, then F08: stop at non-userinfo chars.
+    // F09: bound the search window FIRST. F08: stop the authority segment
+    // scan at any byte that is not valid in an RFC 3986 authority.
     let search_end = (after + 300).min(input.len());
-    let at_pos = input[after..search_end]
-        .iter()
-        .position(|&b| b == b'@' || !is_userinfo_oracle(b));
-    let at_pos = match at_pos {
-        Some(p) if input[after + p] == b'@' => after + p,
-        _ => return None,
-    };
+    let mut seg_end = after;
+    while seg_end < search_end && is_authority_oracle(input[seg_end]) {
+        seg_end += 1;
+    }
+    let segment = &input[after..seg_end];
+    // The userinfo/host separator is the LAST `@` in the segment —
+    // passwords may contain `@` (mirrors the engine; #41 review).
+    let rel_at = segment.iter().rposition(|&b| b == b'@')?;
+    let at_pos = after + rel_at;
+    // Require a host after the `@` (mirrors the engine; #41 review).
+    if at_pos + 1 >= seg_end {
+        return None;
+    }
     let userinfo = &input[after..at_pos];
     let colon_pos = userinfo.iter().position(|&b| b == b':')?;
     let pw_start = after + colon_pos + 1;
@@ -538,14 +547,21 @@ fn is_userinfo_oracle(b: u8) -> bool {
         )
 }
 
+/// RFC 3986 authority character — mirrors `is_authority_char` in validators.rs.
+fn is_authority_oracle(b: u8) -> bool {
+    b == b'@' || b == b'[' || b == b']' || is_userinfo_oracle(b)
+}
+
 fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<RefSpans> {
     // Must actually be an `@` at this position (oracle is called at every offset).
     if at_pos >= input.len() || input[at_pos] != b'@' {
         return None;
     }
-    // Backward: local part.
+    // Backward: local part — capped at 64 bytes, mirroring the engine
+    // (#41 review): the cap, not the buffer, bounds the span.
+    let earliest = at_pos.saturating_sub(64);
     let mut local_start = at_pos;
-    while local_start > 0 && is_email_local_oracle(input[local_start - 1]) {
+    while local_start > earliest && is_email_local_oracle(input[local_start - 1]) {
         local_start -= 1;
     }
     if local_start == at_pos {
@@ -653,9 +669,13 @@ fn parse_u8_ref(bytes: &[u8]) -> u16 {
     v
 }
 
-/// F01: IPv6 anchors — must match the catalog in `rules/mod.rs`.
+/// IPv6 anchors — must match the catalog in `rules/mod.rs`. The generic
+/// single-byte `:` anchor plus the bounded bidirectional confirm scan
+/// covers every representable address (#41 review; the F01 enumerated
+/// prefix list missed nonlisted prefixes and uppercase hex).
 const IPV6_ANCHORS: &[&[u8]] = &[
-    b"::", b"2001:", b"2002:", b"2003:", b"2600:", b"2607:", b"2a00:", b"2a01:", b"fe80:", b"fd00:",
+    b"::", b":0", b":1", b":2", b":3", b":4", b":5", b":6", b":7", b":8", b":9", b":a", b":b",
+    b":c", b":d", b":e", b":f", b":A", b":B", b":C", b":D", b":E", b":F",
 ];
 
 /// The oracle only triggers IPv6 at positions where one of the engine's
@@ -669,18 +689,28 @@ fn confirm_ipv6_oracle(input: &[u8], pos: usize) -> Option<RefSpans> {
     if !IPV6_ANCHORS.iter().any(|a| input[pos..].starts_with(a)) {
         return None;
     }
+    // Both scans are capped at 45 bytes from the anchor — mirrors the
+    // engine's bounded confirm (streaming parity, #27/#41).
+    let cap = 45;
+    let earliest = pos.saturating_sub(cap);
     let mut start = pos;
-    while start > 0 && is_ipv6_char_oracle(input[start - 1]) {
+    while start > earliest && is_ipv6_char_oracle(input[start - 1]) {
         start -= 1;
     }
     if start > 0 && input[start - 1].is_ascii_alphanumeric() {
         return None;
     }
+    // Mid-run truncation: the backward scan hit the cap but the run
+    // continues — the full run exceeds 45 bytes, so no slice of it is a
+    // valid address.
+    if earliest > 0 && start == earliest && is_ipv6_char_oracle(input[start - 1]) {
+        return None;
+    }
     let mut end = pos;
-    while end < input.len() && is_ipv6_ext_oracle(input[end]) {
+    while end < input.len() && end - start < cap && is_ipv6_ext_oracle(input[end]) {
         end += 1;
     }
-    if end - start > 45 {
+    if end - start == cap && end < input.len() && is_ipv6_ext_oracle(input[end]) {
         return None;
     }
     if end < input.len() && input[end].is_ascii_alphanumeric() {

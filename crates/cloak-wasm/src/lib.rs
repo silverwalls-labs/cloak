@@ -52,8 +52,11 @@ use cloak_core::{Config, Engine, Session, Stats};
 ///   can never address the other table.
 /// - The generation is bumped on slot reuse, so a stale handle from a
 ///   removed object no longer matches once the slot is reissued.
-///   15-bit generation wraps after 32 768 reuses per slot (issue #41,
-///   F11: the previous 7-bit layout wrapped after only 128).
+///   A 15-bit generation never wraps: once a slot's generation reaches
+///   `GEN_MASK` (after 32 767 reuses), the slot is RETIRED — removed from
+///   the free list and never reissued — so a stale handle cannot alias
+///   a live object even at the wrap boundary (issue #41 review; the F11
+///   fix widened 7 bits to 15 but left the wrap unguarded).
 /// - Index 0 is never issued, keeping `0` a pure error sentinel.
 mod handle {
     pub const ENGINE: u32 = 0;
@@ -103,23 +106,32 @@ impl<T> Slab<T> {
         }
     }
 
-    /// Insert `value`, returning `(idx, generation)` for the handle, or `None`
-    /// when the 16-bit index space is exhausted.
+    /// Insert `value`, returning `(idx, generation)` for the handle, or
+    /// `None` when the 16-bit index space is exhausted.
+    ///
+    /// Slots whose generation has reached `GEN_MASK` are retired: they are
+    /// popped from the free list and never reissued. Reusing one would
+    /// wrap its generation back to 0, aliasing the handle issued for the
+    /// slot's very first occupant (32 768 reuses per slot — issue #41
+    /// review). Retired slots are simply leaked index space; fresh slots
+    /// are allocated instead until the index space is exhausted.
     fn insert(&mut self, value: T) -> Option<(u32, u32)> {
-        if let Some(idx) = self.free.pop() {
-            let generation = (self.gens[idx as usize] + 1) & handle::GEN_MASK;
+        while let Some(idx) = self.free.pop() {
+            if self.gens[idx as usize] == handle::GEN_MASK {
+                continue; // retired — never reused, never wrapped
+            }
+            let generation = self.gens[idx as usize] + 1;
             self.gens[idx as usize] = generation;
             self.entries[idx as usize] = Some(value);
-            Some((idx, generation))
-        } else {
-            if self.entries.len() > handle::MAX_IDX as usize {
-                return None;
-            }
-            let idx = self.entries.len() as u32;
-            self.entries.push(Some(value));
-            self.gens.push(0);
-            Some((idx, 0))
+            return Some((idx, generation));
         }
+        if self.entries.len() > handle::MAX_IDX as usize {
+            return None;
+        }
+        let idx = self.entries.len() as u32;
+        self.entries.push(Some(value));
+        self.gens.push(0);
+        Some((idx, 0))
     }
 
     fn get(&self, idx: u32, generation: u32) -> Option<&T> {
@@ -1265,5 +1277,49 @@ mod tests {
             slab.get(idx, gen0).is_none(),
             "stale handle from 200 cycles ago must not alias a live object"
         );
+    }
+
+    #[test]
+    fn exhausted_slot_retired_at_generation_wrap_boundary() {
+        // #41 review: a 15-bit generation would wrap to 0 after 32 768
+        // reuses of one slot, aliasing the handle from the slot's first
+        // occupancy. The slot must instead be RETIRED at the boundary.
+        let mut slab: Slab<u32> = Slab::new();
+        let (idx, gen0) = slab.insert(42).unwrap();
+        assert_eq!(gen0, 0);
+
+        // Cycle the slot through every remaining generation value.
+        for i in 1..=handle::GEN_MASK {
+            let current_gen = slab.gens[idx as usize];
+            assert_eq!(current_gen, i - 1, "generation before cycle {i}");
+            slab.remove(idx, current_gen).expect("remove must succeed");
+            let (reused_idx, reused_gen) = slab.insert(i).unwrap();
+            assert_eq!(
+                (reused_idx, reused_gen),
+                (idx, i),
+                "cycle {i} must reuse the slot"
+            );
+        }
+
+        // Generation is now GEN_MASK: the next insert must NOT wrap this
+        // slot back to generation 0 — it must go to a fresh slot.
+        slab.remove(idx, handle::GEN_MASK)
+            .expect("remove must succeed");
+        let (fresh_idx, fresh_gen) = slab.insert(999).unwrap();
+        assert_ne!(
+            fresh_idx, idx,
+            "slot at GEN_MASK must be retired, not wrapped to generation 0"
+        );
+        assert_eq!(fresh_gen, 0);
+
+        // The stale generation-0 handle must never alias a live object,
+        // and the retired slot must be unusable even by direct lookup.
+        assert!(
+            slab.get(idx, gen0).is_none(),
+            "stale handle from cycle 0 must not alias anything after wrap"
+        );
+        assert_eq!(slab.get(idx, handle::GEN_MASK), None);
+        assert_eq!(slab.remove(idx, handle::GEN_MASK), None);
+        assert_eq!(slab.get(fresh_idx, fresh_gen), Some(&999));
     }
 }

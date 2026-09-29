@@ -602,8 +602,9 @@ jobs:
           read -r e2e_l e2e_f e2e_b e2e_raw <<< "$(parse_lcov coverage/e2e.lcov)"
 
           # ── Total (merge all LCOV files) ──
-          # NOTE: The total sums LF/LH across tiers, which double-counts lines
-          # covered by multiple tiers. This is an upper bound; a proper merge
+          # NOTE: The total sums per-tier LF/LH without merging source lines.
+          # Overlaps can duplicate covered AND uncovered lines, so the result
+          # can over- or under-estimate true merged coverage. A proper merge
           # (e.g. llvm-profdata merge or lcov --add-tracefile) is tracked as a
           # follow-up (issue #41, F16). The per-tier percentages are accurate.
           total_lf=0 total_lh=0 total_fnf=0 total_fnh=0 total_brf=0 total_brh=0

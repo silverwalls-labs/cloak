@@ -36,7 +36,7 @@ operators which ones to consider disabling per environment.
 | `npm-token` | `npm_` | `npm_` + 36 base62 (30 entropy + 6 CRC32) ¹ | Low |
 | `pypi-token` | `pypi-` | `pypi-AgEIcHlwaS5vcmc…` (macaroon prefix) | Low |
 | `jwt` | `eyJ` | three dot-separated base64url segments, first two decode-shaped as JSON (`{"` prefix after decode of header) | Low-med |
-| `connection-string` | `://` (+ scheme set: `postgres`, `postgresql`, `mysql`, `mongodb`, `redis`, `amqp`, `amqps`…) | `scheme://user:PASSWORD@host` — only the password span is redacted | Low |
+| `connection-string` | `://` (+ scheme set: `postgres`, `postgresql`, `mysql`, `mongodb`, `redis`, `amqp`, `amqps`…) | `scheme://user:PASSWORD@host` — only the password span is redacted. The userinfo/host split is the LAST `@` (passwords may contain `@`), and a non-empty host is required after it. | Low |
 | `pem-private-key` | `-----BEGIN` | stateful: `-----BEGIN (RSA \|EC \|DSA \|OPENSSH \|ENCRYPTED \|)PRIVATE KEY-----` … `-----END …-----`, multi-line, bounded bail-out (default 16 KiB) | ~0 |
 
 Notes:
@@ -68,6 +68,19 @@ chars; the remainder passes through (spec-literal).
 | `gitlab-token` | 261 (6 + 255) | `(?:glpat-\|glrt-\|gldt-)[0-9A-Za-z_-]{20,255}` | `-` and `_` valid in body. |
 | `npm-token` | 40 (4 + 36) | `npm_` + exactly 36 base62, CRC32-validated | F12: CRC replaces shape-only confirm. |
 
+### Backward reach (implemented S2, #27)
+
+Confirm functions that look backward from the anchor declare a **backward reach
+`B`** and never scan past it. This makes a match independent of where the
+streaming carry buffer starts: the engine retains `W + B` bytes behind the
+emission boundary, never re-confirms a candidate whose backward window a flush
+has crossed (it was already resolved with full context), and carries
+confirmed-but-unemitted spans across pushes instead of re-deriving them.
+Example: `email` has `B = 64` (the local-part cap); `ipv6` has `B = 45`
+(the max address text length). Windows whose forward reach grew beyond `W`
+were corrected: `aws-secret-key` `W = 92` (key + gaps + separator + value),
+`connection-string` `W = 304` (`://` + `@` search bound + `@` + host byte).
+
 ### Overlap resolution (implemented S2)
 
 Confirmed matches that **strictly overlap** union into one redaction span,
@@ -81,7 +94,7 @@ merged span; `Stats.matches` counts the winning rule once per merged span.
 
 | Rule id | Anchor(s) | Confirm | FP risk |
 |---|---|---|---|
-| `email` | `@` | RFC-5322-practical: `local@domain.tld`, TLD ≥ 2 alpha | Low |
+| `email` | `@` | RFC-5322-practical: `local@domain.tld`, TLD ≥ 2 alpha. The local part is capped at 64 bytes (RFC 5321): longer locals redact the final 64 local bytes plus the domain. | Low |
 | `ipv4` | `.` digit-runs (prefilter on dotted-quad shape) | 4 octets, each 0–255, non-digit boundaries | Med — redacting IPs can hurt debugging; disable per env if needed |
 | `ipv6` | `::`, `:` hex-runs | bounded RFC-4291 grammar (incl. `::` compression, v4-mapped) | Med |
 | `credit-card` | digit runs 13–19 (with optional space/dash groups) | **Luhn checksum** + known IIN ranges (4x, 5[1-5], 34/37, 6011…) | Low (Luhn kills most) |

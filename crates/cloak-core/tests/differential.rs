@@ -194,7 +194,6 @@ fn every_vector_various_chunk_sizes() {
 /// The fuzz harness therefore gates all three equivalences behind strict
 /// mode (`fuzz/src/common.rs`).
 #[test]
-#[ignore = "flush-boundary context loss beyond max_window — issue #27 (F06: re-enable once #27 is fixed)"]
 fn concatenated_corpora_1byte_chunks() {
     let (engine, key) = engine_and_key();
     let separators: [&[u8]; 4] = [b"\n", b" ", b"\x00\xff\x80", b""];

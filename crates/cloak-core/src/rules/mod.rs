@@ -45,8 +45,19 @@ pub struct RuleSpec {
     /// How to confirm an anchor candidate and determine the redaction span.
     pub confirm: ConfirmSpec,
     /// Max match window `W` = max anchor len + body cap. Bounds the candidate
-    /// window in S2 and the carry-over buffer in S3.
+    /// window in S2 and the carry-over buffer in S3. Must cover the confirm
+    /// step's full FORWARD reach: a candidate is only confirmed once `W`
+    /// bytes are present, so an undersized `W` lets the streaming flush
+    /// drop a candidate before its tail arrives (#41 review).
     pub window: usize,
+    /// Backward reach `B`: the maximum number of bytes BEFORE the anchor
+    /// start that the confirm step may examine. Confirm functions MUST
+    /// bound their backward scans to this value — an unbounded scan makes
+    /// the match depend on where the carry buffer happens to start, which
+    /// breaks streaming/whole-buffer parity (#27). The engine retains
+    /// `window + back` bytes behind the emission boundary so a candidate's
+    /// backward context is never truncated by a flush before it resolves.
+    pub back: usize,
 }
 
 /// The built-in catalog. Order is significant: catalog order == overlap
@@ -64,6 +75,8 @@ pub static CATALOG: &[RuleSpec] = &[
         // Body capped at 255 to bound W (docs/02); longest anchor is
         // "github_pat_" (11 bytes).
         window: 11 + 255,
+        // Confirm scans forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "gitlab-token",
@@ -71,6 +84,8 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Pattern("(?:glpat-|glrt-|gldt-)[0-9A-Za-z_-]{20,255}"),
         // Body capped at 255 to bound W; longest anchor is "glpat-" (6 bytes).
         window: 6 + 255,
+        // Anchored DFA match: forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "npm-token",
@@ -79,6 +94,8 @@ pub static CATALOG: &[RuleSpec] = &[
         // Body alphabet is alnum only (no underscore). F12.
         confirm: ConfirmSpec::Custom(validators::confirm_npm_token),
         window: 4 + 36,
+        // Confirm scans forward from the anchor only.
+        back: 0,
     },
     // ── Secret detectors (S4) ────────────────────────────────────────
     RuleSpec {
@@ -86,12 +103,16 @@ pub static CATALOG: &[RuleSpec] = &[
         anchors: &[b"AKIA", b"ASIA"],
         confirm: ConfirmSpec::Pattern("(?:AKIA|ASIA)[0-9A-Z]{16}"),
         window: 4 + 16,
+        // Anchored DFA match: forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "gcp-api-key",
         anchors: &[b"AIza"],
         confirm: ConfirmSpec::Pattern("AIza[0-9A-Za-z_\\-]{35}"),
         window: 4 + 35,
+        // Anchored DFA match: forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "pypi-token",
@@ -99,13 +120,20 @@ pub static CATALOG: &[RuleSpec] = &[
         // Macaroon body: base64url alphabet, min 50 chars, cap 255.
         confirm: ConfirmSpec::Pattern("pypi-[A-Za-z0-9_\\-]{50,255}"),
         window: 5 + 255,
+        // Anchored DFA match: forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "aws-secret-key",
         anchors: &[b"aws_secret", b"SecretAccessKey"],
         confirm: ConfirmSpec::Custom(validators::confirm_aws_secret),
-        // Key name (21) + separator (3) + value (40) + margin.
-        window: 70,
+        // Max forward span: key (21) + gap (15) + separator (1) + gap (15)
+        // + value (40) = 92. The window MUST cover the full value: with
+        // larger rules disabled, a 70-byte window let the flush drop the
+        // candidate before the remaining value bytes arrived (#41 review).
+        window: 92,
+        // One-byte non-alnum boundary check before the anchor.
+        back: 1,
     },
     RuleSpec {
         id: "azure-style-token",
@@ -113,6 +141,8 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Custom(validators::confirm_azure_token),
         // Key (11) + value cap (255).
         window: 270,
+        // Confirm scans forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "jwt",
@@ -120,21 +150,30 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Custom(validators::confirm_jwt),
         // JWTs can be large; cap scan at 2048.
         window: 2048,
+        // Confirm scans forward from the anchor only.
+        back: 0,
     },
     RuleSpec {
         id: "connection-string",
         anchors: &[b"://"],
         confirm: ConfirmSpec::Custom(validators::confirm_connection_string),
-        // Backward scheme (12) + :// (3) + userinfo + host cap.
-        window: 300,
+        // Forward: `://` (3) + `@` search bound (300) + `@` (1) + first
+        // host byte (1). Backward: longest scheme (`mongodb+srv`) is 11.
+        window: 304,
+        // Bounded backward scheme scan — see confirm_connection_string.
+        back: 12,
     },
     // ── Structured-PII detectors (S4) ────────────────────────────────
     RuleSpec {
         id: "email",
         anchors: &[b"@"],
         confirm: ConfirmSpec::Custom(validators::confirm_email),
-        // Backward local (64) + @ (1) + domain (255).
+        // Backward local (64, capped) + @ (1) + domain (255).
         window: 320,
+        // RFC 5321 local-part cap. Locals longer than 64 bytes are capped,
+        // not rejected — the redaction span covers the final 64 local
+        // bytes plus the domain (#41 review).
+        back: 64,
     },
     RuleSpec {
         id: "ipv4",
@@ -145,29 +184,31 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Custom(validators::confirm_ipv4),
         // Backward (3) + max IP (15) = 18.
         window: 18,
+        // Bounded backward octet scan (confirm caps at 11 bytes).
+        back: 11,
     },
     RuleSpec {
         id: "ipv6",
-        // F01: added common IPv6 prefix anchors (≥4 bytes each) to catch
-        // fully expanded 8-group addresses that contain no `::`. Short
-        // anchors (fd, fc, ff0) are omitted — they trigger too frequently
-        // on binary data and expose the known streaming flush-boundary
-        // divergence (#27). This is a best-effort coverage tradeoff.
+        // Generic hex/colon candidate path (#41 review): every IPv6
+        // address contains a colon followed by a hex digit or another
+        // colon, so 2-byte anchors catch every representable address —
+        // fully expanded 8-group forms and uppercase hex included —
+        // without an enumerated prefix list. (A bare `:` anchor costs
+        // ~8% of clean-path throughput: every stray colon in prose,
+        // JSON, and URLs would run a confirm.) The F01 prefix anchors
+        // missed nonlisted prefixes such as `2a02:0001:…` and uppercase
+        // `FE80:`; both are caught now. The confirm scan is bounded at 45
+        // bytes on both sides from the anchor.
         anchors: &[
-            b"::",    // compressed (original)
-            b"2001:", // global unicast (IANA 2001::/16)
-            b"2002:", // 6to4 relay
-            b"2003:", // global unicast
-            b"2600:", // global unicast
-            b"2607:", // global unicast (common US providers)
-            b"2a00:", // global unicast (RIPE)
-            b"2a01:", // global unicast (RIPE)
-            b"fe80:", // link-local
-            b"fd00:", // unique local (common ULA prefix)
+            b"::", b":0", b":1", b":2", b":3", b":4", b":5", b":6", b":7", b":8", b":9", b":a",
+            b":b", b":c", b":d", b":e", b":f", b":A", b":B", b":C", b":D", b":E", b":F",
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_ipv6),
-        // Max IPv6 text: ~45.
+        // Max IPv6 text: ~45 (the confirm scan caps at 45 in both
+        // directions from the anchor).
         window: 50,
+        // Bounded backward scan — see confirm_ipv6.
+        back: 45,
     },
     RuleSpec {
         id: "credit-card",
@@ -185,6 +226,8 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Custom(validators::confirm_credit_card),
         // 19 digits + 6 separators.
         window: 25,
+        // One-byte non-digit boundary check before the anchor.
+        back: 1,
     },
     RuleSpec {
         id: "phone-intl",
@@ -192,6 +235,8 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Custom(validators::confirm_phone_intl),
         // + (1) + CC (3) + digits (12) + separators (6).
         window: 25,
+        // One-byte non-alnum boundary check before the `+`.
+        back: 1,
     },
 ];
 
@@ -258,6 +303,36 @@ mod tests {
             assert!(
                 rule.window > max_anchor,
                 "window must leave room for a body after the longest anchor (rule {})",
+                rule.id
+            );
+        }
+    }
+
+    #[test]
+    fn back_reach_fits_within_window() {
+        // The backward reach is part of the declared match window; a reach
+        // larger than the window would be unenforceable.
+        for rule in CATALOG {
+            assert!(
+                rule.back <= rule.window,
+                "back reach {} exceeds window {} (rule {})",
+                rule.back,
+                rule.window,
+                rule.id
+            );
+        }
+    }
+
+    #[test]
+    fn window_plus_back_within_carry_bound() {
+        // The engine retains max(window + back) bytes behind the emission
+        // boundary; that total must stay within the shared carry-over bound
+        // (2048 — the jwt window; see engine::CARRY_OVER_BOUND).
+        for rule in CATALOG {
+            assert!(
+                rule.window + rule.back <= 2048,
+                "window + back = {} exceeds the 2048 carry retention (rule {})",
+                rule.window + rule.back,
                 rule.id
             );
         }

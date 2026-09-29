@@ -62,9 +62,12 @@ pub struct Engine {
     /// with `rule == pem_rule_idx` are routed to the PEM state machine
     /// instead of the regular confirm step.
     pem_rule_idx: usize,
-    /// Maximum match window `W` across all compiled rules. Bounds the
+    /// Maximum of `window + back` across all compiled rules. Bounds the
     /// carry-over retained between pushes (S3): after every push,
-    /// `carry_over.len() <= max_window`.
+    /// `carry_over.len() <= max_window`. The retention includes each
+    /// rule's backward reach `back` so a candidate's backward confirm
+    /// context is never truncated by a flush before the candidate
+    /// resolves (#27).
     max_window: usize,
     _config: Config,
 }
@@ -108,7 +111,11 @@ impl Engine {
         };
         let scanner = AhoCorasickScanner::new(&enabled_specs, &pem_extra)?;
 
-        let mut max_window = rules.iter().map(|r| r.window).max().unwrap_or(0);
+        // Retention is window + back: the forward window a candidate needs
+        // to resolve, plus the backward context its confirm step reads
+        // (#27). Without `back`, the flush could cross the backward
+        // window of an unresolved candidate and change its match.
+        let mut max_window = rules.iter().map(|r| r.window + r.back).max().unwrap_or(0);
         // PEM's confirm window must be included when PEM is enabled —
         // otherwise carry-over drops to 0 when all regular rules are
         // disabled, and a PEM BEGIN anchor split across chunks is flushed
@@ -134,6 +141,9 @@ impl Engine {
             bytes_processed: 0,
             matches: BTreeMap::new(),
             carry_over: Vec::new(),
+            carry_abs: 0,
+            ctx_len: 0,
+            retained: Vec::new(),
             pem_state: pem::PemState::Idle,
             candidates: Vec::new(),
             raw: Vec::new(),
@@ -157,6 +167,26 @@ pub struct Session<'e> {
     matches: BTreeMap<crate::types::RuleId, u64>,
     /// Trailing bytes from the previous push that could not yet be flushed.
     carry_over: Vec<u8>,
+    /// Absolute stream offset of `carry_over[0]` (bytes flushed so far).
+    /// `carry_abs + carry_over.len()` is the absolute position of the next
+    /// byte to process. Used by the #27 truncated-context guard.
+    carry_abs: u64,
+    /// Matches confirmed in an earlier push that could not be emitted yet
+    /// (their extent straddled the emission boundary). Stored with
+    /// ABSOLUTE stream offsets; re-injected into the raw match set each
+    /// push until fully flushed (#27). Carrying the span — instead of
+    /// re-deriving it from the candidate — is what makes the
+    /// truncated-context candidate skip safe: a candidate whose backward
+    /// window has been flushed past is never re-confirmed, so it can never
+    /// re-confirm differently than it did with full context.
+    retained: Vec<RawMatch>,
+    /// Number of LEADING carry bytes that are already-emitted context
+    /// retained after a PEM block close (#27): the confirm steps may scan
+    /// backward into them, but they must never be re-emitted, and
+    /// candidates anchored inside them are suppressed (their bytes were
+    /// consumed by the PEM layer, mirroring the whole-buffer path's
+    /// PEM-body candidate suppression).
+    ctx_len: usize,
     /// PEM private-key detector state (separate layer from windowed rules).
     pem_state: pem::PemState,
     // Scratch buffers reused across pushes (cleared each call).
@@ -210,7 +240,9 @@ impl Session<'_> {
         if self.pem_state.is_in_block() {
             // Inside a PEM block: body bytes go straight to the incremental
             // state machine. On close, unread bytes land in carry_over.
-            self.feed_pem(chunk, out)?;
+            // carry_over is empty while InBlock, so by the carry_abs
+            // invariant the chunk starts at the absolute offset carry_abs.
+            self.feed_pem(chunk, self.carry_abs, out)?;
         } else {
             self.carry_over.extend_from_slice(chunk);
         }
@@ -227,13 +259,19 @@ impl Session<'_> {
                     // scan_and_emit emitted through the BEGIN line and
                     // drained carry_over to exactly the body so far.
                     let body = std::mem::take(&mut self.carry_over);
+                    // The body starts at the absolute offset carry_abs; the
+                    // next unprocessed byte (carry is now empty) is at
+                    // carry_abs + body.len().
+                    let body_abs = self.carry_abs;
+                    self.carry_abs += body.len() as u64;
+                    self.ctx_len = 0;
                     self.pem_state = pem::PemState::InBlock(Box::new(pem::PemBlockData {
                         hasher: blake3::Hasher::new_keyed(&self.engine.digest_key),
                         body_bytes: 0,
                         end_marker: pem::end_marker_for(key_type_idx),
                         pem_carry: Vec::new(),
                     }));
-                    self.feed_pem(&body, out)?;
+                    self.feed_pem(&body, body_abs, out)?;
                 }
             }
         }
@@ -267,9 +305,13 @@ impl Session<'_> {
     }
 
     /// Feed data to the incremental PEM state machine (requires `InBlock`).
-    /// On close (END found or bail-out), bytes past the redacted body are
-    /// put back into carry_over for normal scanning.
-    fn feed_pem(&mut self, data: &[u8], out: &mut impl io::Write) -> io::Result<()> {
+    /// `data_abs` is the absolute stream offset of `data[0]`. On close
+    /// (END found or bail-out), bytes past the redacted body are put back
+    /// into carry_over for normal scanning, preceded by CTX_BACK bytes of
+    /// already-emitted context: candidates in the remainder may need
+    /// backward context that the PEM layer consumed, and without it their
+    /// confirm spans would diverge from the whole-buffer path (#27).
+    fn feed_pem(&mut self, data: &[u8], data_abs: u64, out: &mut impl io::Write) -> io::Result<()> {
         match pem::process_pem_body(&mut self.pem_state, data, out)? {
             pem::PemBodyResult::Continuing => {}
             pem::PemBodyResult::Closed { remainder_start } => {
@@ -277,16 +319,28 @@ impl Session<'_> {
                     .matches
                     .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
                     .or_insert(0) += 1;
-                if remainder_start < data.len() {
-                    self.carry_over.extend_from_slice(&data[remainder_start..]);
-                }
+                // Retain CTX_BACK bytes of already-emitted context before
+                // the remainder — see the method doc.
+                let ctx_len = CTX_BACK.min(remainder_start);
+                self.carry_over
+                    .extend_from_slice(&data[remainder_start - ctx_len..remainder_start]);
+                self.carry_over.extend_from_slice(&data[remainder_start..]);
+                self.ctx_len = ctx_len;
+                self.carry_abs = data_abs + (remainder_start - ctx_len) as u64;
             }
             pem::PemBodyResult::BailedOut { remainder } => {
                 *self
                     .matches
                     .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
                     .or_insert(0) += 1;
+                // Same context retention for the bail-out tail.
+                let rem_off = data.len() - remainder.len();
+                let ctx_len = CTX_BACK.min(rem_off);
+                self.carry_over
+                    .extend_from_slice(&data[rem_off - ctx_len..rem_off]);
                 self.carry_over.extend_from_slice(&remainder);
+                self.ctx_len = ctx_len;
+                self.carry_abs = data_abs + (rem_off - ctx_len) as u64;
             }
         }
         Ok(())
@@ -340,6 +394,12 @@ impl Session<'_> {
                     continue;
                 }
                 if cand.start < pem_scan_pos {
+                    continue;
+                }
+                // Context-prefix bytes were consumed by the PEM layer —
+                // like the whole-buffer path's PEM-body regions, they are
+                // not re-confirmed (#27).
+                if cand.start < self.ctx_len {
                     continue;
                 }
                 let resolvable = is_final || cand.start + pem_window <= combined_len;
@@ -422,7 +482,24 @@ impl Session<'_> {
             {
                 continue;
             }
+            // Context-prefix bytes were consumed by the PEM layer — not
+            // re-confirmed (#27).
+            if cand.start < self.ctx_len {
+                continue;
+            }
             let rule = &self.engine.rules[cand.rule];
+            // #27 guard: if the carry buffer does not start at the stream
+            // start and the candidate's backward window would reach before
+            // it, the window was already flushed — re-confirming against
+            // truncated context could accept what full context rejected
+            // (e.g. `pffe80::1` truncating to the valid `fe80::1`). Such a
+            // candidate was necessarily resolved earlier with full context:
+            // the emission boundary (max window + back) never crosses the
+            // backward window of an unresolved candidate, so skipping only
+            // ever suppresses a redundant re-confirmation.
+            if self.carry_abs > 0 && cand.start < rule.back {
+                continue;
+            }
             let resolvable = is_final || cand.start + rule.window <= combined_len;
             if resolvable && let Some(cm) = confirm::confirm(rule, &self.carry_over, cand.start) {
                 self.raw.push(RawMatch {
@@ -432,6 +509,42 @@ impl Session<'_> {
                     redact_end: cm.redact_end,
                     rule: cand.rule,
                 });
+            }
+        }
+
+        // 3.5 Re-inject retained matches (absolute → buffer-relative).
+        //     Their spans were confirmed with full context in an earlier
+        //     push; carrying them replaces re-derivation from candidates
+        //     whose backward context a flush may since have crossed (#27).
+        //     PEM-suppression mirrors the candidate skips above: a span
+        //     that starts inside a PEM body region (or after a streaming
+        //     entry's body start) is dropped, exactly as its candidate is.
+        if let Some((body_start, _)) = pem_entry {
+            let body_abs = self.carry_abs + body_start as u64;
+            self.retained.retain(|m| (m.start as u64) < body_abs);
+        }
+        for &(bs, be) in &pem_body_regions {
+            let bs_abs = self.carry_abs + bs as u64;
+            let be_abs = self.carry_abs + be as u64;
+            self.retained
+                .retain(|m| !((m.start as u64) >= bs_abs && (m.start as u64) < be_abs));
+        }
+        let base = self.carry_abs;
+        for m in &self.retained {
+            let rel = RawMatch {
+                start: m.start - base as usize,
+                end: m.end - base as usize,
+                redact_start: m.redact_start - base as usize,
+                redact_end: m.redact_end - base as usize,
+                rule: m.rule,
+            };
+            // This push may have re-derived the same span from its candidate
+            // (or from the PEM block scan). Overlap merge dedups overlapping
+            // spans, but IDENTICAL spans only merge under strict overlap —
+            // a zero-length span (empty PEM body) does not, and would be
+            // emitted (and counted) twice. Skip exact re-derivations.
+            if !self.raw.contains(&rel) {
+                self.raw.push(rel);
             }
         }
 
@@ -512,7 +625,12 @@ impl Session<'_> {
         //    For context-keyed rules, `m.start..m.redact_start` and
         //    `m.redact_end..m.end` are context bytes that pass through;
         //    only `m.redact_start..m.redact_end` is replaced by the tag.
-        let mut pos = 0;
+        // Emission starts at the context prefix boundary: ctx bytes were
+        // already emitted by the PEM layer and must never be re-written.
+        // A match whose backward extension reaches into the prefix is
+        // still confirmed with full context — only its re-emission is
+        // clipped (#27).
+        let mut pos = self.ctx_len;
         for m in &self.merged {
             if m.start >= carry_start {
                 // Final flush emits a zero-length PEM span that starts
@@ -522,10 +640,13 @@ impl Session<'_> {
                     break;
                 }
             }
-            // Clean gap before the match extent.
-            out.write_all(&self.carry_over[pos..m.start])?;
-            // Context prefix (empty for full-span rules).
-            out.write_all(&self.carry_over[m.start..m.redact_start])?;
+            // Clean gap before the match extent plus the context prefix
+            // (empty for full-span rules). The guard clips the portion
+            // below `pos` — only reachable when a context-keyed match
+            // extends backward into the already-emitted prefix.
+            if m.redact_start > pos {
+                out.write_all(&self.carry_over[pos..m.redact_start])?;
+            }
             // The CLOAK tag — digest covers only the redaction span.
             if m.rule == self.engine.pem_rule_idx {
                 let rule_id = crate::types::RuleId::new(pem::PEM_RULE_ID);
@@ -553,7 +674,33 @@ impl Session<'_> {
         if pos < carry_start {
             out.write_all(&self.carry_over[pos..carry_start])?;
         }
+        // `merged` spans are relative to the pre-drain buffer; their
+        // absolute offsets use the pre-drain carry start.
+        let pre_drain_abs = self.carry_abs;
         self.carry_over.drain(..carry_start);
+        self.carry_abs += carry_start as u64;
+        self.ctx_len = self.ctx_len.saturating_sub(carry_start);
+
+        // 9. Refresh the retained list: every merged span not fully
+        //    flushed (end beyond carry_start) is carried into the next
+        //    push with absolute offsets (#27). `finish` (is_final) emits
+        //    everything, so the list is always empty afterwards.
+        if is_final {
+            self.retained.clear();
+        } else {
+            self.retained = self
+                .merged
+                .iter()
+                .filter(|m| m.end > carry_start)
+                .map(|m| RawMatch {
+                    start: m.start + pre_drain_abs as usize,
+                    end: m.end + pre_drain_abs as usize,
+                    redact_start: m.redact_start + pre_drain_abs as usize,
+                    redact_end: m.redact_end + pre_drain_abs as usize,
+                    rule: m.rule,
+                })
+                .collect();
+        }
 
         Ok(entry)
     }
@@ -573,6 +720,13 @@ impl Session<'_> {
 // `pub` for the `#[doc(hidden)]` re-export in lib.rs (bench/test tier) —
 // the module itself is private, so this is not part of the public API.
 pub const CARRY_OVER_BOUND: usize = 2048 + pem::PEM_BAIL_OUT + pem::MAX_PEM_LINE;
+
+/// Bytes of already-emitted backward context retained in front of the
+/// carry-over after a PEM block close (#27): candidates in the remainder
+/// need backward context the PEM layer consumed. Must cover the largest
+/// rule backward reach in the catalog (email: 64) — pinned by the
+/// `ctx_back_covers_max_rule_back` unit test.
+const CTX_BACK: usize = 64;
 
 #[cfg(test)]
 mod tests {
@@ -611,10 +765,70 @@ mod tests {
 
     #[test]
     fn engine_max_window() {
-        // W_max = jwt (2048) — the largest window in the S4 catalog.
-        // This is also the hard bound on carry-over after every push.
+        // Retention = max(window + back) = jwt (2048 + 0) — the largest
+        // in the S4 catalog. This is also the hard bound on carry-over
+        // after every push.
         let engine = test_engine();
         assert_eq!(engine.max_window, 2048);
+    }
+
+    #[test]
+    fn ctx_back_covers_max_rule_back() {
+        // The PEM-close context prefix must cover every rule's backward
+        // reach, or candidates near a remainder could be skipped with a
+        // truncated window (#27).
+        for spec in rules::CATALOG {
+            assert!(
+                spec.back <= CTX_BACK,
+                "CTX_BACK ({CTX_BACK}) must cover rule {} backward reach ({})",
+                spec.id,
+                spec.back
+            );
+        }
+    }
+
+    #[test]
+    fn email_long_local_capped_streaming_parity() {
+        // #41 review: `b"a"*3000 + b"@example.com"` previously redacted a
+        // span that depended on where the carry buffer started — the CLI
+        // emitted 964 plaintext `a`s before the tag on its 64 KiB chunk
+        // schedule. The 64-byte local cap pins the span: 2936 `a`s pass
+        // through, the final 64 plus `@example.com` become exactly one
+        // tag, identically at every chunk size.
+        let engine = test_engine();
+        let mut input = vec![b'a'; 3000];
+        input.extend_from_slice(b"@example.com");
+
+        let mut session = engine.session();
+        let mut whole = Vec::new();
+        session.push(&input, &mut whole).unwrap();
+        let whole_stats = session.finish(&mut whole).unwrap();
+
+        assert_eq!(whole_stats.matches[&RuleId::new("email")], 1);
+        let tag_start = whole
+            .windows(7)
+            .position(|w| w == b"[CLOAK:")
+            .expect("the email tag must be present");
+        assert_eq!(tag_start, 3000 - 64);
+        assert!(
+            whole[..tag_start].iter().all(|&b| b == b'a'),
+            "bytes before the tag must be the uncapped local prefix"
+        );
+        assert!(whole[tag_start..].starts_with(b"[CLOAK:email:"));
+
+        for cs in [1usize, 7, 64, 1024, 4096, 65536] {
+            let mut session = engine.session();
+            let mut chunked = Vec::new();
+            for chunk in input.chunks(cs) {
+                session.push(chunk, &mut chunked).unwrap();
+            }
+            let chunked_stats = session.finish(&mut chunked).unwrap();
+            assert_eq!(
+                chunked, whole,
+                "chunk size {cs}: streaming must equal whole-buffer"
+            );
+            assert_eq!(chunked_stats.matches, whole_stats.matches);
+        }
     }
 
     #[test]

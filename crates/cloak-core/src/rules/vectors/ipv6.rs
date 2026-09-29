@@ -81,6 +81,36 @@ pub static POSITIVE: &[Vector] = &[
             rule: "ipv6",
         }],
     },
+    // #41 review: nonlisted prefixes and uppercase hex — the F01
+    // enumerated prefix anchors missed both; the generic colon anchor
+    // catches every representable address.
+    Vector {
+        name: "ipv6-nonlisted-prefix-expanded",
+        input: b"2a02:0001:0002:0003:0004:0005:0006:0007",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 39,
+            rule: "ipv6",
+        }],
+    },
+    Vector {
+        name: "ipv6-uppercase-compressed",
+        input: b"FE80::1",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 7,
+            rule: "ipv6",
+        }],
+    },
+    Vector {
+        name: "ipv6-uppercase-expanded",
+        input: b"2A07:0DB8:0000:0000:0000:0000:0000:0001",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 39,
+            rule: "ipv6",
+        }],
+    },
 ];
 
 pub static NEGATIVE: &[Vector] = &[
@@ -112,6 +142,14 @@ pub static NEGATIVE: &[Vector] = &[
         name: "ipv6-timestamp",
         // F01: timestamp with colons must not trigger IPv6 detection.
         input: b"2024-01-15T10:30:45Z",
+        spans: &[],
+    },
+    Vector {
+        name: "ipv6-run-exceeds-45-cap",
+        // #41 review: a hex/colon run longer than the 45-byte address cap
+        // must not yield a mid-run slice match (the scan caps at 45 bytes
+        // on both sides and rejects runs that continue past the caps).
+        input: b"aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa:aaaa",
         spans: &[],
     },
 ];
