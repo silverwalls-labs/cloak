@@ -382,3 +382,34 @@ fn idempotence_survives_tag_adjacent_context() {
     assert_eq!(once, twice, "redaction must be idempotent");
     assert_eq!(stats.total_matches(), 0);
 }
+
+/// #34 (greedy-consumption variant, found by fuzz_engine_stream):
+/// phone-intl's greedy separator scan consumes through a space into an
+/// adjacent IPv4 address's digits (`+14155551234 192.168.0.1`), inflating
+/// the digit count past the E.164 maximum of 15 → rejected in pass 1.
+/// After the IPv4 is redacted the scan stops at 11 digits → accepted in
+/// pass 2, breaking idempotence. The fix: fall back to the last separator
+/// where digit_count was still ≤ 15 ("longest valid match").
+#[test]
+fn idempotence_survives_phone_greedy_consumption() {
+    let (engine, key) = engine_and_key();
+    let input = b"::f!ff: +14155551234 \
+        \xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\
+        \xe2\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\
+        \xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\xda\
+        \xda\xda\xda\xda\xda\xda\xda\
+        call +14155551234 192.168.0.1";
+    // Engine must agree with the reference oracle on this input.
+    assert_engine_equals_reference(&engine, &key, input, "phone-greedy-consumption");
+    let (once, _) = engine_redact(&engine, input);
+    let (twice, stats) = engine_redact(&engine, &once);
+    assert_eq!(
+        once, twice,
+        "redaction must be idempotent (phone greedy consumption)"
+    );
+    assert_eq!(
+        stats.total_matches(),
+        0,
+        "no matches may fire on redacted output"
+    );
+}

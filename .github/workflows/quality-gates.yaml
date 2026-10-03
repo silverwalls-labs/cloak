@@ -229,11 +229,10 @@ jobs:
       - name: Corpus regression replay (strict)
         working-directory: crates/cloak-core
         env:
-          # Strict mode enables the correctness-equivalence assertions
-          # (streaming == whole-buffer, idempotence, oracle parity) on
-          # every replayed input. #27 and #34 are fixed, so the
-          # regression-* reproducers and the whole corpus replay with
-          # full equivalence checks (F15).
+          # Strict is opt-in (env unset → strict() = false) until the
+          # PEM shared-dash idempotence bug (#44) is fixed. This "1"
+          # is load-bearing — it is what enables the equivalence
+          # assertions (F15). Do not remove it.
           CLOAK_FUZZ_STRICT: "1"
         run: |
           for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do

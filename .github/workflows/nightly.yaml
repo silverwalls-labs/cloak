@@ -69,8 +69,13 @@ jobs:
           # minimized input lands in the artifact below. Back-port every
           # finding as a deterministic integration test AND a committed
           # corpus entry (see fuzz/corpus/*/regression-*).
-          # NOTE: flip on CLOAK_FUZZ_STRICT=1 once issues #27 and #34 are
-          # fixed (fuzz/src/common.rs documents what the cap hides).
+          # Strict stays OFF here (env unset → strict() = false): the
+          # open PEM shared-dash idempotence bug (#44) breaks the
+          # equivalence assertions — a 90 s strict smoke over a rich
+          # seed corpus already finds it, so a 1 h run will. Strict
+          # equivalence coverage runs per-PR in quality-gates (corpus
+          # replay + smoke, CLOAK_FUZZ_STRICT=1). Set
+          # CLOAK_FUZZ_STRICT=1 here once #44 is fixed.
           cargo fuzz run ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -O --debug-assertions -- \
             -max_total_time=3600 -timeout=10 -rss_limit_mb=2048 \
             -max_len=${{ matrix.max_len }} \
