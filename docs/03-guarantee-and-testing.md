@@ -20,6 +20,29 @@ where `redact_reference` is the naive scalar implementation
 ([architecture](01-architecture.md#the-simd-upgrade-path-kept-honest)) — deliberately
 slow, obviously correct, the oracle.
 
+### How chunk-invariance is kept (the load-bearing machinery)
+
+The invariant above is not an accident of implementation; four mechanisms hold it,
+each pinned by a regression test and exercised by strict fuzz:
+
+- **Carry-over + retained spans.** The engine retains up to `W_max + B_max` bytes
+  behind the emission boundary and re-confirms candidates there; matches already
+  confirmed with full context but not yet emitted are carried across pushes by
+  absolute offset instead of being re-derived (#27).
+- **Tag-tail / tag-head guards (#34).** Every backward-scanning confirm adds
+  `CLOAK_TAG_MAX` (30 bytes — the longest possible `[CLOAK:…]` tag) to its reach so
+  a candidate abutting an already-emitted tag cannot re-anchor inside the tag, and
+  forward windows carry the same margin where a confirm scans across a following
+  tag. This is what makes redaction idempotent.
+- **PEM close-context synthesis (#27).** When a PEM block closes mid-stream, the
+  engine rebuilds the emitted-stream context (pre-block tail + BEGIN + tag + END,
+  capped at 94 bytes) in front of the unread remainder, so candidates after the
+  block confirm against the same backward context at every chunk size.
+- **Bounded-slice push (F10).** `push` processes any chunk — however large — in
+  internal slices of `2 × W_max`, so peak memory is independent of chunk size.
+  Slicing is just a finer chunking of the same stream, so chunk-invariance makes
+  it output-neutral by construction.
+
 ## What the guarantee is NOT
 
 Stated here so nobody oversells it (README must link this section):
@@ -148,7 +171,9 @@ The load-bearing invariants:
 - **Idempotence**: `redact(redact(S)) == redact(S)` (tags don't re-match; no
   reintroduction).
 - **Bounded memory**: carry-over never exceeds `W_max` (+ PEM bail-out) regardless
-  of input.
+  of input, and — since F10 — peak memory is also independent of the *chunk* size:
+  `push` slices large chunks internally (see
+  [the machinery above](#how-chunk-invariance-is-kept-the-load-bearing-machinery)).
 
 ### 3. Differential testing
 Engine vs scalar reference on: all vector corpora, proptest-generated corpora, and
@@ -172,18 +197,19 @@ regression-replayed on every run. The nightly stage runs 1 h/target per ISA; a
 crash fails the job and uploads the minimized input as an artifact. Every finding
 is back-ported as a deterministic test AND a committed `regression-*` corpus entry.
 
-The PR gate and nightly assert the **universal** half every input: no panic and
+The PR gate and nightly assert the **universal** half on every input: no panic and
 the carry-over bound (the robustness guarantee — the fuzz tier's primary job).
 The three correctness equivalences (engine ≡ reference, streaming ≡ whole-buffer,
-idempotence) run **only under `CLOAK_FUZZ_STRICT=1`**, because two tracked engine
-bugs violate all three on narrow inputs — issue #27 (a context-keyed extent
-overlapping a PEM body diverges from the reference even in whole-buffer mode,
-and the flush boundary cuts backward context beyond max_window) and issue #34
-(adjacent redaction erases a backward guard, breaking
-idempotence). Correctness on *known* inputs stays a PR gate via the deterministic
-`tests/differential.rs`; strict fuzzing is the tool to reproduce a finding and to
-hunt new divergences once #27 and #34 close, at which point strict becomes the
-default (`fuzz/src/common.rs`).
+idempotence) run under `CLOAK_FUZZ_STRICT=1`. They were originally gated behind the
+flag by two tracked engine bugs — issue #27 (a context-keyed extent overlapping a
+PEM body diverging from the reference, and the flush boundary cutting backward
+context beyond max_window) and issue #34 (adjacent redaction erasing a backward
+guard, breaking idempotence). Both are closed: the fixes (retained spans, PEM
+close-context synthesis, and the `CLOAK_TAG_MAX` tag-tail/head guards — see
+[the machinery above](#how-chunk-invariance-is-kept-the-load-bearing-machinery))
+are pinned by `tests/differential.rs`, and **strict is now the default for every
+CI fuzz run** — corpus replay and smoke both set `CLOAK_FUZZ_STRICT=1`
+(`fuzz/src/common.rs`).
 
 ### CI staging (all blocking at their stage)
 

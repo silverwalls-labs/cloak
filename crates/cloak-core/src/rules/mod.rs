@@ -57,6 +57,9 @@ pub struct RuleSpec {
     /// breaks streaming/whole-buffer parity (#27). The engine retains
     /// `window + back` bytes behind the emission boundary so a candidate's
     /// backward context is never truncated by a flush before it resolves.
+    /// Since the #34 tag-tail guard, backward-guarded rules include
+    /// [`CLOAK_TAG_MAX`](validators::CLOAK_TAG_MAX) in `B`, so `B` may
+    /// exceed `window` — the retention sum is bounded separately.
     pub back: usize,
 }
 
@@ -132,8 +135,9 @@ pub static CATALOG: &[RuleSpec] = &[
         // larger rules disabled, a 70-byte window let the flush drop the
         // candidate before the remaining value bytes arrived (#41 review).
         window: 92,
-        // One-byte non-alnum boundary check before the anchor.
-        back: 1,
+        // One-byte non-alnum boundary check before the anchor, plus
+        // CLOAK_TAG_MAX (30) for the #34 tag-tail guard.
+        back: validators::CLOAK_TAG_MAX,
     },
     RuleSpec {
         id: "azure-style-token",
@@ -158,10 +162,12 @@ pub static CATALOG: &[RuleSpec] = &[
         anchors: &[b"://"],
         confirm: ConfirmSpec::Custom(validators::confirm_connection_string),
         // Forward: `://` (3) + `@` search bound (300) + `@` (1) + first
-        // host byte (1). Backward: longest scheme (`mongodb+srv`) is 11.
-        window: 304,
-        // Bounded backward scheme scan — see confirm_connection_string.
-        back: 12,
+        // host byte (1), plus CLOAK_TAG_MAX (30) for the #34 tag-head
+        // check the authority scan runs at every position it crosses.
+        window: 304 + validators::CLOAK_TAG_MAX,
+        // Bounded backward scheme scan (12), plus CLOAK_TAG_MAX (30)
+        // for the #34 tag-tail guard — see confirm_connection_string.
+        back: 12 + validators::CLOAK_TAG_MAX,
     },
     // ── Structured-PII detectors (S4) ────────────────────────────────
     RuleSpec {
@@ -170,10 +176,11 @@ pub static CATALOG: &[RuleSpec] = &[
         confirm: ConfirmSpec::Custom(validators::confirm_email),
         // Backward local (64, capped) + @ (1) + domain (255).
         window: 320,
-        // RFC 5321 local-part cap. Locals longer than 64 bytes are capped,
+        // RFC 5321 local-part cap (64), plus CLOAK_TAG_MAX (30) for the
+        // #34 tag-tail guard. Locals longer than 64 bytes are capped,
         // not rejected — the redaction span covers the final 64 local
         // bytes plus the domain (#41 review).
-        back: 64,
+        back: 64 + validators::CLOAK_TAG_MAX,
     },
     RuleSpec {
         id: "ipv4",
@@ -182,10 +189,12 @@ pub static CATALOG: &[RuleSpec] = &[
             b"0.", b"1.", b"2.", b"3.", b"4.", b"5.", b"6.", b"7.", b"8.", b"9.",
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_ipv4),
-        // Backward (3) + max IP (15) = 18.
-        window: 18,
-        // Bounded backward octet scan (confirm caps at 11 bytes).
-        back: 11,
+        // Backward (3) + max IP (15) = 18 of address reach, plus
+        // CLOAK_TAG_MAX (30) for the #34 tag-head guard after the match.
+        window: 15 + validators::CLOAK_TAG_MAX,
+        // Bounded backward octet scan (confirm caps at 11 bytes), plus
+        // CLOAK_TAG_MAX (30) for the #34 tag-tail guard.
+        back: 11 + validators::CLOAK_TAG_MAX,
     },
     RuleSpec {
         id: "ipv6",
@@ -205,10 +214,12 @@ pub static CATALOG: &[RuleSpec] = &[
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_ipv6),
         // Max IPv6 text: ~45 (the confirm scan caps at 45 in both
-        // directions from the anchor).
-        window: 50,
-        // Bounded backward scan — see confirm_ipv6.
-        back: 45,
+        // directions from the anchor), plus CLOAK_TAG_MAX (30) for the
+        // #34 tag-head guard after the match.
+        window: 45 + validators::CLOAK_TAG_MAX,
+        // Bounded backward scan (45), plus CLOAK_TAG_MAX (30) for the
+        // #34 tag-tail guard — see confirm_ipv6.
+        back: 45 + validators::CLOAK_TAG_MAX,
     },
     RuleSpec {
         id: "credit-card",
@@ -224,19 +235,23 @@ pub static CATALOG: &[RuleSpec] = &[
             b"6011", b"644", b"645", b"646", b"647", b"648", b"649", b"65", // Discover
         ],
         confirm: ConfirmSpec::Custom(validators::confirm_credit_card),
-        // 19 digits + 6 separators.
-        window: 25,
-        // One-byte non-digit boundary check before the anchor.
-        back: 1,
+        // 19 digits + 6 separators, plus CLOAK_TAG_MAX (30) for the #34
+        // tag-head guard after the match.
+        window: 25 + validators::CLOAK_TAG_MAX,
+        // One-byte non-digit boundary check before the anchor, plus
+        // CLOAK_TAG_MAX (30) for the #34 tag-tail guard.
+        back: validators::CLOAK_TAG_MAX,
     },
     RuleSpec {
         id: "phone-intl",
         anchors: &[b"+"],
         confirm: ConfirmSpec::Custom(validators::confirm_phone_intl),
-        // + (1) + CC (3) + digits (12) + separators (6).
-        window: 25,
-        // One-byte non-alnum boundary check before the `+`.
-        back: 1,
+        // + (1) + CC (3) + digits (12) + separators (6), plus
+        // CLOAK_TAG_MAX (30) for the #34 tag-head guard after the match.
+        window: 25 + validators::CLOAK_TAG_MAX,
+        // One-byte non-alnum boundary check before the `+`, plus
+        // CLOAK_TAG_MAX (30) for the #34 tag-tail guard.
+        back: validators::CLOAK_TAG_MAX,
     },
 ];
 
@@ -309,17 +324,27 @@ mod tests {
     }
 
     #[test]
-    fn back_reach_fits_within_window() {
-        // The backward reach is part of the declared match window; a reach
-        // larger than the window would be unenforceable.
-        for rule in CATALOG {
-            assert!(
-                rule.back <= rule.window,
-                "back reach {} exceeds window {} (rule {})",
-                rule.back,
-                rule.window,
-                rule.id
-            );
+    fn pinned_backs() {
+        // B values are documented in docs/02-rules.md — a change here
+        // must be a deliberate spec change, not drift. Since the #34
+        // tag-tail guard, every backward-guarded rule's B covers its
+        // confirm's backward scan plus CLOAK_TAG_MAX (30) bytes of tag
+        // context. B may exceed W (ipv4): the engine retains window +
+        // back and never re-confirms a candidate whose backward window
+        // a flush crossed (#27), so the old back <= window invariant no
+        // longer holds; the real bound is window + back <= 2048 above.
+        let expected = [
+            ("aws-secret-key", 30),
+            ("connection-string", 42),
+            ("email", 94),
+            ("ipv4", 41),
+            ("ipv6", 75),
+            ("credit-card", 30),
+            ("phone-intl", 30),
+        ];
+        for (id, b) in expected {
+            let rule = CATALOG.iter().find(|r| r.id == id).unwrap();
+            assert_eq!(rule.back, b, "B drifted for rule {}", rule.id);
         }
     }
 

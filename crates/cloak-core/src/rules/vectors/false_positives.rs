@@ -93,4 +93,89 @@ pub static VECTORS: &[Vector] = &[
         input: b"file:///tmp/data.csv",
         spans: &[],
     },
+    // ── Redaction-tag tail adjacency (#34) ───────────────────────────
+    // A candidate fused DIRECTLY to a `[CLOAK:…]` tag tail must not
+    // match: the tag stands in for redacted content the backward guard
+    // would have rejected, so accepting it would break idempotence
+    // (redact(redact(S)) ≠ redact(S)). A separator (space, newline)
+    // between tag and candidate restores normal matching — see the
+    // positive controls in `phone_intl.rs`.
+    Vector {
+        name: "fp-tag-tail-phone",
+        // The original #34 reproducer shape: jwt redacted, phone fused.
+        input: b"[CLOAK:jwt:6717]+12345678901",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-tail-credit-card",
+        input: b"[CLOAK:phone-intl:1a2b]2224000000000006",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-tail-ipv6",
+        input: b"[CLOAK:jwt:6717]2a02:0001:0002:0003:0004:0005:0006:0007",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-tail-ipv4",
+        input: b"[CLOAK:phone-intl:1a2b]192.168.1.100",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-tail-email",
+        input: b"[CLOAK:jwt:6717]user@example.com",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-tail-connstring",
+        input: b"[CLOAK:jwt:6717]postgres://admin:s3cret@db.example.com",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-tail-aws-secret",
+        input: b"[CLOAK:jwt:6717]aws_secret_access_key = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        spans: &[],
+    },
+    // ── Redaction-tag head adjacency (#34 forward face) ──────────────
+    // A candidate whose forward boundary or forward scan stops on a
+    // `[CLOAK:…]` tag head must not match: the tag stands in for redacted
+    // content the scan would have absorbed (a longer domain, a digit
+    // after the last octet, an authority segment reaching an `@`), so
+    // accepting it would break idempotence. Found by strict
+    // fuzz_engine_stream; mirrors the tag-tail section above.
+    Vector {
+        name: "fp-tag-head-ipv4",
+        input: b"192.168.1.100[CLOAK:phone-intl:1a2b]",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-head-ipv6",
+        input: b"2a02:0001:0002:0003:0004:0005:0006:0007[CLOAK:jwt:6717]",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-head-credit-card",
+        input: b"2224000000000006[CLOAK:phone-intl:1a2b]",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-head-phone",
+        input: b"+12345678901[CLOAK:jwt:6717]",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-head-email",
+        // The strict-fuzz reproducer shape: pass 1 rejects
+        // `d@m.efglpat-…` (TLD runs into the token), so pass 2 must not
+        // accept the short domain the tag head leaves behind.
+        input: b"d@m.ef[CLOAK:gitlab-token:610d]",
+        spans: &[],
+    },
+    Vector {
+        name: "fp-tag-head-connstring",
+        // Pass 1's authority scan breaks on the card's spaces, so pass 2
+        // must not sail through the tag to reach the `@`.
+        input: b"postgres://user:p![CLOAK:credit-card:1a2b]@host",
+        spans: &[],
+    },
 ];

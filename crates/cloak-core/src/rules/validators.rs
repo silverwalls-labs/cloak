@@ -16,6 +16,90 @@
 
 use crate::engine::confirm::ConfirmMatch;
 
+// ── Redaction-tag tail guard (#34) ───────────────────────────────────
+
+/// Max length of a redaction tag: `[CLOAK:` (7) + longest rule id
+/// (`connection-string`, 17) + `:` (1) + digest (4) + `]` (1) = 30.
+pub(crate) const CLOAK_TAG_MAX: usize = 30;
+
+/// True when `haystack[..pos]` ends with the closing `]` of a
+/// `[CLOAK:<rule>:<digest>]` redaction tag.
+///
+/// #34: backward-guarded confirms treat a redaction tag tail like a
+/// word byte. Redacting a match replaces the bytes a later candidate's
+/// backward guard examined — `…jwt-body+1234567` rejects the phone
+/// (alnum before `+`), but the redacted `…[CLOAK:jwt:xxxx]+1234567`
+/// passes the guard, so the second pass would redact what the first
+/// pass rejected and `redact(redact(S)) ≠ redact(S)`. Rejecting
+/// candidates fused directly to a tag tail restores idempotence: the
+/// tag stands in for the redacted content the guard would have
+/// rejected. The scan is bounded at [`CLOAK_TAG_MAX`] so the outcome
+/// never depends on where the carry buffer starts.
+pub(crate) fn ends_with_cloak_tag(haystack: &[u8], pos: usize) -> bool {
+    if pos == 0 || haystack[pos - 1] != b']' {
+        return false;
+    }
+    let mut i = pos - 1; // at `]`
+    // Digest: exactly 4 hex chars.
+    if i < 4 {
+        return false;
+    }
+    for _ in 0..4 {
+        i -= 1;
+        if !haystack[i].is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    // `:` between rule id and digest.
+    if i == 0 || haystack[i - 1] != b':' {
+        return false;
+    }
+    i -= 1;
+    // Rule id: 1..=17 chars of `[a-z0-9-]`.
+    let id_floor = i.saturating_sub(17);
+    let mut id_start = i;
+    while id_start > id_floor && matches!(haystack[id_start - 1], b'a'..=b'z' | b'0'..=b'9' | b'-')
+    {
+        id_start -= 1;
+    }
+    if id_start == i {
+        return false; // empty rule id
+    }
+    // `[CLOAK:` opener.
+    id_start >= 7 && &haystack[id_start - 7..id_start] == b"[CLOAK:"
+}
+
+/// True when a well-formed `[CLOAK:<rule>:<digest>]` tag begins exactly
+/// at `haystack[pos]` — the forward mirror of [`ends_with_cloak_tag`].
+///
+/// #34 (forward face, found by strict `fuzz_engine_stream`): a candidate
+/// rejected because the byte after it is a word byte (`::f` before
+/// `ghp_…` — the `g` fails the non-hex boundary) becomes valid once the
+/// following match is redacted and `[` takes its place. Rejecting
+/// candidates immediately followed by a tag head keeps the second pass
+/// from matching what the first pass rejected. Bounded at
+/// [`CLOAK_TAG_MAX`]; the calling rule's `window` must cover its forward
+/// scan plus this check's reach.
+pub(crate) fn starts_with_cloak_tag(haystack: &[u8], pos: usize) -> bool {
+    let rest = haystack.get(pos..).unwrap_or(&[]);
+    if rest.len() < 7 || &rest[..7] != b"[CLOAK:" {
+        return false;
+    }
+    // Rule id: 1..=17 chars of `[a-z0-9-]`, then `:`.
+    let mut i = 7;
+    let id_limit = (7 + 17).min(rest.len());
+    while i < id_limit && matches!(rest[i], b'a'..=b'z' | b'0'..=b'9' | b'-') {
+        i += 1;
+    }
+    if i == 7 || i >= rest.len() || rest[i] != b':' {
+        return false;
+    }
+    // Digest: exactly 4 hex chars, then `]`.
+    rest.len() >= i + 6
+        && rest[i + 1..i + 5].iter().all(|b| b.is_ascii_hexdigit())
+        && rest[i + 5] == b']'
+}
+
 // ── CRC32 + base62 validation (github classic + npm) ────────────────
 
 /// Decode exactly 6 base62 characters (`0-9A-Za-z`, values 0–61) to a u32.
@@ -165,8 +249,12 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
     } else {
         return None;
     };
-    // Non-alnum boundary before the key name (not mid-word).
-    if anchor > 0 && haystack[anchor - 1].is_ascii_alphanumeric() {
+    // Non-alnum boundary before the key name (not mid-word). A redaction
+    // tag tail counts as a word byte (#34): the tag stands in for the
+    // redacted content this guard would have rejected.
+    if anchor > 0
+        && (haystack[anchor - 1].is_ascii_alphanumeric() || ends_with_cloak_tag(haystack, anchor))
+    {
         return None;
     }
     // Scan for separator: skip optional quotes, whitespace, then `=`, `:`.
@@ -310,6 +398,12 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     if !CONN_SCHEMES.iter().any(|s| scheme.eq_ignore_ascii_case(s)) {
         return None;
     }
+    // A redaction tag tail before the scheme counts as a word byte
+    // (#34): `…<tag>https://…` must not confirm where the longer
+    // pre-redaction scheme run did not.
+    if ends_with_cloak_tag(haystack, scheme_start) {
+        return None;
+    }
     // After `://`, find the authority segment `user[:password]@host`.
     let after_scheme = anchor + 3; // skip `://`
     // F09: bound the search window FIRST — never scan past 300 bytes.
@@ -318,8 +412,18 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     // RFC 3986 authority (userinfo, `@`, or the `[`/`]` of IPv6 host
     // literals) — this prevents the search from crossing into
     // unrelated text or past the host.
+    //
+    // #34 forward face: every byte of a redaction tag is a valid
+    // authority byte, so the scan would sail straight through a tag
+    // and reach an `@` that pass 1's scan could not (the redacted
+    // content broke it). Rejecting any candidate whose segment region
+    // touches a tag head keeps the second pass from matching what the
+    // first pass rejected.
     let mut seg_end = after_scheme;
     while seg_end < search_end && is_authority_char(haystack[seg_end]) {
+        if starts_with_cloak_tag(haystack, seg_end) {
+            return None;
+        }
         seg_end += 1;
     }
     let segment = &haystack[after_scheme..seg_end];
@@ -487,8 +591,11 @@ fn base64url_decode(input: &[u8]) -> Option<Vec<u8>> {
 /// 3. IIN range (Big Four)
 /// 4. Luhn checksum
 pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
-    // Non-digit boundary before the anchor.
-    if anchor > 0 && haystack[anchor - 1].is_ascii_digit() {
+    // Non-digit boundary before the anchor. A redaction tag tail
+    // counts as a digit-context byte (#34).
+    if anchor > 0
+        && (haystack[anchor - 1].is_ascii_digit() || ends_with_cloak_tag(haystack, anchor))
+    {
         return None;
     }
     let rest = &haystack[anchor..];
@@ -512,9 +619,12 @@ pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<Conf
             break;
         }
     }
-    // Non-digit boundary after the match.
+    // Non-digit boundary after the match. A redaction tag head counts
+    // as a digit-context byte (#34 forward face).
     let abs_end = anchor + end;
-    if abs_end < haystack.len() && haystack[abs_end].is_ascii_digit() {
+    if abs_end < haystack.len()
+        && (haystack[abs_end].is_ascii_digit() || starts_with_cloak_tag(haystack, abs_end))
+    {
         return None;
     }
     // Must end on a digit (not a trailing separator).
@@ -628,8 +738,14 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
     if haystack[local_start] == b'.' || haystack[anchor - 1] == b'.' {
         return None;
     }
-    // Reject URL credential context: local preceded by `:` or `/`.
-    if local_start > 0 && (haystack[local_start - 1] == b':' || haystack[local_start - 1] == b'/') {
+    // Reject URL credential context: local preceded by `:` or `/`, or
+    // fused directly to a redaction tag tail (#34) — the tag stands in
+    // for redacted content the local scan would have absorbed.
+    if local_start > 0
+        && (haystack[local_start - 1] == b':'
+            || haystack[local_start - 1] == b'/'
+            || ends_with_cloak_tag(haystack, local_start))
+    {
         return None;
     }
     // Forward: domain (capped at 253 bytes per RFC 5321 — F03).
@@ -640,6 +756,14 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
         && is_email_domain_char(haystack[domain_end])
     {
         domain_end += 1;
+    }
+    // A redaction tag head at the domain-stop position counts as a
+    // domain-context byte (#34 forward face): the tag stands in for
+    // redacted content the domain scan would have absorbed — pass 1 saw
+    // a longer domain (invalid TLD/labels) where pass 2 would see a
+    // short, valid one.
+    if starts_with_cloak_tag(haystack, domain_end) {
+        return None;
     }
     let domain = &haystack[domain_start..domain_end];
     // Domain must have at least one dot and a TLD of ≥ 2 alpha chars.
@@ -685,8 +809,9 @@ pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     {
         start -= 1;
     }
-    // Non-digit boundary before the IP.
-    if start > 0 && haystack[start - 1].is_ascii_digit() {
+    // Non-digit boundary before the IP. A redaction tag tail counts as
+    // a digit-context byte (#34).
+    if start > 0 && (haystack[start - 1].is_ascii_digit() || ends_with_cloak_tag(haystack, start)) {
         return None;
     }
     // Try parsing four octets from `start`.
@@ -720,8 +845,11 @@ pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     if octets != 4 {
         return None;
     }
-    // Non-digit boundary after.
-    if pos < haystack.len() && haystack[pos].is_ascii_digit() {
+    // Non-digit boundary after. A redaction tag head counts as a
+    // digit-context byte (#34 forward face).
+    if pos < haystack.len()
+        && (haystack[pos].is_ascii_digit() || starts_with_cloak_tag(haystack, pos))
+    {
         return None;
     }
     // Also reject if a 5th dot follows (e.g., `1.2.3.4.5`).
@@ -771,8 +899,11 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
         colons_before += (haystack[start - 1] == b':') as u8;
         start -= 1;
     }
-    // Non-hex/colon boundary before.
-    if start > 0 && haystack[start - 1].is_ascii_alphanumeric() {
+    // Non-hex/colon boundary before. A redaction tag tail counts as a
+    // word byte (#34).
+    if start > 0
+        && (haystack[start - 1].is_ascii_alphanumeric() || ends_with_cloak_tag(haystack, start))
+    {
         return None;
     }
     // Mid-run truncation: the backward scan hit the cap but the run
@@ -795,8 +926,11 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     if end - start == cap && end < haystack.len() && is_ipv6_ext_char(haystack[end]) {
         return None;
     }
-    // Non-hex boundary after.
-    if end < haystack.len() && haystack[end].is_ascii_alphanumeric() {
+    // Non-hex boundary after. A redaction tag head counts as a word
+    // byte (#34 forward face — the `::f`-before-a-redacted-token case).
+    if end < haystack.len()
+        && (haystack[end].is_ascii_alphanumeric() || starts_with_cloak_tag(haystack, end))
+    {
         return None;
     }
     // The span must contain at least 2 colons to be a valid IPv6
@@ -906,8 +1040,12 @@ fn is_valid_v4_suffix(bytes: &[u8]) -> bool {
 /// Anchor: `+`. Strictly `+`-anchored international format (E.164-ish).
 /// MUST NEVER match bare 10-digit strings — the `+` anchor is mandatory.
 pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
-    // Non-digit boundary before `+`.
-    if anchor > 0 && (haystack[anchor - 1].is_ascii_alphanumeric()) {
+    // Non-digit boundary before `+`. A redaction tag tail counts as a
+    // word byte (#34) — the original #34 reproducer: a jwt redacted in
+    // pass 1 leaves `]` before `+`, which the guard alone would accept.
+    if anchor > 0
+        && (haystack[anchor - 1].is_ascii_alphanumeric() || ends_with_cloak_tag(haystack, anchor))
+    {
         return None;
     }
     if haystack[anchor] != b'+' {
@@ -944,8 +1082,11 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
     if !(7..=15).contains(&digit_count) {
         return None;
     }
-    // Non-digit boundary after.
-    if pos < haystack.len() && haystack[pos].is_ascii_digit() {
+    // Non-digit boundary after. A redaction tag head counts as a
+    // digit-context byte (#34 forward face).
+    if pos < haystack.len()
+        && (haystack[pos].is_ascii_digit() || starts_with_cloak_tag(haystack, pos))
+    {
         return None;
     }
     Some(ConfirmMatch::full(anchor, pos))
@@ -956,6 +1097,42 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- #34 tag-tail guard ---
+
+    #[test]
+    fn cloak_tag_tail_detected() {
+        // Candidate start right after a well-formed tag.
+        assert!(ends_with_cloak_tag(b"[CLOAK:jwt:6717]+1234567", 16));
+        assert!(ends_with_cloak_tag(
+            b"[CLOAK:connection-string:95d4]postgres://",
+            30
+        ));
+        assert!(ends_with_cloak_tag(b"x[CLOAK:email:9f02]", 19));
+        // Uppercase hex digest is still a digest.
+        assert!(ends_with_cloak_tag(b"[CLOAK:jwt:6717]y", 16));
+    }
+
+    #[test]
+    fn cloak_tag_tail_rejects_lookalikes() {
+        // A bare `]` is not a tag tail.
+        assert!(!ends_with_cloak_tag(b"array[0]+1234567", 8));
+        // Digest not hex.
+        assert!(!ends_with_cloak_tag(b"[CLOAK:jwt:zzzz]+1", 16));
+        // Missing `[CLOAK:` opener.
+        assert!(!ends_with_cloak_tag(b"XXXX:jwt:6717]+1", 14));
+        // Empty rule id.
+        assert!(!ends_with_cloak_tag(b"[CLOAK::6717]+1", 13));
+        // Rule id longer than the longest catalog id (17).
+        assert!(!ends_with_cloak_tag(
+            b"[CLOAK:aaaaaaaaaaaaaaaaaa:6717]+1",
+            31
+        ));
+        // No `]` before the candidate at all.
+        assert!(!ends_with_cloak_tag(b"abc+1234567", 3));
+        // Candidate at the stream start.
+        assert!(!ends_with_cloak_tag(b"]+1234567", 1));
+    }
 
     // --- Luhn ---
 

@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 
 use crate::config::{self, Config};
 use crate::rules;
+use crate::rules::validators::CLOAK_TAG_MAX;
 use crate::types::Stats;
 use confirm::CompiledRule;
 use overlap::{MergedMatch, RawMatch};
@@ -145,6 +146,7 @@ impl Engine {
             ctx_len: 0,
             retained: Vec::new(),
             pem_state: pem::PemState::Idle,
+            pem_pre_block: Vec::new(),
             candidates: Vec::new(),
             raw: Vec::new(),
             merged: Vec::new(),
@@ -189,6 +191,12 @@ pub struct Session<'e> {
     ctx_len: usize,
     /// PEM private-key detector state (separate layer from windowed rules).
     pem_state: pem::PemState,
+    /// The last `CTX_BACK` bytes of the carry before a streaming PEM
+    /// entry's body (pre-block text + BEGIN line), stashed when the entry
+    /// is chosen and moved into `PemBlockData::pre_block` on block entry.
+    /// At close/bail-out the PEM layer uses it to rebuild the
+    /// emitted-stream context after the block, chunk-independently (#27).
+    pem_pre_block: Vec<u8>,
     // Scratch buffers reused across pushes (cleared each call).
     candidates: Vec<Candidate>,
     raw: Vec<RawMatch>,
@@ -218,6 +226,10 @@ impl Session<'_> {
     /// of being retained. Call [`finish`](Self::finish) to flush remaining
     /// carry-over and obtain per-rule statistics.
     ///
+    /// The chunk is processed internally in bounded slices, so peak memory
+    /// does not grow with the chunk size — a multi-gigabyte push costs the
+    /// same as a kilobyte one.
+    ///
     /// Chunk boundaries never change the output — any chunking of the
     /// same bytes produces identical redacted output (docs/03):
     ///
@@ -237,41 +249,90 @@ impl Session<'_> {
     pub fn push(&mut self, chunk: &[u8], out: &mut impl io::Write) -> io::Result<()> {
         self.bytes_processed += chunk.len() as u64;
 
-        if self.pem_state.is_in_block() {
-            // Inside a PEM block: body bytes go straight to the incremental
-            // state machine. On close, unread bytes land in carry_over.
-            // carry_over is empty while InBlock, so by the carry_abs
-            // invariant the chunk starts at the absolute offset carry_abs.
-            self.feed_pem(chunk, self.carry_abs, out)?;
-        } else {
-            self.carry_over.extend_from_slice(chunk);
-        }
+        // F10: process the chunk in bounded slices so memory stays
+        // O(max_window) no matter how much data a single push carries —
+        // carry_over never grows with the chunk, and neither does the
+        // unread remainder the PEM layer drops into carry_over on a
+        // close. Chunk-invariance (docs/03) keeps the output identical
+        // to a whole-chunk push: the slices are just a finer chunking
+        // of the same stream. A slice of 2 * max_window guarantees
+        // progress — once appended, the emission boundary
+        // (combined_len - max_window) lies past the end of the previous
+        // buffer, beyond the reach of any straddling match (all shorter
+        // than max_window) or pinned PEM block.
+        let slice = 2 * self.engine.max_window;
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            if self.pem_state.is_active() {
+                // The PEM layer owns incoming bytes (hashing a body or
+                // draining a bailed-out block): body bytes go straight
+                // to the incremental state machine. On close, unread
+                // bytes land in carry_over — at most one slice — and
+                // the scan below drains them before the next slice is
+                // fed. carry_over is empty while the PEM layer is
+                // active, so by the carry_abs invariant the slice
+                // starts at the absolute offset carry_abs.
+                let take = rest.len().min(slice.max(1));
+                let (piece, tail) = rest.split_at(take);
+                let piece_abs = self.carry_abs;
+                self.feed_pem(piece, piece_abs, out)?;
+                rest = tail;
+                // An open block (hashing or draining) consumed the
+                // piece; the next one continues at its end. On close
+                // or bail-out feed_pem has already set carry_abs to
+                // the resume point.
+                if self.pem_state.is_active() {
+                    self.carry_abs = piece_abs + piece.len() as u64;
+                }
+            } else if slice == 0 {
+                // No rules enabled: the scan flushes everything, so the
+                // whole chunk can be appended at once.
+                self.carry_over.extend_from_slice(rest);
+                rest = &[];
+            } else {
+                // Append a bounded prefix. The previous scan may have
+                // been unable to drain past a pinned PEM block
+                // (carry_over already at or past the slice bound); a
+                // full slice still moves the emission boundary past
+                // the block's end.
+                let take = if self.carry_over.len() < slice {
+                    slice - self.carry_over.len()
+                } else {
+                    slice
+                }
+                .min(rest.len());
+                let (piece, tail) = rest.split_at(take);
+                self.carry_over.extend_from_slice(piece);
+                rest = tail;
+            }
 
-        // Scan until no new streaming PEM entry appears. Each entry hands
-        // the retained body to the state machine; a close (END or bail-out)
-        // puts unread bytes back into carry_over for the next iteration.
-        // Iterative, not recursive: a single large push can contain many
-        // oversized blocks.
-        while !self.pem_state.is_in_block() && !self.carry_over.is_empty() {
-            match self.scan_and_emit(false, out)? {
-                None => break,
-                Some((_, key_type_idx)) => {
-                    // scan_and_emit emitted through the BEGIN line and
-                    // drained carry_over to exactly the body so far.
-                    let body = std::mem::take(&mut self.carry_over);
-                    // The body starts at the absolute offset carry_abs; the
-                    // next unprocessed byte (carry is now empty) is at
-                    // carry_abs + body.len().
-                    let body_abs = self.carry_abs;
-                    self.carry_abs += body.len() as u64;
-                    self.ctx_len = 0;
-                    self.pem_state = pem::PemState::InBlock(Box::new(pem::PemBlockData {
-                        hasher: blake3::Hasher::new_keyed(&self.engine.digest_key),
-                        body_bytes: 0,
-                        end_marker: pem::end_marker_for(key_type_idx),
-                        pem_carry: Vec::new(),
-                    }));
-                    self.feed_pem(&body, body_abs, out)?;
+            // Scan until no new streaming PEM entry appears. Each entry hands
+            // the retained body to the state machine; a close (END or bail-out)
+            // puts unread bytes back into carry_over for the next iteration.
+            // Iterative, not recursive: a single large push can contain many
+            // oversized blocks.
+            while !self.pem_state.is_active() && !self.carry_over.is_empty() {
+                match self.scan_and_emit(false, out)? {
+                    None => break,
+                    Some((_, key_type_idx)) => {
+                        // scan_and_emit emitted through the BEGIN line and
+                        // drained carry_over to exactly the body so far.
+                        let body = std::mem::take(&mut self.carry_over);
+                        // The body starts at the absolute offset carry_abs; the
+                        // next unprocessed byte (carry is now empty) is at
+                        // carry_abs + body.len().
+                        let body_abs = self.carry_abs;
+                        self.carry_abs += body.len() as u64;
+                        self.ctx_len = 0;
+                        self.pem_state = pem::PemState::InBlock(Box::new(pem::PemBlockData {
+                            hasher: blake3::Hasher::new_keyed(&self.engine.digest_key),
+                            body_bytes: 0,
+                            end_marker: pem::end_marker_for(key_type_idx),
+                            pem_carry: Vec::new(),
+                            pre_block: std::mem::take(&mut self.pem_pre_block),
+                        }));
+                        self.feed_pem(&body, body_abs, out)?;
+                    }
                 }
             }
         }
@@ -284,11 +345,12 @@ impl Session<'_> {
     pub fn finish(mut self, out: &mut impl io::Write) -> io::Result<Stats> {
         // An open PEM block at stream end: write the tag for whatever body
         // was accumulated (truncated-bail-out semantics, matching the
-        // whole-buffer path). carry_over is empty while InBlock — the body
-        // was consumed by the state machine — so the final scan below
-        // cannot double-process the block.
-        if self.pem_state.is_in_block() {
-            pem::finish_pem(&mut self.pem_state, out)?;
+        // whole-buffer path). A draining block already wrote — and counted —
+        // its tag at the bail-out point, so finish_pem reports false and
+        // the suppressed tail is dropped (F05). carry_over is empty while
+        // the PEM layer is active — the body was consumed by the state
+        // machine — so the final scan below cannot double-process the block.
+        if self.pem_state.is_active() && pem::finish_pem(&mut self.pem_state, out)? {
             *self
                 .matches
                 .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
@@ -304,43 +366,56 @@ impl Session<'_> {
         })
     }
 
-    /// Feed data to the incremental PEM state machine (requires `InBlock`).
-    /// `data_abs` is the absolute stream offset of `data[0]`. On close
-    /// (END found or bail-out), bytes past the redacted body are put back
-    /// into carry_over for normal scanning, preceded by CTX_BACK bytes of
-    /// already-emitted context: candidates in the remainder may need
-    /// backward context that the PEM layer consumed, and without it their
-    /// confirm spans would diverge from the whole-buffer path (#27).
+    /// Feed data to the incremental PEM state machine (requires an active
+    /// PEM state). `data_abs` is the absolute stream offset of `data[0]`.
+    /// On close (END found), bytes past the END line are put back into
+    /// carry_over for normal scanning, preceded by the emitted-stream
+    /// context returned by the PEM layer (pre-block tail + BEGIN line +
+    /// tag + END marker, truncated to CTX_BACK bytes): candidates in the
+    /// remainder may need backward context that the PEM layer consumed,
+    /// and without it their confirm spans would diverge from the
+    /// whole-buffer path (#27). The context is built from the emitted
+    /// stream — not the raw body — so it is identical at every chunk size.
+    /// On bail-out (F05) the tag has been written and the block entered
+    /// drain mode: the whole slice is consumed (hashed or suppressed), so
+    /// carry_over stays empty and carry_abs advances past the slice.
     fn feed_pem(&mut self, data: &[u8], data_abs: u64, out: &mut impl io::Write) -> io::Result<()> {
         match pem::process_pem_body(&mut self.pem_state, data, out)? {
             pem::PemBodyResult::Continuing => {}
-            pem::PemBodyResult::Closed { remainder_start } => {
-                *self
-                    .matches
-                    .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
-                    .or_insert(0) += 1;
-                // Retain CTX_BACK bytes of already-emitted context before
-                // the remainder — see the method doc.
-                let ctx_len = CTX_BACK.min(remainder_start);
-                self.carry_over
-                    .extend_from_slice(&data[remainder_start - ctx_len..remainder_start]);
+            pem::PemBodyResult::Closed {
+                remainder_start,
+                ctx,
+                count,
+            } => {
+                if count {
+                    *self
+                        .matches
+                        .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
+                        .or_insert(0) += 1;
+                }
+                // The PEM layer already emitted the tag and the END marker;
+                // `ctx` is the matching emitted-stream context. Its bytes
+                // are marked as already emitted (ctx_len): confirms may
+                // scan backward into them, but they are never re-emitted
+                // and candidates anchored inside them are suppressed.
+                self.carry_over.extend_from_slice(&ctx);
                 self.carry_over.extend_from_slice(&data[remainder_start..]);
-                self.ctx_len = ctx_len;
-                self.carry_abs = data_abs + (remainder_start - ctx_len) as u64;
+                self.ctx_len = ctx.len();
+                self.carry_abs =
+                    (data_abs + remainder_start as u64).saturating_sub(ctx.len() as u64);
             }
-            pem::PemBodyResult::BailedOut { remainder } => {
+            pem::PemBodyResult::BailedOut => {
+                // F05 bail-out: the tag was written at the truncation point
+                // and the block is now draining — the entire slice was
+                // consumed (budget bytes hashed, the rest suppressed), so
+                // carry_over stays empty and the next unprocessed byte is
+                // at the end of the slice.
                 *self
                     .matches
                     .entry(crate::types::RuleId::new(pem::PEM_RULE_ID))
                     .or_insert(0) += 1;
-                // Same context retention for the bail-out tail.
-                let rem_off = data.len() - remainder.len();
-                let ctx_len = CTX_BACK.min(rem_off);
-                self.carry_over
-                    .extend_from_slice(&data[rem_off - ctx_len..rem_off]);
-                self.carry_over.extend_from_slice(&remainder);
-                self.ctx_len = ctx_len;
-                self.carry_abs = data_abs + (rem_off - ctx_len) as u64;
+                self.carry_abs = data_abs + data.len() as u64;
+                self.ctx_len = 0;
             }
         }
         Ok(())
@@ -415,44 +490,59 @@ impl Session<'_> {
                     {
                         let body_end = body_start + end_offset;
                         let body_len = body_end - body_start;
-                        // Bail-out truncation: redact at most PEM_BAIL_OUT
-                        // bytes of the body. Everything past the truncation
-                        // point is clean text — regular rules and nested
-                        // BEGINs apply from there, matching the oracle's
-                        // `pos = bail_end` resumption.
-                        let match_end = (body_start + pem::PEM_BAIL_OUT).min(body_end);
-                        self.raw.push(RawMatch {
-                            start: body_start,
-                            end: match_end,
-                            redact_start: body_start,
-                            redact_end: match_end,
-                            rule: self.engine.pem_rule_idx,
-                        });
-                        pem_body_regions.push((body_start, match_end));
-                        pem_block_extents.push((cand.start, match_end));
-                        // Resume PEM scanning past the END line for full
-                        // blocks, at the truncation point for oversized
-                        // bodies (the tail is re-scanned).
-                        pem_scan_pos = if body_len <= pem::PEM_BAIL_OUT {
-                            body_end + end_marker.len()
+                        let end_line_end = body_end + end_marker.len();
+                        if body_len <= pem::PEM_BAIL_OUT {
+                            // Full redaction: one tag covers the body; the
+                            // BEGIN/END lines stay visible; scanning
+                            // resumes after the END line.
+                            self.raw.push(RawMatch {
+                                start: body_start,
+                                end: body_end,
+                                redact_start: body_start,
+                                redact_end: body_end,
+                                rule: self.engine.pem_rule_idx,
+                            });
+                            pem_body_regions.push((body_start, body_end));
+                            pem_block_extents.push((cand.start, body_end));
                         } else {
-                            match_end
-                        };
+                            // Oversized body (F05): the tag covers exactly
+                            // PEM_BAIL_OUT bytes; the tail up to the END
+                            // line is part of the match EXTENT but outside
+                            // the redact span — the emission suppresses it
+                            // (PEM suffixes are never written). The extent
+                            // ends at body_end so the END line stays
+                            // visible as clean text. Scanning resumes
+                            // after the END line.
+                            let bail_end = body_start + pem::PEM_BAIL_OUT;
+                            self.raw.push(RawMatch {
+                                start: body_start,
+                                end: body_end,
+                                redact_start: body_start,
+                                redact_end: bail_end,
+                                rule: self.engine.pem_rule_idx,
+                            });
+                            pem_body_regions.push((body_start, body_end));
+                            pem_block_extents.push((cand.start, body_end));
+                        }
+                        pem_scan_pos = end_line_end;
                     } else if is_final {
                         // No END in buffer and this is the final flush —
-                        // bail-out: redact the body from body_start to the
-                        // end of input (or PEM_BAIL_OUT, whichever is less).
+                        // bail-out: the tag covers the body from body_start
+                        // to the end of input (or PEM_BAIL_OUT, whichever
+                        // is less); everything past the truncation point
+                        // is suppressed (F05) — the extent runs to EOF and
+                        // the emission never writes the suffix.
                         let bail_end = (body_start + pem::PEM_BAIL_OUT).min(combined_len);
                         self.raw.push(RawMatch {
                             start: body_start,
-                            end: bail_end,
+                            end: combined_len,
                             redact_start: body_start,
                             redact_end: bail_end,
                             rule: self.engine.pem_rule_idx,
                         });
-                        pem_body_regions.push((body_start, bail_end));
-                        pem_block_extents.push((cand.start, bail_end));
-                        pem_scan_pos = bail_end;
+                        pem_body_regions.push((body_start, combined_len));
+                        pem_block_extents.push((cand.start, combined_len));
+                        pem_scan_pos = combined_len;
                     } else {
                         // Streaming: BEGIN confirmed, END not yet seen.
                         // Emit the BEGIN line and hand the body to the
@@ -488,20 +578,29 @@ impl Session<'_> {
                 continue;
             }
             let rule = &self.engine.rules[cand.rule];
-            // #27 guard: if the carry buffer does not start at the stream
+            // #27 guard: when the carry buffer does not start at the stream
             // start and the candidate's backward window would reach before
-            // it, the window was already flushed — re-confirming against
-            // truncated context could accept what full context rejected
-            // (e.g. `pffe80::1` truncating to the valid `fe80::1`). Such a
-            // candidate was necessarily resolved earlier with full context:
-            // the emission boundary (max window + back) never crosses the
-            // backward window of an unresolved candidate, so skipping only
-            // ever suppresses a redundant re-confirmation.
-            if self.carry_abs > 0 && cand.start < rule.back {
-                continue;
-            }
+            // it, the confirm runs against truncated backward context. The
+            // backward reads are the match-start scan and the #34 tag-tail
+            // guard (at most CLOAK_TAG_MAX bytes), so a confirmed match
+            // starting at least CLOAK_TAG_MAX bytes into the buffer proves
+            // every backward read stayed in-buffer — the outcome is
+            // identical to the whole-buffer path and the match is accepted.
+            // A truncated candidate whose match starts closer to the buffer
+            // edge is dropped: it can only be a re-derivation of a
+            // candidate resolved earlier with full context (the emission
+            // boundary never crosses the backward window of an unresolved
+            // candidate), and an earlier confirmation is re-injected from
+            // `retained` below. Post-PEM candidates are NOT re-derivations
+            // (their bytes were consumed by the PEM layer), but their
+            // backward scans stop at the tag/END-marker barriers well past
+            // CLOAK_TAG_MAX, so they always pass the precise check.
+            let truncated = self.carry_abs > 0 && cand.start < rule.back;
             let resolvable = is_final || cand.start + rule.window <= combined_len;
             if resolvable && let Some(cm) = confirm::confirm(rule, &self.carry_over, cand.start) {
+                if truncated && cm.match_start < CLOAK_TAG_MAX {
+                    continue;
+                }
                 self.raw.push(RawMatch {
                     start: cm.match_start,
                     end: cm.match_end,
@@ -615,6 +714,13 @@ impl Session<'_> {
                     emit_start
                 } else {
                     entry = Some((body_start, key_type_idx));
+                    // Stash the emitted-stream context before the body —
+                    // pre-block text + BEGIN line, up to CTX_BACK bytes. At
+                    // close/bail-out the PEM layer combines it with the tag
+                    // (and END marker) so the post-block context is
+                    // chunk-independent (#27).
+                    self.pem_pre_block =
+                        self.carry_over[body_start.saturating_sub(CTX_BACK)..body_start].to_vec();
                     body_start
                 }
             }
@@ -665,8 +771,13 @@ impl Session<'_> {
                 crate::redact::write_tag(rule_id, &digest, out)?;
                 *self.matches.entry(rule_id.clone()).or_insert(0) += 1;
             }
-            // Context suffix (empty for full-span rules).
-            out.write_all(&self.carry_over[m.redact_end..m.end])?;
+            // Context suffix (empty for full-span rules). PEM matches never
+            // write their suffix: for a full block it is empty, and for an
+            // oversized/bailed-out block it is the suppressed tail (F05) —
+            // private-key material past the truncation point must not leak.
+            if m.rule != self.engine.pem_rule_idx {
+                out.write_all(&self.carry_over[m.redact_end..m.end])?;
+            }
             pos = m.end;
         }
 
@@ -724,9 +835,10 @@ pub const CARRY_OVER_BOUND: usize = 2048 + pem::PEM_BAIL_OUT + pem::MAX_PEM_LINE
 /// Bytes of already-emitted backward context retained in front of the
 /// carry-over after a PEM block close (#27): candidates in the remainder
 /// need backward context the PEM layer consumed. Must cover the largest
-/// rule backward reach in the catalog (email: 64) — pinned by the
+/// rule backward reach in the catalog (email: 94, including the #34
+/// tag-tail guard's CLOAK_TAG_MAX) — pinned by the
 /// `ctx_back_covers_max_rule_back` unit test.
-const CTX_BACK: usize = 64;
+const CTX_BACK: usize = 94;
 
 #[cfg(test)]
 mod tests {
@@ -1047,6 +1159,69 @@ mod tests {
     }
 
     #[test]
+    fn one_megabyte_push_bounded_carry() {
+        // F10: a single very large push must not grow carry_over with
+        // the chunk size — push slices the chunk internally, so the
+        // hard bound holds after the push, and chunk-invariance keeps
+        // the output identical to an 8 KiB-chunked feed of the same
+        // stream. The input mixes AWS keys (regular rules), small
+        // complete PEM blocks, and one oversized block that bails out
+        // and drains (F05) so every retention path is exercised.
+        let engine = test_engine();
+        let mut input = Vec::new();
+        for i in 0..128 {
+            input.extend_from_slice(format!("line {i}: key=AKIAIOSFODNN7EXAMPLE\n").as_bytes());
+            input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\n");
+            input.extend_from_slice(&[b'K'; 64]);
+            input.extend_from_slice(b"\n-----END RSA PRIVATE KEY-----\n");
+            input.extend_from_slice(&vec![b' '; 8000]);
+        }
+        input.extend_from_slice(b"-----BEGIN EC PRIVATE KEY-----\n");
+        input.extend_from_slice(&vec![b'Z'; pem::PEM_BAIL_OUT + 512]);
+        input.extend_from_slice(b"\n-----END EC PRIVATE KEY-----\n");
+        input.extend_from_slice(b"tail key=AKIAIOSFODNN7EXAMPLE\n");
+        assert!(input.len() > 1 << 20, "input must exceed 1 MiB");
+
+        let mut session = engine.session();
+        let mut big_out = Vec::new();
+        session.push(&input, &mut big_out).unwrap();
+        assert!(
+            session.carry_over_len() <= CARRY_OVER_BOUND,
+            "carry must stay bounded after a 1 MiB push, got {}",
+            session.carry_over_len()
+        );
+        let big_stats = session.finish(&mut big_out).unwrap();
+
+        let mut session = engine.session();
+        let mut chunked_out = Vec::new();
+        for chunk in input.chunks(8192) {
+            session.push(chunk, &mut chunked_out).unwrap();
+        }
+        let chunked_stats = session.finish(&mut chunked_out).unwrap();
+
+        assert_eq!(
+            big_out, chunked_out,
+            "1 MiB push diverges from 8 KiB chunks"
+        );
+        assert_eq!(big_stats.matches, chunked_stats.matches);
+        // Every secret and PEM body was redacted, none leaked.
+        assert_eq!(
+            big_stats.matches[&RuleId::new("aws-access-key")],
+            129,
+            "128 inline keys + the trailing one"
+        );
+        assert_eq!(
+            big_stats.matches[&RuleId::new("pem-private-key")],
+            129,
+            "128 small blocks + the oversized one"
+        );
+        let out_str = String::from_utf8_lossy(&big_out);
+        assert!(!out_str.contains("IOSFODNN7EXAMPLE"));
+        assert!(!out_str.contains("KKKK"));
+        assert!(!out_str.contains("ZZZZ"));
+    }
+
+    #[test]
     fn max_window_reflects_filtered_rules() {
         // JWT has window=2048 (largest in catalog). Disable it, and
         // max_window should drop to the next-largest enabled rule.
@@ -1199,35 +1374,38 @@ mod tests {
 
     #[test]
     fn multiple_oversized_blocks_in_one_push() {
-        // The push loop is iterative: several unterminated oversized blocks
-        // in a single push each bail out independently.
+        // The push loop is iterative: several oversized blocks in a single
+        // push each bail out and drain independently (F05). Unterminated
+        // blocks swallow everything after them, so this uses complete
+        // blocks — each tag covers exactly PEM_BAIL_OUT bytes, each tail
+        // is suppressed, and both END lines stay visible.
         let engine = test_engine();
         let mut input = b"-----BEGIN RSA PRIVATE KEY-----\n".to_vec();
         input.extend_from_slice(&vec![b'A'; pem::PEM_BAIL_OUT + 100]);
+        input.extend_from_slice(b"\n-----END RSA PRIVATE KEY-----");
         input.extend_from_slice(b"\n-----BEGIN EC PRIVATE KEY-----\n");
         input.extend_from_slice(&vec![b'B'; pem::PEM_BAIL_OUT + 100]);
+        input.extend_from_slice(b"\n-----END EC PRIVATE KEY-----");
         let mut session = engine.session();
         let mut out = Vec::new();
         session.push(&input, &mut out).unwrap();
         assert!(
-            session.carry_over_len() <= engine.max_window,
+            session.carry_over_len() <= CARRY_OVER_BOUND,
             "carry must stay bounded after bail-outs"
         );
         let stats = session.finish(&mut out).unwrap();
         assert_eq!(stats.matches[&RuleId::new("pem-private-key")], 2);
-        assert_eq!(
-            String::from_utf8_lossy(&out)
-                .matches("[CLOAK:pem-private-key:")
-                .count(),
-            2
-        );
-        // Both BEGIN lines stay visible (the second one arrives in the
-        // bail-out remainder of the first block).
+        let out_str = String::from_utf8_lossy(&out);
+        assert_eq!(out_str.matches("[CLOAK:pem-private-key:").count(), 2);
+        // Both BEGIN and END lines stay visible; neither tail leaks. (The
+        // newline before each END marker is body — suppressed — so the END
+        // lines abut their tags directly.)
         assert!(out.starts_with(b"-----BEGIN RSA PRIVATE KEY-----"));
-        assert!(
-            out.windows(30)
-                .any(|w| w == b"-----BEGIN EC PRIVATE KEY-----")
-        );
+        assert!(out_str.contains("-----END RSA PRIVATE KEY-----"));
+        assert!(out_str.contains("-----BEGIN EC PRIVATE KEY-----"));
+        assert!(out_str.ends_with("-----END EC PRIVATE KEY-----"));
+        assert!(!out_str.contains("AAAA"));
+        assert!(!out_str.contains("BBBB"));
     }
 
     #[test]

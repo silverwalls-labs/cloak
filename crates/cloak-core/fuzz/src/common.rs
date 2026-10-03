@@ -57,23 +57,22 @@ pub static KEY: LazyLock<[u8; 32]> =
 ///
 /// **Strict mode only (`CLOAK_FUZZ_STRICT=1`), every input:** the three
 /// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
-/// idempotence. They are strict-only because two tracked engine bugs violate
-/// all three on narrow inputs, and asserting them by default would make the
-/// gate red for already-filed bugs:
-/// - **#27** — a context-keyed extent overlapping a PEM block diverges from
-///   the reference even in whole-buffer mode (reproducer:
-///   `regression-connstring-pem-overlap`: the engine emits two tags with
-///   overlapping redaction spans, the oracle's overlap merge collapses them
-///   into one), and the flush boundary cuts backward context beyond
-///   max_window.
-/// - **#34** — redacting a match erases an adjacent candidate's backward
-///   guard, breaking idempotence.
+/// idempotence. They were strict-only while the tracked engine bugs below
+/// violated all three on narrow inputs; both are now FIXED (#27, #34) and
+/// CI replays the corpus and runs the smoke fuzz with `CLOAK_FUZZ_STRICT=1`
+/// (F15). The env gate remains so a bisect or a targeted reproduction can
+/// still disable the equivalence assertions:
+/// - **#27** (fixed) — a context-keyed extent overlapping a PEM block
+///   diverged from the reference even in whole-buffer mode (reproducer:
+///   `regression-connstring-pem-overlap`), and the flush boundary cut
+///   backward context beyond max_window.
+/// - **#34** (fixed) — redacting a match erased an adjacent candidate's
+///   backward guard, breaking idempotence.
 ///
-/// Correctness on KNOWN inputs is still gated every PR by the deterministic
+/// Correctness on KNOWN inputs is also gated every PR by the deterministic
 /// `tests/differential.rs` (engine ≡ reference over the vector corpus and
-/// concatenations). Strict fuzzing is the tool to (a) reproduce a finding and
-/// (b) hunt for NEW divergences once #27 and #34 are fixed — at which point
-/// strict becomes the default and this split collapses.
+/// concatenations). Strict fuzzing hunts for NEW divergences; if it stays
+/// green over time, strict can become the unconditional default.
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| {
         // Truthy value only, so `CLOAK_FUZZ_STRICT=0` / `=false` DISABLES

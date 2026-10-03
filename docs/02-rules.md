@@ -37,7 +37,7 @@ operators which ones to consider disabling per environment.
 | `pypi-token` | `pypi-` | `pypi-AgEIcHlwaS5vcmc…` (macaroon prefix) | Low |
 | `jwt` | `eyJ` | three dot-separated base64url segments, first two decode-shaped as JSON (`{"` prefix after decode of header) | Low-med |
 | `connection-string` | `://` (+ scheme set: `postgres`, `postgresql`, `mysql`, `mongodb`, `redis`, `amqp`, `amqps`…) | `scheme://user:PASSWORD@host` — only the password span is redacted. The userinfo/host split is the LAST `@` (passwords may contain `@`), and a non-empty host is required after it. | Low |
-| `pem-private-key` | `-----BEGIN` | stateful: `-----BEGIN (RSA \|EC \|DSA \|OPENSSH \|ENCRYPTED \|)PRIVATE KEY-----` … `-----END …-----`, multi-line, bounded bail-out (default 16 KiB) | ~0 |
+| `pem-private-key` | `-----BEGIN` | stateful: `-----BEGIN (RSA \|EC \|DSA \|OPENSSH \|ENCRYPTED \|)PRIVATE KEY-----` … `-----END …-----`, multi-line, bounded bail-out (default 16 KiB). An oversized body redacts its first 16 KiB and **suppresses the tail through the END marker** (drain-to-end, F05) — private-key material past the truncation point never reaches the output. An unterminated block swallows everything to EOF the same way. | ~0 |
 
 Notes:
 - `connection-string` redacts **only the credential span**, not the whole URL — host
@@ -76,10 +76,16 @@ streaming carry buffer starts: the engine retains `W + B` bytes behind the
 emission boundary, never re-confirms a candidate whose backward window a flush
 has crossed (it was already resolved with full context), and carries
 confirmed-but-unemitted spans across pushes instead of re-deriving them.
-Example: `email` has `B = 64` (the local-part cap); `ipv6` has `B = 45`
-(the max address text length). Windows whose forward reach grew beyond `W`
-were corrected: `aws-secret-key` `W = 92` (key + gaps + separator + value),
-`connection-string` `W = 304` (`://` + `@` search bound + `@` + host byte).
+
+On top of each rule's intrinsic reach, every backward- or boundary-checking
+rule adds `CLOAK_TAG_MAX` (30 — the longest possible `[CLOAK:…]` tag) so a
+candidate abutting an already-emitted tag cannot re-anchor inside it (#34
+tag-tail guard), and forward windows include the same margin where a confirm
+scans across a following tag (#34 tag-head guard). Current values:
+`email` `B = 94` (64 local cap + 30), `ipv6` `B = 75` / `W = 75` (45 scan
+bound each side + 30), `ipv4` `W = 45` / `B = 41`, `credit-card` and
+`phone-intl` `W = 55` / `B = 30`, `aws-secret-key` `W = 92` / `B = 30`,
+`connection-string` `W = 334` / `B = 42`.
 
 ### Overlap resolution (implemented S2)
 

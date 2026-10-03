@@ -96,4 +96,32 @@ pub static VECTORS: &[Vector] = &[
             rule: "github-token",
         }],
     },
+    Vector {
+        // #34 forward face (email): the email candidate's domain runs
+        // into the gitlab token (TLD `efglpat-AKIA…` is not all-alpha),
+        // so pass 1 rejects the email and redacts only the token. Pass 2
+        // sees `d@m.ef[CLOAK:gitlab-token:…]` — the tag-head guard must
+        // keep the short domain from matching (fp-tag-head-email).
+        name: "overlap-email-domain-into-token",
+        input: b"xd@m.efglpat-AKIAIOSFODNE1F67809A",
+        spans: &[ExpectedSpan {
+            start: 7,
+            end: 33,
+            rule: "gitlab-token",
+        }],
+    },
+    Vector {
+        // #34 forward face (connection-string): the authority scan breaks
+        // on the card's spaces, so pass 1 rejects the URL and redacts only
+        // the card. Pass 2 sees `…p![CLOAK:credit-card:…]@host` — the
+        // tag-crossing guard must keep the scan from reaching the `@`
+        // (fp-tag-head-connstring).
+        name: "overlap-connstring-broken-by-card",
+        input: b"postgres://user:p!4111 1111 1111 1111@host",
+        spans: &[ExpectedSpan {
+            start: 18,
+            end: 37,
+            rule: "credit-card",
+        }],
+    },
 ];

@@ -178,6 +178,13 @@ struct SessionState {
     output: Vec<u8>,
 }
 
+/// Cap on the output-buffer capacity retained between session pushes
+/// (F10): a host may push very large chunks, and the buffer seeded for
+/// the next push must not pin linear memory at the largest chunk ever
+/// seen. Typical chunks stay under the cap; larger ones simply regrow
+/// the buffer as needed.
+const OUTPUT_CAPACITY_CAP: usize = 64 * 1024;
+
 thread_local! {
     static ENGINES: RefCell<Slab<Box<Engine>>> = RefCell::new(Slab::new());
     static SESSIONS: RefCell<Slab<SessionState>> = RefCell::new(Slab::new());
@@ -539,8 +546,9 @@ pub unsafe extern "C" fn cloakwasm_push(
                 Ok(()) => {
                     let out = std::mem::take(&mut state.output);
                     // Seed the next chunk's buffer so it doesn't regrow
-                    // from zero capacity on every push.
-                    state.output = Vec::with_capacity(input.len());
+                    // from zero capacity on every push — capped so a huge
+                    // chunk cannot pin linear memory (F10).
+                    state.output = Vec::with_capacity(input.len().min(OUTPUT_CAPACITY_CAP));
                     buf_result_from_vec(out)
                 }
                 Err(e) => {
