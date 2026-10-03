@@ -7,6 +7,12 @@ use crate::types::{Digest, RuleId};
 /// Returns the first 2 bytes (16 bits = 4 hex chars) of the keyed hash.
 /// Same bytes + same key → same digest; different key → different digest.
 ///
+/// **Collision rate (F14):** 16-bit truncation means birthday-bound
+/// collisions are expected after ~256 distinct secret values under the
+/// same key. Digests are correlation *hints*, not cryptographic
+/// commitments — two identical tags may represent different secrets.
+/// A longer digest (e.g., 32 bits) is tracked as a future option.
+///
 /// ```
 /// use cloak_core::{compute_digest, format_tag, RuleId};
 ///

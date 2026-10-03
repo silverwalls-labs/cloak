@@ -194,7 +194,6 @@ fn every_vector_various_chunk_sizes() {
 /// The fuzz harness therefore gates all three equivalences behind strict
 /// mode (`fuzz/src/common.rs`).
 #[test]
-#[ignore = "flush-boundary context loss beyond max_window — issue #27"]
 fn concatenated_corpora_1byte_chunks() {
     let (engine, key) = engine_and_key();
     let separators: [&[u8]; 4] = [b"\n", b" ", b"\x00\xff\x80", b""];
@@ -243,9 +242,10 @@ fn streaming_equals_whole_buffer_all_sizes() {
 
 // ---------- S3 PEM streaming bail-out differentials ----------
 
-/// A PEM body larger than PEM_BAIL_OUT must redact identically (tag over
-/// exactly the first 16 KiB, tail as clean text) at every chunk size —
-/// this pins the streaming bail-out digest to the whole-buffer/oracle one.
+/// A PEM body larger than PEM_BAIL_OUT must redact identically at every
+/// chunk size — this pins the streaming bail-out digest to the
+/// whole-buffer/oracle one. Since F05 the tail past the truncation point
+/// is suppressed until the END marker: no body byte may leak.
 #[test]
 fn oversized_pem_bailout_all_chunk_sizes() {
     let (engine, key) = engine_and_key();
@@ -253,6 +253,10 @@ fn oversized_pem_bailout_all_chunk_sizes() {
     input.extend_from_slice(&vec![b'A'; 20_000]);
     input.extend_from_slice(b"\n-----END RSA PRIVATE KEY-----\ntail");
     let (reference, reference_stats) = cloak_core::reference::redact(&input, &key);
+    // F05: the 2000-byte tail is suppressed — only the tag and the END
+    // line represent the block; "tail" (after the END line) stays clean.
+    assert!(reference.windows(4).all(|w| w != b"AAAA"));
+    assert!(reference.ends_with(b"-----END RSA PRIVATE KEY-----\ntail"));
     for sz in [1, 7, 100, 4096, 16_385, input.len()] {
         let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, sz);
         assert_eq!(
@@ -299,9 +303,11 @@ fn unterminated_pem_all_chunk_sizes() {
     }
 }
 
-/// A nested BEGIN inside an oversized body's clean tail must be detected
-/// in streaming too — the engine resumes scanning at the bail-out point,
-/// exactly like the oracle (`pos = bail_end`).
+/// A nested BEGIN inside an oversized body's tail is SUPPRESSED (F05):
+/// after the bail-out the block drains — everything up to the outer END
+/// marker (or EOF when the outer block never closes) is private-key
+/// material and must not reach the output, exactly like the oracle's
+/// extent-to-EOF. The nested block therefore does not count as a match.
 #[test]
 fn nested_begin_in_bailout_tail_streaming() {
     let (engine, key) = engine_and_key();
@@ -315,8 +321,13 @@ fn nested_begin_in_bailout_tail_streaming() {
         reference_stats
             .matches
             .get(&cloak_core::RuleId::new("pem-private-key")),
-        Some(&2)
+        Some(&1),
+        "the nested block is inside the drained tail — one match"
     );
+    // No body byte and no nested marker may leak.
+    assert!(reference.windows(4).all(|w| w != b"AAAA"));
+    assert!(reference.windows(4).all(|w| w != b"ECBODY"));
+    assert!(!reference.windows(11).any(|w| w == b"BEGIN EC "));
     for sz in [1, 7, 1000, 16_385] {
         let (chunked, chunked_stats) = engine_redact_chunked(&engine, &input, sz);
         assert_eq!(
@@ -349,13 +360,14 @@ fn redaction_is_idempotent() {
     assert_engine_equals_reference(&engine, &key, &once, "idempotence corpus");
 }
 
-/// Known issue (#34, found by fuzz_engine_stream): redacting a match can
-/// erase the backward-guard context of an adjacent rejected candidate.
-/// Here the jwt body ends right before `+1234567`; phone-intl rejects the
-/// `+` in pass 1 (preceded by alphanumeric), but after redaction it is
-/// preceded by the tag's `]` and matches in pass 2.
+/// #34 (found by fuzz_engine_stream, fixed by the tag-tail guard):
+/// redacting a match can erase the backward-guard context of an
+/// adjacent rejected candidate. Here the jwt body ends right before
+/// `+1234567`; phone-intl rejects the `+` in pass 1 (preceded by
+/// alphanumeric), but after redaction it is preceded by the tag's
+/// `]` — the tag-tail guard (`ends_with_cloak_tag`) rejects it again,
+/// so pass 2 output equals pass 1 and idempotence holds.
 #[test]
-#[ignore = "backward-guard context erased by adjacent redaction — issue #34"]
 fn idempotence_survives_tag_adjacent_context() {
     let (engine, _key) = engine_and_key();
     let mut input = Vec::from(&b"\x00\xff"[..]);

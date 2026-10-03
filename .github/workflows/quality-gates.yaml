@@ -226,23 +226,24 @@ jobs:
         run: |
           cargo install cargo-fuzz --version 0.13.2 --locked
 
-      - name: Corpus regression replay
+      - name: Corpus regression replay (strict)
         working-directory: crates/cloak-core
+        env:
+          # Strict mode enables the correctness-equivalence assertions
+          # (streaming == whole-buffer, idempotence, oracle parity) on
+          # every replayed input. #27 and #34 are fixed, so the
+          # regression-* reproducers and the whole corpus replay with
+          # full equivalence checks (F15).
+          CLOAK_FUZZ_STRICT: "1"
         run: |
-          # Every committed input re-executed with the default-mode harness
-          # assertions (no panic + carry-over bound) — no fuzzing. The
-          # correctness-equivalence assertions are strict-only; the
-          # regression-* reproducers for #27/#34 therefore only guard
-          # no-panic here, and their invariants are pinned instead by the
-          # (currently #[ignore]d) tests in tests/differential.rs. Set
-          # CLOAK_FUZZ_STRICT=1 to replay them with full equivalence checks
-          # once those bugs are fixed.
           for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do
             cargo fuzz run "$t" "fuzz/corpus/$t" -O --debug-assertions -- -runs=0 -timeout=10
           done
 
-      - name: Fuzz smoke (time-boxed)
+      - name: Fuzz smoke (time-boxed, strict)
         working-directory: crates/cloak-core
+        env:
+          CLOAK_FUZZ_STRICT: "1"
         run: |
           cargo fuzz run fuzz_engine_stream fuzz/corpus/fuzz_engine_stream -O --debug-assertions -- \
             -max_total_time=90 -timeout=10 -rss_limit_mb=2048 -max_len=32768 \
@@ -398,12 +399,44 @@ jobs:
           diff adapters/node/test/fixtures/vectors.json /tmp/vectors-fresh.json \
             || { echo "::error::vectors.json is stale — regenerate with: cargo run --example export-vectors -p cloak-core > adapters/node/test/fixtures/vectors.json"; exit 1; }
 
+      - name: Install Node dependencies
+        working-directory: adapters/node
+        run: npm ci
+
+      - name: TypeScript type check (F17)
+        working-directory: adapters/node
+        run: npm run typecheck
+
       - name: Node parity + streaming + transform tests
         env:
           CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
         working-directory: adapters/node
         run: |
           node --experimental-strip-types --no-warnings --test test/*.test.ts
+
+      - name: npm pack + install-from-tarball smoke (F17)
+        # The packed tarball is what a consumer installs — verify it is
+        # complete and functional, not just the working tree. prepack
+        # compiles src/ to dist/ (plain ESM JS: Node refuses to
+        # type-strip .ts files under node_modules), so the installed
+        # package runs without any TypeScript flags.
+        env:
+          CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
+        working-directory: adapters/node
+        run: |
+          npm pack --pack-destination /tmp
+          SMOKE_DIR=$(mktemp -d)
+          cd "$SMOKE_DIR"
+          npm init -y >/dev/null
+          npm install --no-save /tmp/cloak-node-*.tgz
+          node --input-type=module -e "
+            import { createEngine } from 'cloak-node';
+            const engine = await createEngine();
+            const { output } = engine.redact('token=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');
+            if (output.includes('ghp_Ab')) throw new Error('secret leaked through packed artifact');
+            if (!output.includes('[CLOAK:github-token:')) throw new Error('expected a CLOAK tag, got: ' + output.toString());
+            console.log('packed-artifact smoke ok:', output.toString().trim());
+          "
 
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
@@ -592,21 +625,46 @@ jobs:
           read -r integ_l integ_f integ_b integ_raw <<< "$(parse_lcov coverage/integration.lcov)"
           read -r e2e_l e2e_f e2e_b e2e_raw <<< "$(parse_lcov coverage/e2e.lcov)"
 
-          # ── Total (merge all LCOV files) ──
+          # ── Total (line-accurate merge of all LCOV files) ──
+          # A source line executed by several tiers counts ONCE: records
+          # are keyed by (file, line/function/branch) and max-merged
+          # across tiers, so the total is the true union of per-tier
+          # coverage (F16 — the previous per-tier sum double-counted
+          # every shared line, skewing the total in either direction).
           total_lf=0 total_lh=0 total_fnf=0 total_fnh=0 total_brf=0 total_brh=0
-          for f in coverage/*.lcov; do
-            [ -f "$f" ] || continue
-            while IFS= read -r line; do
-              case "$line" in
-                LF:*) total_lf=$((total_lf + ${line#LF:})) ;;
-                LH:*) total_lh=$((total_lh + ${line#LH:})) ;;
-                FNF:*) total_fnf=$((total_fnf + ${line#FNF:})) ;;
-                FNH:*) total_fnh=$((total_fnh + ${line#FNH:})) ;;
-                BRF:*) total_brf=$((total_brf + ${line#BRF:})) ;;
-                BRH:*) total_brh=$((total_brh + ${line#BRH:})) ;;
-              esac
-            done < "$f"
-          done
+          if ls coverage/*.lcov >/dev/null 2>&1; then
+            read -r total_lf total_lh total_fnf total_fnh total_brf total_brh <<< "$(awk '
+              function cov(key, val) {
+                if (!(key in hit) || val > hit[key]) hit[key] = val
+              }
+              /^SF:/ { sf = substr($0, 4); next }
+              /^DA:/ {
+                split(substr($0, 4), f, ",")
+                cov("L" SUBSEP sf SUBSEP f[1], f[2] + 0)
+                next
+              }
+              /^FNDA:/ {
+                split(substr($0, 6), f, ",")
+                cov("F" SUBSEP sf SUBSEP f[2], f[1] + 0)
+                next
+              }
+              /^BRDA:/ {
+                split(substr($0, 6), f, ",")
+                v = (f[3] == "-") ? 0 : f[3] + 0
+                cov("B" SUBSEP sf SUBSEP f[1] SUBSEP f[2], v)
+                next
+              }
+              END {
+                for (key in hit) {
+                  t = substr(key, 1, 1)
+                  if (t == "L") { lf++; if (hit[key] > 0) lh++ }
+                  else if (t == "F") { fnf++; if (hit[key] > 0) fnh++ }
+                  else { brf++; if (hit[key] > 0) brh++ }
+                }
+                printf "%d %d %d %d %d %d\n", lf, lh, fnf, fnh, brf, brh
+              }
+            ' coverage/*.lcov)"
+          fi
           total_lpct="-"; total_fpct="-"; total_bpct="-"; total_raw="0"
           if [ "$total_lf" -gt 0 ]; then
             total_raw=$(awk "BEGIN { printf \"%.1f\", ($total_lh/$total_lf)*100 }")

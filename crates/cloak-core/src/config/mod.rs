@@ -114,18 +114,20 @@ impl Config {
         // Digest key: must be empty (ephemeral) or start with "env:".
         let dk = &self.redaction.digest_key;
         if !dk.is_empty() && !dk.starts_with("env:") {
-            return Err(BuildError::InvalidConfig(format!(
-                "invalid digest_key \"{dk}\": must start with \"env:\" \
+            return Err(BuildError::InvalidConfig(
+                "invalid digest_key: must start with \"env:\" \
                  (e.g. \"env:CLOAK_DIGEST_KEY\"); inline keys are not supported"
-            )));
+                    .into(),
+            ));
         }
         // "env:" with an empty variable name would silently fall back to
         // an ephemeral key with a garbled warning — reject it up front.
         if dk == "env:" {
-            return Err(BuildError::InvalidConfig(format!(
-                "invalid digest_key \"{dk}\": \"env:\" requires a variable name \
+            return Err(BuildError::InvalidConfig(
+                "invalid digest_key: \"env:\" requires a variable name \
                  (e.g. \"env:CLOAK_DIGEST_KEY\")"
-            )));
+                    .into(),
+            ));
         }
 
         let known: std::collections::BTreeSet<&str> = rules::CATALOG
@@ -513,6 +515,21 @@ mod tests {
         assert!(
             msg.contains("env:"),
             "error should mention env: prefix: {msg}"
+        );
+    }
+
+    #[test]
+    fn digest_key_error_does_not_leak_value() {
+        // F07: if a user accidentally passes an inline key, the error
+        // message must NOT echo it back — it would appear in stderr/logs.
+        let canary = "s3cr3t-k3y-that-must-not-leak";
+        let toml = format!("[redaction]\ndigest_key = \"{canary}\"");
+        let config = Config::from_toml(&toml).unwrap();
+        let err = config.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains(canary),
+            "error message must not echo the invalid key value: {msg}"
         );
     }
 

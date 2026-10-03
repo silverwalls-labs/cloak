@@ -68,6 +68,18 @@ pub static POSITIVE: &[Vector] = &[
         }],
     },
     Vector {
+        name: "connstring-password-with-at",
+        // #41 review: passwords may themselves contain `@` — the
+        // userinfo/host split is at the LAST `@`, so the complete
+        // password is masked: "postgres://admin:" = 17, "p@ss" at 17..21.
+        input: b"postgres://admin:p@ss@db",
+        spans: &[ExpectedSpan {
+            start: 17,
+            end: 21,
+            rule: "connection-string",
+        }],
+    },
+    Vector {
         name: "connstring-embedded-log",
         // "DATABASE_URL=postgres://admin:" = 30, password "s3cret" at 30..36.
         input: b"DATABASE_URL=postgres://admin:s3cret@db:5432/app\n",
@@ -106,6 +118,33 @@ pub static NEGATIVE: &[Vector] = &[
         // Idempotence: the tag in password position must not re-match
         // (fuzz_engine_stream finding — redact(redact(S)) re-digested it).
         input: b"redis://default:[CLOAK:connection-string:aea0]@redis:6379",
+        spans: &[],
+    },
+    Vector {
+        name: "connstring-distant-at-no-redact",
+        // F08: whitespace terminates userinfo — the connection-string rule
+        // must NOT match here. (The email rule still fires on user@example.com.)
+        input: b"postgres://admin:pass then data",
+        spans: &[],
+    },
+    Vector {
+        name: "connstring-path-terminates-userinfo",
+        // F08: a `/` after the password terminates the userinfo search;
+        // the `@` in the path must not be used as the userinfo delimiter.
+        input: b"postgres://admin:pass/path@unrelated",
+        spans: &[],
+    },
+    Vector {
+        name: "connstring-no-host",
+        // #41 review: no authority after the `@` — not a credential-
+        // bearing URL; the password must NOT be redacted (F08).
+        input: b"postgres://admin:pass@ ",
+        spans: &[],
+    },
+    Vector {
+        name: "connstring-at-eof-no-host",
+        // Same, with the `@` at end of input.
+        input: b"postgres://admin:pass@",
         spans: &[],
     },
 ];

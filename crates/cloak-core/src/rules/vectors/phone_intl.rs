@@ -124,4 +124,27 @@ pub static NEGATIVE: &[Vector] = &[
         input: b"count = x + 5",
         spans: &[],
     },
+    // ── #34 tag-tail guard: positive controls ────────────────────────
+    // Only the DIRECTLY-fused case is rejected (see false_positives
+    // `fp-tag-tail-*`); a separator or a non-tag `]` restores matching.
+    Vector {
+        name: "phone-after-plain-bracket",
+        // `]` without the `[CLOAK:` opener is not a tag tail.
+        input: b"array[0]+14155551234",
+        spans: &[ExpectedSpan {
+            start: 8,
+            end: 20,
+            rule: "phone-intl",
+        }],
+    },
+    Vector {
+        name: "phone-after-tag-with-space",
+        // Space-separated from a real tag: normal boundary, must match.
+        input: b"[CLOAK:jwt:6717] +14155551234",
+        spans: &[ExpectedSpan {
+            start: 17,
+            end: 29,
+            rule: "phone-intl",
+        }],
+    },
 ];

@@ -5,8 +5,10 @@
 //! (`common::chunked` asserts it across several chunk schedules).
 //!
 //! Strict mode only (`CLOAK_FUZZ_STRICT=1`): whole-buffer ≡ reference
-//! oracle, streaming ≡ whole-buffer, and idempotence — see `common::strict`
-//! for why these are gated (issues #27, #34).
+//! oracle, streaming ≡ whole-buffer, and idempotence. #27 and #34 are
+//! fixed, so CI sets strict for the corpus replay and smoke fuzz (F15);
+//! the env gate remains for bisects and targeted reproductions — see
+//! `common::strict`.
 
 #![no_main]
 

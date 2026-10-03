@@ -54,6 +54,59 @@ const RULE_IDS: [&str; 16] = [
     "pem-private-key",
 ];
 
+/// True when `input[..pos]` ends with the closing `]` of a
+/// `[CLOAK:<rule>:<digest>]` redaction tag — mirrors the engine's #34
+/// tag-tail guard (independently implemented; a unit test cross-checks
+/// both against shared fixtures). Backward-guarded confirms reject a
+/// candidate fused directly to a tag tail so the second redaction pass
+/// cannot match what the first pass rejected.
+fn ends_with_cloak_tag_oracle(input: &[u8], pos: usize) -> bool {
+    // Tag tail shape, backwards from the candidate start: `]`, then a
+    // 4-hex digest, then `:`, then 1..=17 rule-id chars, then the
+    // `[CLOAK:` opener. Anything else is ordinary text.
+    if pos < 7 || input[pos - 1] != b']' {
+        return false;
+    }
+    if !input[pos - 5..pos - 1]
+        .iter()
+        .all(|b| b.is_ascii_hexdigit())
+    {
+        return false;
+    }
+    if input[pos - 6] != b':' {
+        return false;
+    }
+    // Rule id: scan back over `[a-z0-9-]`, at most 17 bytes (the
+    // longest catalog id, `connection-string`).
+    let floor = (pos - 6).saturating_sub(17);
+    let mut j = pos - 6;
+    while j > floor && matches!(input[j - 1], b'a'..=b'z' | b'0'..=b'9' | b'-') {
+        j -= 1;
+    }
+    // At least one id char, and the opener sits immediately before it.
+    j < pos - 6 && j >= 7 && input[j - 7..j] == *b"[CLOAK:"
+}
+
+/// True when a well-formed `[CLOAK:<rule>:<digest>]` tag begins exactly
+/// at `input[pos]` — the forward mirror of `ends_with_cloak_tag_oracle`
+/// (#34 forward face, mirrors the engine).
+fn starts_with_cloak_tag_oracle(input: &[u8], pos: usize) -> bool {
+    let rest = input.get(pos..).unwrap_or(&[]);
+    if rest.len() < 7 || rest[..7] != *b"[CLOAK:" {
+        return false;
+    }
+    // Rule id: 1..=17 chars of `[a-z0-9-]`, then `:`.
+    let mut k = 7;
+    while k < (7 + 17).min(rest.len()) && matches!(rest[k], b'a'..=b'z' | b'0'..=b'9' | b'-') {
+        k += 1;
+    }
+    if k == 7 || k + 6 > rest.len() || rest[k] != b':' {
+        return false;
+    }
+    // Digest: exactly 4 hex chars, then `]`.
+    rest[k + 1..k + 5].iter().all(|b| b.is_ascii_hexdigit()) && rest[k + 5] == b']'
+}
+
 const GITHUB_PREFIXES: [&[u8]; 6] = [b"ghp_", b"gho_", b"ghs_", b"ghu_", b"ghr_", b"github_pat_"];
 const GITLAB_PREFIXES: [&[u8]; 3] = [b"glpat-", b"glrt-", b"gldt-"];
 const NPM_PREFIX: &[u8] = b"npm_";
@@ -303,6 +356,10 @@ fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
 // redact sub-span is what gets replaced. Mirrors engine ConfirmMatch. ---
 
 fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
+    /// F04: max bytes of quotes/whitespace allowed per gap — matches the
+    /// engine's `confirm_aws_secret` bound.
+    const MAX_SEP_GAP: usize = 15;
+
     if start >= input.len() {
         return None;
     }
@@ -315,13 +372,18 @@ fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
     } else {
         return None;
     };
-    // Non-alnum boundary before the key name (not mid-word).
-    if start > 0 && input[start - 1].is_ascii_alphanumeric() {
+    // Non-alnum boundary before the key name (not mid-word). A redaction
+    // tag tail counts as a word byte (#34, mirrors the engine).
+    if start > 0
+        && (input[start - 1].is_ascii_alphanumeric() || ends_with_cloak_tag_oracle(input, start))
+    {
         return None;
     }
     let mut pos = key_end;
-    // Skip closing quotes and whitespace before separator.
+    // Skip closing quotes and whitespace before separator (bounded — F04).
+    let gap_start = pos;
     while pos < input.len()
+        && pos - gap_start < MAX_SEP_GAP
         && (input[pos] == b'"' || input[pos] == b'\'' || input[pos] == b' ' || input[pos] == b'\t')
     {
         pos += 1;
@@ -330,7 +392,9 @@ fn confirm_aws_secret(input: &[u8], start: usize) -> Option<RefSpans> {
         return None;
     }
     pos += 1;
+    let gap2_start = pos;
     while pos < input.len()
+        && pos - gap2_start < MAX_SEP_GAP
         && (input[pos] == b' ' || input[pos] == b'\t' || input[pos] == b'"' || input[pos] == b'\'')
     {
         pos += 1;
@@ -466,21 +530,44 @@ fn confirm_connstring(input: &[u8], start: usize) -> Option<RefSpans> {
     {
         return None;
     }
-    // `://` at start. Look backward for scheme.
+    // `://` at start. Look backward for a scheme — bounded at 12 bytes
+    // (mirrors the engine's bounded scan; #27).
+    let scheme_earliest = start.saturating_sub(12);
     let mut scheme_start = start;
-    while scheme_start > 0 && is_scheme_oracle(input[scheme_start - 1]) {
+    while scheme_start > scheme_earliest && is_scheme_oracle(input[scheme_start - 1]) {
         scheme_start -= 1;
     }
     let scheme = &input[scheme_start..start];
     if !CONN_SCHEMES.iter().any(|s| scheme.eq_ignore_ascii_case(s)) {
         return None;
     }
+    // A redaction tag tail before the scheme counts as a word byte
+    // (#34, mirrors the engine).
+    if ends_with_cloak_tag_oracle(input, scheme_start) {
+        return None;
+    }
     let after = start + 3;
-    let at_pos = input[after..]
-        .iter()
-        .position(|&b| b == b'@')
-        .map(|p| after + p)?;
-    if at_pos - after > 300 {
+    // F09: bound the search window FIRST. F08: stop the authority segment
+    // scan at any byte that is not valid in an RFC 3986 authority.
+    let search_end = (after + 300).min(input.len());
+    // #34 forward face (mirrors the engine): every byte of a redaction
+    // tag is a valid authority byte, so the scan would cross a tag and
+    // reach an `@` that pass 1's scan could not. Reject any candidate
+    // whose segment region touches a tag head.
+    let mut seg_end = after;
+    while seg_end < search_end && is_authority_oracle(input[seg_end]) {
+        if starts_with_cloak_tag_oracle(input, seg_end) {
+            return None;
+        }
+        seg_end += 1;
+    }
+    let segment = &input[after..seg_end];
+    // The userinfo/host separator is the LAST `@` in the segment —
+    // passwords may contain `@` (mirrors the engine; #41 review).
+    let rel_at = segment.iter().rposition(|&b| b == b'@')?;
+    let at_pos = after + rel_at;
+    // Require a host after the `@` (mirrors the engine; #41 review).
+    if at_pos + 1 >= seg_end {
         return None;
     }
     let userinfo = &input[after..at_pos];
@@ -504,14 +591,45 @@ fn is_scheme_oracle(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'+' || b == b'-' || b == b'.'
 }
 
+/// RFC 3986 userinfo character — mirrors `is_userinfo_char` in validators.rs.
+fn is_userinfo_oracle(b: u8) -> bool {
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'%'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+        )
+}
+
+/// RFC 3986 authority character — mirrors `is_authority_char` in validators.rs.
+fn is_authority_oracle(b: u8) -> bool {
+    b == b'@' || b == b'[' || b == b']' || is_userinfo_oracle(b)
+}
+
 fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<RefSpans> {
     // Must actually be an `@` at this position (oracle is called at every offset).
     if at_pos >= input.len() || input[at_pos] != b'@' {
         return None;
     }
-    // Backward: local part.
+    // Backward: local part — capped at 64 bytes, mirroring the engine
+    // (#41 review): the cap, not the buffer, bounds the span.
+    let earliest = at_pos.saturating_sub(64);
     let mut local_start = at_pos;
-    while local_start > 0 && is_email_local_oracle(input[local_start - 1]) {
+    while local_start > earliest && is_email_local_oracle(input[local_start - 1]) {
         local_start -= 1;
     }
     if local_start == at_pos {
@@ -520,15 +638,28 @@ fn confirm_email_oracle(input: &[u8], at_pos: usize) -> Option<RefSpans> {
     if input[local_start] == b'.' || input[at_pos - 1] == b'.' {
         return None;
     }
-    // Reject URL credential context: local preceded by `:` or `/`.
-    if local_start > 0 && (input[local_start - 1] == b':' || input[local_start - 1] == b'/') {
+    // Reject URL credential context: local preceded by `:` or `/`, or
+    // fused directly to a redaction tag tail (#34, mirrors the engine).
+    if local_start > 0
+        && (input[local_start - 1] == b':'
+            || input[local_start - 1] == b'/'
+            || ends_with_cloak_tag_oracle(input, local_start))
+    {
         return None;
     }
-    // Forward: domain.
+    // Forward: domain (capped at 253 bytes per RFC 5321 — F03).
     let domain_start = at_pos + 1;
     let mut domain_end = domain_start;
-    while domain_end < input.len() && is_email_domain_oracle(input[domain_end]) {
+    while domain_end < input.len()
+        && domain_end - domain_start < 253
+        && is_email_domain_oracle(input[domain_end])
+    {
         domain_end += 1;
+    }
+    // A redaction tag head at the domain-stop position counts as a
+    // domain-context byte (#34 forward face, mirrors the engine).
+    if starts_with_cloak_tag_oracle(input, domain_end) {
+        return None;
     }
     let domain = &input[domain_start..domain_end];
     let last_dot = domain.iter().rposition(|&b| b == b'.')?;
@@ -567,7 +698,10 @@ fn confirm_ipv4_oracle(input: &[u8], dot_pos: usize) -> Option<(usize, usize)> {
     while start > earliest && (input[start - 1].is_ascii_digit() || input[start - 1] == b'.') {
         start -= 1;
     }
-    if start > 0 && input[start - 1].is_ascii_digit() {
+    // Non-digit boundary before the IP. A redaction tag tail counts as
+    // a digit-context byte (#34, mirrors the engine).
+    if start > 0 && (input[start - 1].is_ascii_digit() || ends_with_cloak_tag_oracle(input, start))
+    {
         return None;
     }
     let mut pos = start;
@@ -599,7 +733,11 @@ fn confirm_ipv4_oracle(input: &[u8], dot_pos: usize) -> Option<(usize, usize)> {
     if octets != 4 {
         return None;
     }
-    if pos < input.len() && input[pos].is_ascii_digit() {
+    // Non-digit boundary after. A redaction tag head counts as a
+    // digit-context byte (#34 forward face, mirrors the engine).
+    if pos < input.len()
+        && (input[pos].is_ascii_digit() || starts_with_cloak_tag_oracle(input, pos))
+    {
         return None;
     }
     if pos < input.len() && input[pos] == b'.' {
@@ -616,29 +754,66 @@ fn parse_u8_ref(bytes: &[u8]) -> u16 {
     v
 }
 
-fn confirm_ipv6_oracle(input: &[u8], dc_pos: usize) -> Option<RefSpans> {
-    // The anchor `::` is 2 bytes — need at least 2 bytes at dc_pos.
-    if dc_pos + 1 >= input.len() || input[dc_pos] != b':' || input[dc_pos + 1] != b':' {
+/// IPv6 anchors — must match the catalog in `rules/mod.rs`. The generic
+/// single-byte `:` anchor plus the bounded bidirectional confirm scan
+/// covers every representable address (#41 review; the F01 enumerated
+/// prefix list missed nonlisted prefixes and uppercase hex).
+const IPV6_ANCHORS: &[&[u8]] = &[
+    b"::", b":0", b":1", b":2", b":3", b":4", b":5", b":6", b":7", b":8", b":9", b":a", b":b",
+    b":c", b":d", b":e", b":f", b":A", b":B", b":C", b":D", b":E", b":F",
+];
+
+/// The oracle only triggers IPv6 at positions where one of the engine's
+/// prefilter anchors matches — aligns with the engine's behavior (a valid
+/// IPv6 address at an un-anchored position is NOT detected, by design).
+fn confirm_ipv6_oracle(input: &[u8], pos: usize) -> Option<RefSpans> {
+    if pos >= input.len() {
         return None;
     }
-    let mut start = dc_pos;
-    while start > 0 && is_ipv6_char_oracle(input[start - 1]) {
+    // Check that one of the IPv6 anchors matches at this position.
+    if !IPV6_ANCHORS.iter().any(|a| input[pos..].starts_with(a)) {
+        return None;
+    }
+    // Both scans are capped at 45 bytes from the anchor — mirrors the
+    // engine's bounded confirm (streaming parity, #27/#41).
+    let cap = 45;
+    let earliest = pos.saturating_sub(cap);
+    let mut start = pos;
+    while start > earliest && is_ipv6_char_oracle(input[start - 1]) {
         start -= 1;
     }
-    if start > 0 && input[start - 1].is_ascii_alphanumeric() {
+    // Non-hex/colon boundary before. A redaction tag tail counts as a
+    // word byte (#34, mirrors the engine).
+    if start > 0
+        && (input[start - 1].is_ascii_alphanumeric() || ends_with_cloak_tag_oracle(input, start))
+    {
         return None;
     }
-    let mut end = dc_pos + 2;
-    while end < input.len() && is_ipv6_ext_oracle(input[end]) {
+    // Mid-run truncation: the backward scan hit the cap but the run
+    // continues — the full run exceeds 45 bytes, so no slice of it is a
+    // valid address.
+    if earliest > 0 && start == earliest && is_ipv6_char_oracle(input[start - 1]) {
+        return None;
+    }
+    let mut end = pos;
+    while end < input.len() && end - start < cap && is_ipv6_ext_oracle(input[end]) {
         end += 1;
     }
-    if end - start > 45 {
+    if end - start == cap && end < input.len() && is_ipv6_ext_oracle(input[end]) {
         return None;
     }
-    if end < input.len() && input[end].is_ascii_alphanumeric() {
+    // Non-hex boundary after. A redaction tag head counts as a word
+    // byte (#34 forward face, mirrors the engine).
+    if end < input.len()
+        && (input[end].is_ascii_alphanumeric() || starts_with_cloak_tag_oracle(input, end))
+    {
         return None;
     }
     let addr = &input[start..end];
+    let total_colons = addr.iter().filter(|&&b| b == b':').count();
+    if total_colons < 2 {
+        return None;
+    }
     if !validate_ipv6_oracle(addr) {
         return None;
     }
@@ -712,15 +887,20 @@ fn is_v4_suffix_oracle(bytes: &[u8]) -> bool {
 }
 
 /// Literal credit-card IIN anchors (catalog: Big Four prefixes).
-const CC_ANCHORS: [&[u8]; 10] = [
+/// F02: added Mastercard 2-series (22-27) and Discover 644-649.
+const CC_ANCHORS: [&[u8]; 22] = [
+    b"22", b"23", b"24", b"25", b"26", b"27", // Mastercard 2-series (2221-2720)
     b"34", b"37", // Amex
     b"4",  // Visa
-    b"51", b"52", b"53", b"54", b"55", // Mastercard
-    b"6011", b"65", // Discover
+    b"51", b"52", b"53", b"54", b"55", // Mastercard 51-55
+    b"6011", b"644", b"645", b"646", b"647", b"648", b"649", b"65", // Discover
 ];
 
 fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
-    if start > 0 && input[start - 1].is_ascii_digit() {
+    // Non-digit boundary before the anchor. A redaction tag tail counts
+    // as a digit-context byte (#34, mirrors the engine).
+    if start > 0 && (input[start - 1].is_ascii_digit() || ends_with_cloak_tag_oracle(input, start))
+    {
         return None;
     }
     let rest = &input[start..];
@@ -750,7 +930,11 @@ fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
         }
     }
     let abs_end = start + end;
-    if abs_end < input.len() && input[abs_end].is_ascii_digit() {
+    // Non-digit boundary after. A redaction tag head counts as a
+    // digit-context byte (#34 forward face, mirrors the engine).
+    if abs_end < input.len()
+        && (input[abs_end].is_ascii_digit() || starts_with_cloak_tag_oracle(input, abs_end))
+    {
         return None;
     }
     if end > 0 && !rest[end - 1].is_ascii_digit() {
@@ -785,17 +969,29 @@ fn luhn_oracle(digits: &[u8]) -> bool {
     sum.is_multiple_of(10)
 }
 
+/// F02: mirrors `iin_check` in validators.rs — includes Mastercard 2-series
+/// (2221–2720) and Discover 644–649.
 fn iin_oracle(digits: &[u8]) -> bool {
     if digits.is_empty() {
         return false;
     }
     match digits[0] {
-        b'4' => true,
+        b'2' if digits.len() >= 4 => {
+            let prefix = (digits[0] - b'0') as u16 * 1000
+                + (digits[1] - b'0') as u16 * 100
+                + (digits[2] - b'0') as u16 * 10
+                + (digits[3] - b'0') as u16;
+            (2221..=2720).contains(&prefix)
+        }
         b'3' if digits.len() >= 2 && (digits[1] == b'4' || digits[1] == b'7') => true,
+        b'4' => true,
         b'5' if digits.len() >= 2 && digits[1] >= b'1' && digits[1] <= b'5' => true,
         b'6' if digits.len() >= 2 => {
             if digits[1] == b'5' {
                 return true;
+            }
+            if digits.len() >= 3 && digits[1] == b'4' && digits[2] >= b'4' && digits[2] <= b'9' {
+                return true; // 644-649
             }
             digits.len() >= 4 && digits[1] == b'0' && digits[2] == b'1' && digits[3] == b'1'
         }
@@ -804,7 +1000,11 @@ fn iin_oracle(digits: &[u8]) -> bool {
 }
 
 fn confirm_phone_oracle(input: &[u8], start: usize) -> Option<usize> {
-    if start > 0 && input[start - 1].is_ascii_alphanumeric() {
+    // Non-alnum boundary before `+`. A redaction tag tail counts as a
+    // word byte (#34, mirrors the engine).
+    if start > 0
+        && (input[start - 1].is_ascii_alphanumeric() || ends_with_cloak_tag_oracle(input, start))
+    {
         return None;
     }
     if input[start] != b'+' {
@@ -837,7 +1037,11 @@ fn confirm_phone_oracle(input: &[u8], start: usize) -> Option<usize> {
     if !(7..=15).contains(&digit_count) {
         return None;
     }
-    if pos < input.len() && input[pos].is_ascii_digit() {
+    // Non-digit boundary after. A redaction tag head counts as a
+    // digit-context byte (#34 forward face, mirrors the engine).
+    if pos < input.len()
+        && (input[pos].is_ascii_digit() || starts_with_cloak_tag_oracle(input, pos))
+    {
         return None;
     }
     Some(pos)
@@ -856,8 +1060,12 @@ const PEM_KEY_TYPES: [&[u8]; 6] = [
     b"PRIVATE KEY",
 ];
 
-/// Find all PEM private-key blocks. Returns body spans (between BEGIN and
-/// END markers). Enforces bail-out at `PEM_BAIL_OUT` bytes.
+/// Find all PEM private-key blocks. Returns match spans: `start..end` is
+/// the full extent (body, plus the suppressed tail and END line for
+/// oversized blocks), `redact_start..redact_end` the sub-span covered by
+/// the tag. Enforces bail-out at `PEM_BAIL_OUT` bytes (F05): past the
+/// truncation point everything up to the END marker — or to EOF when the
+/// block never closes — is suppressed, never emitted.
 fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
     let mut blocks = Vec::new();
     let mut pos = 0;
@@ -878,22 +1086,41 @@ fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
                 if let Some(end_offset) = find_bytes(&input[body_start..], &end_marker) {
                     let body_end = body_start + end_offset;
                     let actual_body_len = body_end - body_start;
+                    let end_line_end = body_end + end_marker.len();
                     if actual_body_len <= PEM_BAIL_OUT {
                         blocks.push(RefMatch::full(body_start, body_end, PEM));
-                        pos = body_end + end_marker.len();
-                        continue;
                     } else {
-                        // Bail-out: redact first PEM_BAIL_OUT bytes of body.
+                        // Bail-out (F05): the tag covers the first
+                        // PEM_BAIL_OUT body bytes; the tail up to the END
+                        // line is inside the extent but suppressed at
+                        // emission (pos jumps to m.end). The extent ends
+                        // at body_end so the END line stays visible.
+                        // Scanning resumes after the END line.
                         let bail_end = body_start + PEM_BAIL_OUT;
-                        blocks.push(RefMatch::full(body_start, bail_end, PEM));
-                        pos = bail_end;
-                        continue;
+                        blocks.push(RefMatch {
+                            start: body_start,
+                            end: body_end,
+                            redact_start: body_start,
+                            redact_end: bail_end,
+                            rule: PEM,
+                        });
                     }
+                    pos = end_line_end;
+                    continue;
                 } else {
-                    // No END marker: bail-out the entire remaining body.
+                    // No END marker: bail-out over the remaining body
+                    // (F05). The tag covers min(PEM_BAIL_OUT, rest); the
+                    // entire remainder is suppressed — the extent runs to
+                    // EOF and nothing past the truncation point is emitted.
                     let bail_end = (body_start + PEM_BAIL_OUT).min(input.len());
-                    blocks.push(RefMatch::full(body_start, bail_end, PEM));
-                    pos = bail_end;
+                    blocks.push(RefMatch {
+                        start: body_start,
+                        end: input.len(),
+                        redact_start: body_start,
+                        redact_end: bail_end,
+                        rule: PEM,
+                    });
+                    pos = input.len();
                     continue;
                 }
             }
@@ -1109,7 +1336,10 @@ pub fn redact(input: &[u8], digest_key: &[u8; 32]) -> (Vec<u8>, Stats) {
             crate::redact::compute_digest(&input[m.redact_start..m.redact_end], digest_key);
         crate::redact::write_tag(&rule_id, &digest, &mut out).expect("write to Vec cannot fail");
         *match_counts.entry(rule_id).or_insert(0) += 1;
-        pos = m.redact_end;
+        // PEM matches never emit their suffix: empty for a full block, the
+        // suppressed bail-out tail otherwise (F05). Regular matches pass
+        // their context suffix through via the next gap.
+        pos = if m.rule == PEM { m.end } else { m.redact_end };
     }
     out.extend_from_slice(&input[pos..]);
 
@@ -1161,6 +1391,32 @@ mod tests {
         assert_eq!(PEM_KEY_TYPES.len(), crate::engine::pem::PEM_KEY_TYPES.len());
         for (oracle, engine) in PEM_KEY_TYPES.iter().zip(crate::engine::pem::PEM_KEY_TYPES) {
             assert_eq!(oracle, engine);
+        }
+    }
+
+    #[test]
+    fn cloak_tag_tail_cross_check_engine() {
+        // The #34 tag-tail guard exists on both sides with deliberately
+        // independent implementations; this battery pins semantic
+        // agreement so a typo on either side is caught.
+        let cases: &[(&[u8], usize)] = &[
+            (b"[CLOAK:jwt:6717]+1234567", 16),
+            (b"[CLOAK:connection-string:95d4]postgres://", 30),
+            (b"[CLOAK:pem-private-key:1a2b]x", 28),
+            (b"[CLOAK:ipv6:7309]2a02::1", 17),
+            (b"array[0]+1234567", 8),
+            (b"[CLOAK:jwt:zzzz]+1", 16),
+            (b"XXXX:jwt:6717]+1", 14),
+            (b"[CLOAK::6717]+1", 13),
+            (b"[CLOAK:aaaaaaaaaaaaaaaaaa:6717]+1", 31),
+            (b"]+1234567", 1),
+        ];
+        for &(input, pos) in cases {
+            assert_eq!(
+                ends_with_cloak_tag_oracle(input, pos),
+                crate::rules::validators::ends_with_cloak_tag(input, pos),
+                "oracle/engine tag-tail divergence at pos {pos} in {input:?}"
+            );
         }
     }
 

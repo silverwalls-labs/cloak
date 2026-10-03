@@ -13,9 +13,12 @@ cloak a.log b.log > all.red.log           # multiple files, one session
 cloak --config examples/cloak.toml < in   # per-rule enable/disable
 ```
 
-Exit codes: `0` clean — including a broken pipe downstream, so
-`app | cloak | head` never kills your app — `1` operational error (bad config,
-missing file), `2` usage error.
+Exit codes: `0` clean — including a broken pipe downstream (cloak catches
+SIGPIPE and exits 0), so `app | cloak | head` exits cleanly when `head`
+finishes — this assumes `pipefail` is DISABLED (the default): with
+`set -o pipefail`, `app` receiving SIGPIPE from the early-closing `head`
+can make the whole pipeline exit non-zero. `1` operational error (bad
+config, missing file), `2` usage error.
 
 ## Stats
 

@@ -33,3 +33,7 @@ target
 
 # asciinema terminal recordings
 *.cast
+
+# Node adapter build output (npm pack ships it; never committed)
+adapters/node/dist/
+swl-cloak-bugs.mp4
