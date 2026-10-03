@@ -240,14 +240,10 @@ jobs:
             cargo fuzz run "$t" "fuzz/corpus/$t" -O --debug-assertions -- -runs=0 -timeout=10
           done
 
-      - name: Fuzz smoke (time-boxed)
+      - name: Fuzz smoke (time-boxed, strict)
         working-directory: crates/cloak-core
-        # NOTE: strict mode is NOT enabled for the smoke step — the random
-        # exploration can hit known-broken properties (nested PEM idempotence,
-        # #27/#34 edge cases) that make the gate non-deterministic. Strict
-        # mode runs on the committed corpus (replay step above) where every
-        # seed is known-good. New crashes found here are committed as corpus
-        # seeds and triaged separately.
+        env:
+          CLOAK_FUZZ_STRICT: "1"
         run: |
           cargo fuzz run fuzz_engine_stream fuzz/corpus/fuzz_engine_stream -O --debug-assertions -- \
             -max_total_time=90 -timeout=10 -rss_limit_mb=2048 -max_len=32768 \
