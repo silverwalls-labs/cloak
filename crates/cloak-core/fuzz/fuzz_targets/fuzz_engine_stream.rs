@@ -7,8 +7,8 @@
 //! Strict mode only (`CLOAK_FUZZ_STRICT=1`): whole-buffer ≡ reference
 //! oracle, streaming ≡ whole-buffer, and idempotence. #27 and #34 are
 //! fixed; CI sets strict for the corpus replay and smoke fuzz (F15).
-//! Strict remains opt-in until the PEM shared-dash streaming issue is
-//! resolved — see `common::strict`.
+//! Strict remains opt-in until the PEM shared-dash streaming parity
+//! issue (#44) is resolved — see `common::strict`.
 
 #![no_main]
 

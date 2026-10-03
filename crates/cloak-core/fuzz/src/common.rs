@@ -66,8 +66,9 @@ pub static KEY: LazyLock<[u8; 32]> =
 /// - **#34** (fixed) — backward-guard context erased by adjacent
 ///   redaction tags, and greedy phone-intl separator consumption into
 ///   adjacent numeric content.
-/// - **PEM shared-dash** (open) — `-----END ...------BEGIN ...` with
-///   overlapping dashes causes streaming ≢ whole-buffer on large inputs.
+/// - **PEM shared-dash** (#44, open) — `-----END ...------BEGIN ...`
+///   with overlapping dashes causes streaming ≢ whole-buffer on large
+///   inputs.
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
         Ok(v) => !matches!(
