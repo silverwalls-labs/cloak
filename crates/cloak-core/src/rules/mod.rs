@@ -58,7 +58,7 @@ pub struct RuleSpec {
     /// `window + back` bytes behind the emission boundary so a candidate's
     /// backward context is never truncated by a flush before it resolves.
     /// Since the #34 tag-tail guard, backward-guarded rules include
-    /// [`CLOAK_TAG_MAX`](validators::CLOAK_TAG_MAX) in `B`, so `B` may
+    /// `CLOAK_TAG_MAX` in `B`, so `B` may
     /// exceed `window` — the retention sum is bounded separately.
     pub back: usize,
 }

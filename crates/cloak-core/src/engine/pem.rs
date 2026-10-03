@@ -336,11 +336,19 @@ pub(crate) fn process_pem_body(
         });
     }
 
-    // No END found. If the body would stay within the bail-out budget,
-    // hash everything except the tail retained for straddling detection.
-    if *body_bytes + search_buf.len() <= PEM_BAIL_OUT {
-        let retain = end_marker.len().saturating_sub(1).min(search_buf.len());
-        let hashable_end = search_buf.len() - retain;
+    // No END found. Hash everything except the tail retained for
+    // straddling detection. The tail must be end_marker.len() bytes so
+    // the next push's search_buf can contain the full END marker at
+    // offset 0 — with `len() - 1` the marker straddles carry+data only
+    // at offset 1, which fails when body bytes occupy position 0 (found
+    // by fuzz_pem_state, regression-pem-bailout-drain).
+    let retain = end_marker.len().min(search_buf.len());
+    let hashable_end = search_buf.len() - retain;
+    // Budget check uses hashable_end (guaranteed body bytes), not
+    // search_buf.len() — the retained tail may contain END-marker
+    // bytes that are NOT body; including them in the sum caused
+    // spurious bail-outs when body < PEM_BAIL_OUT.
+    if *body_bytes + hashable_end <= PEM_BAIL_OUT {
         hasher.update(&search_buf[..hashable_end]);
         *body_bytes += hashable_end;
         pem_carry.clear();
@@ -407,7 +415,7 @@ fn process_draining(
     }
 
     // No END yet: retain the straddling tail, suppress the rest.
-    let retain = end_marker.len().saturating_sub(1).min(search_buf.len());
+    let retain = end_marker.len().min(search_buf.len());
     pem_carry.clear();
     pem_carry.extend_from_slice(&search_buf[search_buf.len() - retain..]);
     Ok(PemBodyResult::Continuing)
@@ -424,7 +432,7 @@ fn bail_to_drain(
     rest: &[u8],
     _carry_len: usize,
 ) -> PemDrainData {
-    let retain = end_marker.len().saturating_sub(1).min(rest.len());
+    let retain = end_marker.len().min(rest.len());
     PemDrainData {
         end_marker: std::mem::take(end_marker),
         pem_carry: rest[rest.len() - retain..].to_vec(),
