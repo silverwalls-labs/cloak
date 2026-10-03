@@ -9,6 +9,16 @@ a breaking change).
 
 ## [Unreleased]
 
+### Fixed
+
+- **#34** — idempotence restored: backward/forward tag guards reject
+  candidates fused to `[CLOAK:…]` tags, and the phone-intl greedy
+  separator scan falls back to the longest valid match when adjacent
+  numeric content inflates the digit count past the E.164 maximum.
+- **#27** — carry-over context loss resolved: retained-span re-injection
+  and truncated-context guards ensure streaming and whole-buffer modes
+  agree on dense inputs beyond `max_window`.
+
 ## [0.1.0] - 2026-09-19
 
 First release: the `cloak` CLI and the `cloak-core` engine.
@@ -49,12 +59,8 @@ First release: the `cloak` CLI and the `cloak-core` engine.
 - Escaped content is not decoded: multi-line PEM inside JSON string fields is
   missed (opt-in decode layer tracked as ledger F11; single-line tokens are
   unaffected).
-- Two tracked engine bugs on narrow inputs:
-  [#27](https://github.com/silverwalls-labs/cloak/issues/27) (carry-over
-  boundary × context-keyed rules in dense >2 KiB concatenations) and
-  [#34](https://github.com/silverwalls-labs/cloak/issues/34) (idempotence edge
-  when adjacent matches are re-scanned). Strict fuzz equivalence checks stay
-  opt-in (`CLOAK_FUZZ_STRICT=1`) until both close.
+- ~~Two tracked engine bugs (#27, #34)~~ — both fixed in [Unreleased];
+  strict fuzz equivalence checks are now the default.
 
 [Unreleased]: https://github.com/silverwalls-labs/cloak/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/silverwalls-labs/cloak/releases/tag/v0.1.0

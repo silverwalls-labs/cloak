@@ -15,7 +15,8 @@ pub const KEY_MATERIAL: &str = "fuzz-digest-key";
 /// `engine_max_window` unit test). Inputs at or below this size never
 /// flush before `finish`, so the whole guarantee holds unconditionally;
 /// above it, the flush boundary can cut backward context for
-/// context-guarded rules — the known engine bug tracked as issue #27.
+/// context-guarded rules (#27, fixed — retained-span re-injection and
+/// truncated-context guards now keep streaming ≡ whole-buffer).
 // Each fuzz target compiles this module independently (`#[path]`); only
 // fuzz_engine_stream switches assertion tiers on this constant.
 #[allow(dead_code)]
@@ -57,33 +58,23 @@ pub static KEY: LazyLock<[u8; 32]> =
 ///
 /// **Strict mode only (`CLOAK_FUZZ_STRICT=1`), every input:** the three
 /// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
-/// idempotence. They were strict-only while the tracked engine bugs below
-/// violated all three on narrow inputs; both are now FIXED (#27, #34) and
-/// CI replays the corpus and runs the smoke fuzz with `CLOAK_FUZZ_STRICT=1`
-/// (F15). The env gate remains so a bisect or a targeted reproduction can
-/// still disable the equivalence assertions:
-/// - **#27** (fixed) — a context-keyed extent overlapping a PEM block
-///   diverged from the reference even in whole-buffer mode (reproducer:
-///   `regression-connstring-pem-overlap`), and the flush boundary cut
-///   backward context beyond max_window.
-/// - **#34** (fixed) — redacting a match erased an adjacent candidate's
-///   backward guard, breaking idempotence.
-///
-/// Correctness on KNOWN inputs is also gated every PR by the deterministic
-/// `tests/differential.rs` (engine ≡ reference over the vector corpus and
-/// concatenations). Strict fuzzing hunts for NEW divergences; if it stays
-/// green over time, strict can become the unconditional default.
+/// idempotence. #27 and #34 are fixed; CI replays the corpus and runs the
+/// smoke fuzz with `CLOAK_FUZZ_STRICT=1` (F15). Strict remains opt-in
+/// until the PEM shared-dash streaming parity issue is resolved:
+/// - **#27** (fixed) — carry-over context loss for context-keyed extents
+///   overlapping PEM blocks.
+/// - **#34** (fixed) — backward-guard context erased by adjacent
+///   redaction tags, and greedy phone-intl separator consumption into
+///   adjacent numeric content.
+/// - **PEM shared-dash** (open) — `-----END ...------BEGIN ...` with
+///   overlapping dashes causes streaming ≢ whole-buffer on large inputs.
 pub fn strict() -> bool {
-    static STRICT: LazyLock<bool> = LazyLock::new(|| {
-        // Truthy value only, so `CLOAK_FUZZ_STRICT=0` / `=false` DISABLES
-        // (mere-presence would make the natural way to turn it off enable it).
-        match std::env::var("CLOAK_FUZZ_STRICT") {
-            Ok(v) => !matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "no" | "off"
-            ),
-            Err(_) => false,
-        }
+    static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+        Err(_) => false,
     });
     *STRICT
 }

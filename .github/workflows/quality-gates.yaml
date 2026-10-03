@@ -229,11 +229,9 @@ jobs:
       - name: Corpus regression replay (strict)
         working-directory: crates/cloak-core
         env:
-          # Strict mode enables the correctness-equivalence assertions
-          # (streaming == whole-buffer, idempotence, oracle parity) on
-          # every replayed input. #27 and #34 are fixed, so the
-          # regression-* reproducers and the whole corpus replay with
-          # full equivalence checks (F15).
+          # Strict is the default since #27 and #34 are fixed; the
+          # explicit "1" here is redundant but documents intent — corpus
+          # replay must always run with full equivalence checks (F15).
           CLOAK_FUZZ_STRICT: "1"
         run: |
           for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do
