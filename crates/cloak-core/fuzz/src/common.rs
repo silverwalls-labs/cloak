@@ -67,8 +67,9 @@ pub static KEY: LazyLock<[u8; 32]> =
 ///   redaction tags, and greedy phone-intl separator consumption into
 ///   adjacent numeric content.
 /// - **PEM shared-dash** (#44, open) — `-----END ...------BEGIN ...`
-///   with overlapping dashes causes streaming ≢ whole-buffer on large
-///   inputs.
+///   with overlapping dashes breaks redaction idempotence: pass 1
+///   skips the fused BEGIN, pass 2 redacts it (reproducers attached
+///   to #44; pre-existing on main).
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
         Ok(v) => !matches!(

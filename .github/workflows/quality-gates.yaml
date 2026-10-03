@@ -230,8 +230,8 @@ jobs:
         working-directory: crates/cloak-core
         env:
           # Strict is opt-in (env unset → strict() = false) until the
-          # PEM shared-dash streaming parity bug (#44) is fixed. This
-          # "1" is load-bearing — it is what enables the equivalence
+          # PEM shared-dash idempotence bug (#44) is fixed. This "1"
+          # is load-bearing — it is what enables the equivalence
           # assertions (F15). Do not remove it.
           CLOAK_FUZZ_STRICT: "1"
         run: |

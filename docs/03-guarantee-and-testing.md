@@ -210,7 +210,7 @@ close-context synthesis, and the `CLOAK_TAG_MAX` tag-tail/head guards — see
 are pinned by `tests/differential.rs`, and **every PR-gate fuzz run is
 strict** — corpus replay and smoke both set `CLOAK_FUZZ_STRICT=1`
 (`fuzz/src/common.rs`). Strict stays opt-in (default off) until the PEM
-shared-dash streaming parity bug (#44) is fixed; the nightly extended run
+shared-dash idempotence bug (#44) is fixed; the nightly extended run
 therefore stays non-strict for now.
 
 ### CI staging (all blocking at their stage)

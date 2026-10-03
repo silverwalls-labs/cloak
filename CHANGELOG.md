@@ -61,8 +61,8 @@ First release: the `cloak` CLI and the `cloak-core` engine.
   unaffected).
 - ~~Two tracked engine bugs (#27, #34)~~ — both fixed in [Unreleased].
   Strict fuzz equivalence checks remain opt-in
-  (`CLOAK_FUZZ_STRICT=1`) until the PEM shared-dash streaming parity
-  bug ([#44](https://github.com/silverwalls-labs/cloak/issues/44)) is
+  (`CLOAK_FUZZ_STRICT=1`) until the PEM shared-dash idempotence bug
+  ([#44](https://github.com/silverwalls-labs/cloak/issues/44)) is
   fixed.
 
 [Unreleased]: https://github.com/silverwalls-labs/cloak/compare/v0.1.0...HEAD
