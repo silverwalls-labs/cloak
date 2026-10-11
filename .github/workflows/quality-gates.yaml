@@ -242,12 +242,10 @@ jobs:
       - name: Fuzz smoke (time-boxed)
         working-directory: crates/cloak-core
         env:
-          # Non-strict ON PURPOSE: the smoke is generative, and while
-          # the PEM shared-dash idempotence bug (#44) is open it finds
-          # #44 nondeterministically (it did in CI on 2026-10-11, both
-          # ISAs) — a flaky red gate. The deterministic corpus replay
-          # above stays strict. Flip this to "1" once #44 is fixed.
-          CLOAK_FUZZ_STRICT: "0"
+          # Strict: the PEM shared-dash idempotence bug (#44) is fixed.
+          # All three correctness equivalences (engine ≡ reference,
+          # streaming ≡ whole-buffer, idempotence) are asserted.
+          CLOAK_FUZZ_STRICT: "1"
         run: |
           cargo fuzz run fuzz_engine_stream fuzz/corpus/fuzz_engine_stream -O --debug-assertions -- \
             -max_total_time=90 -timeout=10 -rss_limit_mb=2048 -max_len=32768 \

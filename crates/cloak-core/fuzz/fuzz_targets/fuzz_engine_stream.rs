@@ -4,11 +4,10 @@
 //! `-O --debug-assertions`) and the carry-over bound after every push
 //! (`common::chunked` asserts it across several chunk schedules).
 //!
-//! Strict mode only (`CLOAK_FUZZ_STRICT=1`): whole-buffer ≡ reference
-//! oracle, streaming ≡ whole-buffer, and idempotence. #27 and #34 are
-//! fixed; CI sets strict for the corpus replay (F15) — the generative
-//! smoke stays non-strict until the PEM shared-dash idempotence bug
-//! (#44) is fixed (it found #44 in CI) — see `common::strict`.
+//! Strict mode (`CLOAK_FUZZ_STRICT=1`): whole-buffer ≡ reference
+//! oracle, streaming ≡ whole-buffer, and idempotence. #27, #34, and
+//! #44 are all fixed; CI sets strict for both corpus replay (F15)
+//! and the generative smoke — see `common::strict`.
 
 #![no_main]
 

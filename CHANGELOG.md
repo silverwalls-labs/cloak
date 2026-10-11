@@ -11,6 +11,10 @@ a breaking change).
 
 ### Fixed
 
+- **#44** — PEM shared-dash idempotence: a `confirm_pem_begin` guard
+  rejects BEGIN markers whose leading dashes overlap a preceding END
+  trailer (fused blocks with 6+ consecutive dashes). Strict fuzz
+  equivalences are now unconditional in CI.
 - **#34** — idempotence restored: backward/forward tag guards reject
   candidates fused to `[CLOAK:…]` tags, and the phone-intl greedy
   separator scan falls back to the longest valid match when adjacent
@@ -60,10 +64,10 @@ First release: the `cloak` CLI and the `cloak-core` engine.
   missed (opt-in decode layer tracked as ledger F11; single-line tokens are
   unaffected).
 - ~~Two tracked engine bugs (#27, #34)~~ — both fixed in [Unreleased].
-  Strict fuzz equivalence checks remain opt-in
+  ~~Strict fuzz equivalence checks remain opt-in
   (`CLOAK_FUZZ_STRICT=1`) until the PEM shared-dash idempotence bug
   ([#44](https://github.com/silverwalls-labs/cloak/issues/44)) is
-  fixed.
+  fixed.~~ — #44 fixed in [Unreleased]; strict is now unconditional.
 
 [Unreleased]: https://github.com/silverwalls-labs/cloak/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/silverwalls-labs/cloak/releases/tag/v0.1.0

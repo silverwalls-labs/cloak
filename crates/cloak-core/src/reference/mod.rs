@@ -1145,6 +1145,12 @@ fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
 }
 
 fn confirm_pem_begin_ref(input: &[u8], after_begin: usize) -> Option<(usize, &'static [u8])> {
+    // Shared-dash guard (#44): a valid BEGIN has exactly 5 leading
+    // dashes; a 6th means this anchor overlaps a preceding END trailer.
+    let begin_start = after_begin.saturating_sub(PEM_BEGIN.len());
+    if begin_start > 0 && input.get(begin_start - 1) == Some(&b'-') {
+        return None;
+    }
     let rest = input.get(after_begin..)?;
     for &key_type in &PEM_KEY_TYPES {
         if rest.starts_with(key_type) {

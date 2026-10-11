@@ -148,6 +148,13 @@ const CLOAK_TAG_PREFIX: &[u8] = b"[CLOAK:";
 /// Rejects already-redacted PEM blocks (body starts with `[CLOAK:`) so
 /// that `redact(redact(S)) == redact(S)` holds for PEM.
 pub(crate) fn confirm_pem_begin(buf: &[u8], begin_pos: usize) -> Option<PemBeginMatch> {
+    // Shared-dash guard (#44): a valid BEGIN has exactly 5 leading
+    // dashes; a 6th means this anchor overlaps a preceding END
+    // trailer (fused blocks). Reject — redacting one half of fused
+    // markers breaks idempotence.
+    if begin_pos > 0 && buf.get(begin_pos - 1) == Some(&b'-') {
+        return None;
+    }
     let after_anchor = begin_pos + PEM_ANCHOR.len();
     let rest = buf.get(after_anchor..)?;
     for (i, &key_type) in PEM_KEY_TYPES.iter().enumerate() {
@@ -581,6 +588,39 @@ mod tests {
     fn reject_missing_trailing_dashes() {
         let buf = b"-----BEGIN RSA PRIVATE KEY\n";
         assert!(confirm_pem_begin(buf, 0).is_none());
+    }
+
+    // --- shared-dash guard (#44) -------------------------------------------
+
+    #[test]
+    fn reject_preceding_dash_shared_6() {
+        // 6 dashes: the anchor `-----BEGIN ` starts at position 1, but
+        // buf[0] == '-' → fused with a preceding END trailer.
+        let buf = b"------BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 1).is_none());
+    }
+
+    #[test]
+    fn reject_preceding_dash_shared_8() {
+        // 8 dashes: anchor at position 3 (positions 3–7 are the 5 leading
+        // dashes), but buf[2] == '-' → fused.
+        let buf = b"--------BEGIN EC PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 3).is_none());
+    }
+
+    #[test]
+    fn accept_begin_at_buffer_start() {
+        // begin_pos == 0 — no preceding byte, always valid.
+        let buf = b"-----BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 0).is_some());
+    }
+
+    #[test]
+    fn accept_begin_after_newline() {
+        // Preceding byte is '\n', not '-' — valid PEM block.
+        let buf = b"\n-----BEGIN RSA PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 1).expect("should confirm");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"RSA PRIVATE KEY");
     }
 
     // --- end_marker_for ----------------------------------------------------
