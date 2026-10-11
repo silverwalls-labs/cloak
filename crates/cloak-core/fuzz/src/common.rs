@@ -58,9 +58,10 @@ pub static KEY: LazyLock<[u8; 32]> =
 ///
 /// **Strict mode only (`CLOAK_FUZZ_STRICT=1`), every input:** the three
 /// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
-/// idempotence. #27 and #34 are fixed; CI replays the corpus and runs the
-/// smoke fuzz with `CLOAK_FUZZ_STRICT=1` (F15). Strict remains opt-in
-/// until the PEM shared-dash idempotence bug is fixed:
+/// idempotence. #27 and #34 are fixed; CI replays the corpus with
+/// `CLOAK_FUZZ_STRICT=1` (F15). Strict remains opt-in until the PEM
+/// shared-dash idempotence bug is fixed: the generative smoke fuzz
+/// stays non-strict too — it found #44 in CI (2026-10-11, both ISAs):
 /// - **#27** (fixed) — carry-over context loss for context-keyed extents
 ///   overlapping PEM blocks.
 /// - **#34** (fixed) — backward-guard context erased by adjacent
