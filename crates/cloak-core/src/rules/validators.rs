@@ -1054,6 +1054,16 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
     let mut pos = anchor + 1;
     let mut digit_count = 0;
     let limit = haystack.len().min(anchor + 25); // max scan window
+
+    // #34 (greedy-consumption variant): the greedy separator scan can
+    // consume digits from adjacent numeric content (e.g. an IPv4 address
+    // after a space: `+14155551234 192.168.0.1`), inflating digit_count
+    // past the E.164 maximum of 15. When the adjacent content is later
+    // redacted, the scan stops earlier and the phone matches — breaking
+    // idempotence. Track the last separator position where digit_count
+    // was still valid so we can fall back to the longest valid phone.
+    let mut last_valid_sep: Option<usize> = None;
+
     // Country code: first 1-3 digits.
     while pos < limit && haystack[pos].is_ascii_digit() {
         digit_count += 1;
@@ -1073,13 +1083,21 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
             if pos + 1 >= limit || !haystack[pos + 1].is_ascii_digit() {
                 break;
             }
+            // Save rollback point while digit_count is still valid.
+            if (7..=15).contains(&digit_count) {
+                last_valid_sep = Some(pos);
+            }
             pos += 1;
         } else {
             break;
         }
     }
     // E.164: 7-15 digits total (country code + subscriber number).
-    if !(7..=15).contains(&digit_count) {
+    // #34: if the greedy scan overshot, fall back to the last separator
+    // crossing where the digit count was still within range.
+    if digit_count > 15 {
+        pos = last_valid_sep?;
+    } else if digit_count < 7 {
         return None;
     }
     // Non-digit boundary after. A redaction tag head counts as a
@@ -1784,5 +1802,35 @@ mod tests {
     fn phone_boundary_after_digit() {
         // 13th digit right after the 12-digit cap window.
         assert!(confirm_phone_intl(b"+1234567890123456789", 0).is_none());
+    }
+
+    /// #34 (greedy-consumption variant): the greedy separator scan
+    /// consumed into adjacent numeric content. Verify the fallback to
+    /// the last valid separator exercises the `Some(sep)` branch.
+    #[test]
+    fn phone_greedy_overshoot_falls_back_to_last_valid_sep() {
+        // Phone (11 digits) + space + IPv4 digits → greedy scan gives
+        // 19 digits, exceeds 15 → fallback to last separator (dot after
+        // 192) gives a 14-digit match.
+        let m = confirm_phone_intl(b"+14155551234 192.168.0.1", 0).unwrap();
+        assert_eq!(m.match_start, 0);
+        // Match ends at the dot between `192` and `168` (position 16) —
+        // the last separator where digit_count (14) was still in [7, 15].
+        assert_eq!(m.match_end, 16); // b"+14155551234 192" is [0, 16)
+    }
+
+    #[test]
+    fn phone_greedy_overshoot_no_valid_sep_rejects() {
+        // All 18 consecutive digits, no separator to fall back to.
+        assert!(confirm_phone_intl(b"+123456789012345678", 0).is_none());
+    }
+
+    #[test]
+    fn phone_greedy_overshoot_preserves_valid_match() {
+        // 15 digits (E.164 max) — no overshoot, match is valid as-is.
+        let m = confirm_phone_intl(b"+1 234567 89012345 end", 0).unwrap();
+        assert_eq!(m.match_start, 0);
+        // "+1 234567 89012345" = 15 digits, stops at space before "end"
+        assert_eq!(m.match_end, 18);
     }
 }

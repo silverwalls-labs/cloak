@@ -1013,6 +1013,12 @@ fn confirm_phone_oracle(input: &[u8], start: usize) -> Option<usize> {
     let mut pos = start + 1;
     let mut digit_count = 0;
     let limit = input.len().min(start + 25);
+
+    // #34 (greedy-consumption variant, mirrors the engine): track the
+    // last separator where digit_count was still valid so the greedy
+    // scan can fall back when it overshoots into adjacent digits.
+    let mut last_valid_sep: Option<usize> = None;
+
     while pos < limit && input[pos].is_ascii_digit() {
         digit_count += 1;
         pos += 1;
@@ -1029,12 +1035,18 @@ fn confirm_phone_oracle(input: &[u8], start: usize) -> Option<usize> {
             && pos + 1 < limit
             && input[pos + 1].is_ascii_digit()
         {
+            if (7..=15).contains(&digit_count) {
+                last_valid_sep = Some(pos);
+            }
             pos += 1;
         } else {
             break;
         }
     }
-    if !(7..=15).contains(&digit_count) {
+    // #34: greedy overshoot fallback (mirrors the engine).
+    if digit_count > 15 {
+        pos = last_valid_sep?;
+    } else if digit_count < 7 {
         return None;
     }
     // Non-digit boundary after. A redaction tag head counts as a

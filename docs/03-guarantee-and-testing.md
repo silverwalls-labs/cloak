@@ -207,9 +207,11 @@ context beyond max_window) and issue #34 (adjacent redaction erasing a backward
 guard, breaking idempotence). Both are closed: the fixes (retained spans, PEM
 close-context synthesis, and the `CLOAK_TAG_MAX` tag-tail/head guards — see
 [the machinery above](#how-chunk-invariance-is-kept-the-load-bearing-machinery))
-are pinned by `tests/differential.rs`, and **strict is now the default for every
-CI fuzz run** — corpus replay and smoke both set `CLOAK_FUZZ_STRICT=1`
-(`fuzz/src/common.rs`).
+are pinned by `tests/differential.rs`, and **the PR-gate corpus replay is
+strict** (`CLOAK_FUZZ_STRICT=1`, `fuzz/src/common.rs`). Strict stays opt-in
+(default off) until the PEM shared-dash idempotence bug (#44) is fixed; the
+generative smoke fuzz and the nightly extended run therefore stay
+non-strict for now — the smoke found #44 in CI (2026-10-11, both ISAs).
 
 ### CI staging (all blocking at their stage)
 
