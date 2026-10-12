@@ -278,3 +278,96 @@ fn junction_across_carry_boundary() {
         }
     }
 }
+
+/// Truncated-context regression (found by fuzz_pem_state in CI): a
+/// 6-dash junction near the stream start followed by >`max_window`
+/// bytes, so the drain boundary (`combined_len − max_window`) sweeps
+/// past the rejected anchor during streaming. The re-derived
+/// candidate would anchor at the carry start where the dash-run
+/// guard reads truncated backward context and flips the decision —
+/// the engine pins the boundary back instead (whole-buffer leaves
+/// the fused block unredacted; streaming must agree).
+#[test]
+fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
+    let (engine, key) = engine_and_key();
+    let mut data = Vec::new();
+    data.extend_from_slice(
+        b"-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE------BEGIN EC PRIVATE KEY-----\nBBBB\n",
+    );
+    data.extend_from_slice(&vec![b'X'; 2100]);
+    data.extend_from_slice(b"\n-----END EC PRIVATE KEY-----\n");
+
+    // Whole-buffer: the fused 6-dash junction is rejected — one
+    // unredacted EC block body stays in the clear — and the reference
+    // oracle agrees.
+    let (pass1, stats1) = whole(&engine, &data);
+    assert_eq!(stats1.total_matches(), 0, "fused junction must not confirm");
+    assert!(pass1.windows(4).any(|w| w == b"BBBB"));
+    let (ref_out, ref_stats) = cloak_core::reference::redact(&data, &key);
+    assert_eq!(pass1, ref_out.as_slice(), "engine ≢ reference");
+    assert_eq!(
+        stats1.matches, ref_stats.matches,
+        "stats diverge from reference"
+    );
+
+    // Streaming must agree at every chunk size — cs=1 guarantees the
+    // drain boundary lands exactly on the rejected anchor.
+    for cs in [1usize, 3, 7, 64, 1024] {
+        let mut session = engine.session();
+        let mut out = Vec::new();
+        for chunk in data.chunks(cs) {
+            session.push(chunk, &mut out).unwrap();
+        }
+        let stats = session.finish(&mut out).unwrap();
+        assert_eq!(
+            out, pass1,
+            "cs={cs}: streaming ≢ whole-buffer across the drain boundary"
+        );
+        assert_eq!(stats.matches, stats1.matches, "cs={cs}: stats diverge");
+    }
+}
+
+/// Bail-out digest regression (found by fuzz_pem_state): an
+/// unterminated block whose body ends a few bytes past
+/// `PEM_BAIL_OUT`. The engine's finish path hashed the final carry
+/// without enforcing the budget — the digest covered more body bytes
+/// than the reference oracle's, which caps the tag at exactly
+/// `PEM_BAIL_OUT` (F05).
+#[test]
+fn unterminated_block_digest_capped_at_bail_out() {
+    let (engine, key) = engine_and_key();
+    // Body = PEM_BAIL_OUT (16_384, F05) + 3 bytes, no END marker.
+    // The value is pinned by engine::pem::PEM_BAIL_OUT and the
+    // reference oracle's own constant (cross-checked by unit test).
+    const PEM_BAIL_OUT: usize = 16_384;
+    let mut data = b"-----BEGIN ENCRYPTED PRIVATE KEY-----\n".to_vec();
+    data.extend_from_slice(&vec![b'A'; PEM_BAIL_OUT + 3]);
+
+    let mut session = engine.session();
+    let mut eng_out = Vec::new();
+    session.push(&data, &mut eng_out).unwrap();
+    let stats = session.finish(&mut eng_out).unwrap();
+    assert_eq!(stats.total_matches(), 1);
+
+    let (ref_out, ref_stats) = cloak_core::reference::redact(&data, &key);
+    assert_eq!(
+        eng_out,
+        ref_out.as_slice(),
+        "engine ≢ reference on the bail-out boundary\n  engine: {:?}\n  ref:    {:?}",
+        String::from_utf8_lossy(&eng_out),
+        String::from_utf8_lossy(&ref_out),
+    );
+    assert_eq!(stats.matches, ref_stats.matches);
+
+    // Streaming parity at boundary-straddling chunk sizes.
+    for cs in [1usize, 37, 4096, 8192] {
+        let mut session = engine.session();
+        let mut out = Vec::new();
+        for chunk in data.chunks(cs) {
+            session.push(chunk, &mut out).unwrap();
+        }
+        let st = session.finish(&mut out).unwrap();
+        assert_eq!(out, eng_out, "cs={cs}: streaming ≢ whole-buffer");
+        assert_eq!(st.matches, stats.matches, "cs={cs}: stats diverge");
+    }
+}

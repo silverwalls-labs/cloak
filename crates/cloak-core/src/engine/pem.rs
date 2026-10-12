@@ -144,6 +144,15 @@ const CLOAK_TAG_PREFIX: &[u8] = b"[CLOAK:";
 /// `-----END ` — the fixed prefix of every private-key END trailer.
 const PEM_END_PREFIX: &[u8] = b"-----END ";
 
+/// Maximum backward read of the shared-dash guard: the dash run
+/// (≤10, capped) and the longest `-----END ` + key-type trailer
+/// (9 + 21 = 30). The engine pins the emission boundary so a retained
+/// PEM candidate always keeps this many bytes of backward context in
+/// the carry — a re-derivation that confirms against a truncated
+/// backward read could flip a decision already made with full context
+/// (found by fuzz_pem_state).
+pub(crate) const PEM_BACK_WINDOW: usize = 30;
+
 /// Number of consecutive dashes immediately before `pos`, counting
 /// backward, capped at 10 (the shared-dash guard only distinguishes
 /// 0, 1..=4 and ≥5). Stops at the buffer start.
@@ -534,12 +543,23 @@ pub(crate) fn finish_pem(state: &mut PemState, out: &mut impl io::Write) -> io::
     match state {
         PemState::InBlock(block) => {
             let PemBlockData {
-                hasher, pem_carry, ..
+                hasher,
+                body_bytes,
+                pem_carry,
+                ..
             } = &mut **block;
 
-            // Hash any remaining carry bytes.
+            // Hash the remaining carry bytes, capped at the bail-out
+            // budget: pushes never let body_bytes exceed PEM_BAIL_OUT,
+            // but the final carry can straddle the boundary — hashing
+            // all of it covered more than PEM_BAIL_OUT body bytes and
+            // diverged from the reference oracle (found by
+            // fuzz_pem_state: engine ≢ reference on a block whose body
+            // ends a few bytes past the budget).
             if !pem_carry.is_empty() {
-                hasher.update(pem_carry);
+                let budget = PEM_BAIL_OUT.saturating_sub(*body_bytes);
+                let n = pem_carry.len().min(budget);
+                hasher.update(&pem_carry[..n]);
             }
 
             let digest = crate::redact::digest_from_hasher(hasher);
@@ -752,6 +772,23 @@ mod tests {
             .position(|&t| t == b"PRIVATE KEY")
             .unwrap();
         assert_eq!(end_marker_for(idx), b"-----END PRIVATE KEY-----".to_vec());
+    }
+
+    #[test]
+    fn back_window_covers_longest_trailer() {
+        // PEM_BACK_WINDOW must cover the longest backward read of the
+        // shared-dash guard: the fixed END prefix plus the longest key
+        // type. If a longer key type is ever added, this pin fails.
+        let longest = PEM_KEY_TYPES
+            .iter()
+            .map(|t| t.len())
+            .max()
+            .expect("PEM_KEY_TYPES is non-empty");
+        assert_eq!(
+            PEM_BACK_WINDOW,
+            b"-----END ".len() + longest,
+            "PEM_BACK_WINDOW must equal the longest trailer read"
+        );
     }
 
     // --- process_pem_body --------------------------------------------------
