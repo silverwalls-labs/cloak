@@ -64,9 +64,11 @@ pub static KEY: LazyLock<[u8; 32]> =
 /// - **#34** (fixed) — backward-guard context erased by adjacent
 ///   redaction tags, and greedy phone-intl separator consumption into
 ///   adjacent numeric content.
-/// - **#44** (fixed) — PEM shared-dash idempotence: `-----END ...------BEGIN
-///   ...` with overlapping dashes no longer breaks idempotence (the
-///   `confirm_pem_begin` preceding-dash guard rejects fused markers).
+/// - **#44** (fixed) — PEM shared-dash idempotence: fused
+///   `-----END …-----BEGIN …` markers (junction of 5–9 dashes)
+///   no longer break idempotence. The `confirm_pem_begin` dash-run
+///   guard rejects fused anchors on every pass, while junctions of
+///   ≥10 dashes (independent markers) still redact.
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
         Ok(v) => !matches!(

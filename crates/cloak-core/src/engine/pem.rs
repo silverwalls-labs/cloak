@@ -141,18 +141,73 @@ pub(crate) struct PemBeginMatch {
 /// Tag prefix used to detect already-redacted PEM blocks (idempotence).
 const CLOAK_TAG_PREFIX: &[u8] = b"[CLOAK:";
 
+/// `-----END ` — the fixed prefix of every private-key END trailer.
+const PEM_END_PREFIX: &[u8] = b"-----END ";
+
+/// Number of consecutive dashes immediately before `pos`, counting
+/// backward, capped at 10 (the shared-dash guard only distinguishes
+/// 0, 1..=4 and ≥5). Stops at the buffer start.
+fn dashes_before(buf: &[u8], pos: usize) -> usize {
+    let mut n = 0;
+    while n < 10 && pos > n && buf[pos - n - 1] == b'-' {
+        n += 1;
+    }
+    n
+}
+
+/// True when the bytes ending at `pos` are a `-----END <private-key
+/// type>` trailer — i.e. a BEGIN anchored at `pos` has its five
+/// leading dashes doubling as that trailer's closing dashes (fused
+/// junction of exactly 5). Reads at most 30 bytes back (the longest
+/// trailer is `-----END ENCRYPTED PRIVATE KEY`); underflow (near the
+/// buffer start) means no trailer — the whole-buffer path sees the
+/// same bytes.
+fn preceded_by_private_key_end(buf: &[u8], pos: usize) -> bool {
+    PEM_KEY_TYPES.iter().any(|&key_type| {
+        pos.checked_sub(PEM_END_PREFIX.len() + key_type.len())
+            .is_some_and(|start| {
+                &buf[start..start + PEM_END_PREFIX.len()] == PEM_END_PREFIX
+                    && &buf[start + PEM_END_PREFIX.len()..pos] == key_type
+            })
+    })
+}
+
 /// Check whether the anchor at `begin_pos` is a private-key BEGIN line.
 /// Returns the key-type index and the position just after the line's
 /// closing dashes if confirmed; `None` otherwise.
 ///
 /// Rejects already-redacted PEM blocks (body starts with `[CLOAK:`) so
 /// that `redact(redact(S)) == redact(S)` holds for PEM.
+///
+/// Shared-dash guard (#44): a BEGIN line's five leading dashes may
+/// overlap the closing dashes of a preceding END trailer when blocks
+/// are fused without a newline. The guard counts the dashes
+/// immediately before the anchor ([`dashes_before`]):
+///
+/// - 1–4 (junction of 6–9 total dashes): the trailer's closing dashes
+///   and this BEGIN's leading dashes overlap, or the header is a
+///   malformed ≥6-dash run. Reject. Pass 1 never confirms these (the
+///   preceding block's scan region consumes the anchor), so confirming
+///   here would break `redact(redact(S)) == redact(S)`.
+/// - ≥5 (junction of ≥10 dashes): END's five closing dashes plus
+///   BEGIN's five leading dashes coexist without overlap — two
+///   independent markers. Accept.
+/// - 0 with a private-key END trailer right before
+///   ([`preceded_by_private_key_end`]): junction of exactly 5 dashes —
+///   the anchor's leading dashes double as the trailer's closing
+///   dashes. A fresh `-----BEGIN ` scan (how PEM readers find blocks)
+///   would extract the block, but pass 1's scan region hides it, so
+///   rejecting here keeps both passes identical.
+/// - 0 otherwise: standalone BEGIN. Accept.
+///
+/// Known tradeoff: fused blocks (junction of 5–9 dashes) are left
+/// unredacted on every pass. A strict RFC 7468 reader cannot extract
+/// them (a BEGIN line has exactly five dashes); extraction-resistance
+/// against naive literal scanners for malformed headers is a separate
+/// threat-model decision.
 pub(crate) fn confirm_pem_begin(buf: &[u8], begin_pos: usize) -> Option<PemBeginMatch> {
-    // Shared-dash guard (#44): a valid BEGIN has exactly 5 leading
-    // dashes; a 6th means this anchor overlaps a preceding END
-    // trailer (fused blocks). Reject — redacting one half of fused
-    // markers breaks idempotence.
-    if begin_pos > 0 && buf.get(begin_pos - 1) == Some(&b'-') {
+    let dashes = dashes_before(buf, begin_pos);
+    if (1..=4).contains(&dashes) || (dashes == 0 && preceded_by_private_key_end(buf, begin_pos)) {
         return None;
     }
     let after_anchor = begin_pos + PEM_ANCHOR.len();
@@ -591,21 +646,81 @@ mod tests {
     }
 
     // --- shared-dash guard (#44) -------------------------------------------
+    //
+    // `dashes` below is the run length before the anchor; the junction
+    // between an END trailer and this BEGIN holds `dashes + 5` total
+    // dashes (the anchor's own five leading dashes included).
 
     #[test]
-    fn reject_preceding_dash_shared_6() {
-        // 6 dashes: the anchor `-----BEGIN ` starts at position 1, but
-        // buf[0] == '-' → fused with a preceding END trailer.
+    fn reject_fused_run_1() {
+        // Junction of 6 total dashes — fused or malformed. Anchor at 1.
         let buf = b"------BEGIN RSA PRIVATE KEY-----\ndata";
         assert!(confirm_pem_begin(buf, 1).is_none());
     }
 
     #[test]
-    fn reject_preceding_dash_shared_8() {
-        // 8 dashes: anchor at position 3 (positions 3–7 are the 5 leading
-        // dashes), but buf[2] == '-' → fused.
-        let buf = b"--------BEGIN EC PRIVATE KEY-----\ndata";
-        assert!(confirm_pem_begin(buf, 3).is_none());
+    fn reject_fused_run_2() {
+        // Junction of 7 total dashes. Anchor at position 2.
+        let buf = b"-------BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 2).is_none());
+    }
+
+    #[test]
+    fn reject_fused_run_4() {
+        // Junction of 9 total dashes. Anchor at position 4.
+        let buf = b"---------BEGIN EC PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 4).is_none());
+    }
+
+    #[test]
+    fn accept_independent_run_5() {
+        // Junction of 10 total dashes: END's five closing dashes plus
+        // BEGIN's five leading dashes — no overlap. Anchor at position 5.
+        let buf = b"----------BEGIN EC PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 5).expect("independent markers confirm");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
+    }
+
+    #[test]
+    fn accept_independent_long_run() {
+        // Junction far beyond 10 dashes — still two independent markers.
+        let buf = b"---------------------BEGIN RSA PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 16).expect("long dash run confirms");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"RSA PRIVATE KEY");
+    }
+
+    #[test]
+    fn reject_fused_run_0_after_private_key_end() {
+        // Junction of exactly 5 total dashes: the anchor's leading
+        // dashes double as the END trailer's closing dashes.
+        let buf = b"-----END RSA PRIVATE KEY-----BEGIN EC PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 24).is_none());
+    }
+
+    #[test]
+    fn reject_fused_run_0_after_pkcs8_end() {
+        // Same boundary case for the generic PKCS#8 label.
+        let buf = b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 20).is_none());
+    }
+
+    #[test]
+    fn accept_run_0_after_certificate_end() {
+        // Five dashes shared with a CERTIFICATE trailer: not a
+        // private-key block boundary — a fresh BEGIN scan extracts a
+        // valid block, so it confirms (and redacts) on every pass.
+        let buf = b"-----END CERTIFICATE-----BEGIN EC PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 20).expect("certificate trailer fuses nothing");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
+    }
+
+    #[test]
+    fn accept_run_0_after_malformed_trailer() {
+        // The trailer label is corrupt ("KEYX"), so the five dashes do
+        // not complete a private-key END line — accept.
+        let buf = b"-----END RSA PRIVATE KEYX-----BEGIN EC PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 25).expect("malformed trailer fuses nothing");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
     }
 
     #[test]

@@ -11,10 +11,19 @@ a breaking change).
 
 ### Fixed
 
-- **#44** — PEM shared-dash idempotence: a `confirm_pem_begin` guard
-  rejects BEGIN markers whose leading dashes overlap a preceding END
-  trailer (fused blocks with 6+ consecutive dashes). Strict fuzz
-  equivalences are now unconditional in CI.
+- **#44** — PEM shared-dash idempotence: `confirm_pem_begin` now
+  counts the dash run before a BEGIN anchor. A run of 1–4 dashes
+  (junction of 6–9 between an END trailer and the BEGIN) means the
+  markers are fused or the header is malformed — rejected on every
+  pass. A run of 0 preceded by a `-----END <private-key type>`
+  trailer (junction of exactly 5) is the fused boundary case —
+  rejected the same way. Junctions of ≥10 dashes are two independent
+  markers and redact normally. Known tradeoff: fused blocks
+  (junction of 5–9) are left unredacted on every pass — a strict
+  RFC 7468 reader cannot extract them (a BEGIN line has exactly
+  five dashes); extraction-resistance against naive literal
+  scanners for malformed headers is a separate threat-model
+  decision. Strict fuzz equivalences are unconditional in CI.
 - **#34** — idempotence restored: backward/forward tag guards reject
   candidates fused to `[CLOAK:…]` tags, and the phone-intl greedy
   separator scan falls back to the longest valid match when adjacent
