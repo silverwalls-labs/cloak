@@ -671,18 +671,10 @@ impl Session<'_> {
             }
         }
 
-        // Shared-dash pin (#44 truncated-context): the shared-dash guard
-        // reads up to `PEM_BACK_WINDOW` bytes backward (dash run + END
-        // trailer). Pin the boundary so every retained PEM candidate keeps
-        // that window in the carry. A re-derivation that confirms against
-        // truncated backward context could flip a decision already made
-        // with full context in the push where the candidate first became
-        // resolvable — either by blindly accepting a rejected fused
-        // marker (streaming ≢ whole-buffer, found by fuzz_pem_state), or
-        // by rejecting a confirmed block and thereby un-skipping the
-        // candidates its scan region suppresses (engine ≢ reference).
-        // The pull-back is bounded by PEM_BACK_WINDOW past the earliest
-        // retained candidate.
+        // Shared-dash pin (#44): keep PEM_BACK_WINDOW bytes of backward
+        // context before every retained PEM candidate, so re-derivations
+        // confirm against full context instead of flipping an earlier
+        // full-context decision.
         if !is_final {
             for cand in &self.candidates {
                 if cand.rule != self.engine.pem_rule_idx {

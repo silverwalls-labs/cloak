@@ -1,33 +1,20 @@
 //! Regression tests for #44: PEM shared-dash idempotence.
 //!
-//! When a PEM END trailer shares dashes with a following BEGIN header
-//! (fewer than the expected 10 between blocks), the markers are fused.
 //! The guard in `confirm_pem_begin` / `confirm_pem_begin_ref` counts the
-//! dash run before the anchor and decides:
-//!
-//! - junction of 6–9 dashes (1–4 before the anchor): fused or malformed
-//!   header — rejected on every pass, so `redact(redact(S)) == redact(S)`
-//!   holds. Known tradeoff: the fused block's body stays in the clear.
-//! - junction of exactly 5 dashes (none before the anchor, private-key
-//!   END trailer right before): the anchor's leading dashes double as
-//!   the trailer's closing dashes — rejected on every pass.
-//! - junction of ≥10 dashes: two independent markers — both redact.
-//!
-//! These tests sweep every junction width, two fusion shapes (after a
-//! private-key block and after an unrelated CERTIFICATE block), and pin
-//! the three correctness equivalences: idempotence, engine ≡ reference,
-//! streaming ≡ whole-buffer.
+//! dash run before a BEGIN anchor: 1–4 (junction 6–9) or 0-after-a-
+//! private-key-END-trailer (junction exactly 5) are fused markers and
+//! reject on every pass; ≥5 (junction ≥10) are two independent markers
+//! and both redact. These tests sweep every junction width in two
+//! fusion shapes and pin the three correctness equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;
 
 /// Set `TEST_DIGEST_KEY` exactly once, before any `Engine` is built.
 static KEY_ENV: LazyLock<()> = LazyLock::new(|| {
-    // SAFETY: the variable is written exactly once, synchronized by
-    // LazyLock's initialization lock, before any test builds an Engine
-    // (the only reader). Nothing else in this test binary reads or
-    // writes `TEST_DIGEST_KEY`, so no thread can observe a concurrent
-    // environment mutation.
+    // SAFETY: written exactly once under LazyLock's init lock, before
+    // any Engine (the only reader) is built; nothing else touches
+    // TEST_DIGEST_KEY.
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { std::env::set_var("TEST_DIGEST_KEY", "test-digest-key") }
 });
@@ -53,9 +40,8 @@ fn whole(engine: &Engine, input: &[u8]) -> (Vec<u8>, cloak_core::Stats) {
     (out, stats)
 }
 
-/// A private-key block, an END trailer fused with the next BEGIN over
-/// `dashes` total junction dashes (10 = clean separation), then a
-/// second private-key block.
+/// Private-key block + junction of `dashes` dashes + second block
+/// (10 = clean separation).
 fn fused_after_private_key(dashes: usize) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\n");
@@ -68,9 +54,8 @@ fn fused_after_private_key(dashes: usize) -> Vec<u8> {
     data
 }
 
-/// An (unredacted) CERTIFICATE block, a junction of `dashes` dashes,
-/// then a private-key block — the fused BEGIN does not follow a
-/// private-key END trailer at all.
+/// Unredacted CERTIFICATE block + junction of `dashes` dashes +
+/// private-key block (no private-key END before the junction).
 fn fused_after_certificate(dashes: usize) -> Vec<u8> {
     let mut data = Vec::new();
     data.extend_from_slice(b"-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE");
@@ -81,19 +66,9 @@ fn fused_after_certificate(dashes: usize) -> Vec<u8> {
     data
 }
 
-/// Assert the full contract for one input:
-///
-/// - pass 1 finds exactly `expected_matches` PEM blocks;
-/// - the second block's body (`BBBB`) is visible in pass-1 output iff
-///   `second_body_visible` — false when it is redacted OR suppressed
-///   by the first block's EOF bail-out (no END marker at 0–4 junction
-///   dashes), true when it is leaked by the fused-marker reject
-///   (5–9 junction dashes, the documented #44 tradeoff);
-/// - redaction is idempotent (pass 2 and pass 3 equal pass 1, and
-///   neither re-matches a tag);
-/// - engine ≡ reference (output and stats);
-/// - streaming ≡ whole-buffer at several chunk sizes (output and
-///   stats).
+/// Assert the full contract for one input: match count, body
+/// visibility, three-pass idempotence with no re-matched tags,
+/// engine ≡ reference, streaming ≡ whole-buffer.
 fn check_shape(
     engine: &Engine,
     key: &[u8; 32],
@@ -116,7 +91,6 @@ fn check_shape(
         String::from_utf8_lossy(&pass1),
     );
 
-    // Idempotence: pass 2 and pass 3 must equal pass 1, byte for byte.
     let (pass2, stats2) = whole(engine, &pass1);
     let (pass3, _) = whole(engine, &pass2);
     assert_eq!(
@@ -133,7 +107,6 @@ fn check_shape(
         "{name}: tags re-matched on second pass"
     );
 
-    // Engine == reference.
     let (ref_out, ref_stats) = cloak_core::reference::redact(input, key);
     assert_eq!(
         pass1,
@@ -147,7 +120,6 @@ fn check_shape(
         "{name}: stats diverge from reference"
     );
 
-    // Streaming == whole-buffer.
     for cs in [1usize, 7, 64, 1024] {
         let mut session = engine.session();
         let mut out = Vec::new();
@@ -169,15 +141,9 @@ fn check_shape(
     }
 }
 
-/// Junction sweep after a redacted private-key block.
-///
-/// - 0–4 junction dashes: block 1 has no complete END marker — it
-///   bails out at EOF and everything after its BEGIN line is
-///   suppressed (F05). One match, body invisible.
-/// - 5–9: fused markers — the guard rejects the second BEGIN on every
-///   pass. One match; the second body stays visible (documented
-///   tradeoff: a strict reader cannot extract it).
-/// - ≥10: two independent markers — both redact. Two matches.
+/// Junction sweep after a redacted private-key block: 0–4 leaves no
+/// complete END (EOF bail-out suppresses the rest), 5–9 is fused
+/// (rejected, body visible), ≥10 redacts both.
 #[test]
 fn junction_sweep_after_private_key_block() {
     let (engine, key) = engine_and_key();
@@ -199,16 +165,9 @@ fn junction_sweep_after_private_key_block() {
     }
 }
 
-/// Junction sweep after an unrelated CERTIFICATE block — the fused
-/// BEGIN is not preceded by a private-key END trailer.
-///
-/// - 0–4: not a valid marker. No matches, body visible.
-/// - 5: exactly five leading dashes, no private-key END fused — a
-///   fresh `-----BEGIN ` scan extracts a valid block, so it redacts
-///   on every pass. One match.
-/// - 6–9: malformed ≥6-dash header — rejected on every pass. No
-///   matches, body visible.
-/// - ≥10: two independent markers — the block redacts. One match.
+/// Junction sweep after an unrelated CERTIFICATE block: 0–4 no valid
+/// marker, 5 redacts (no private-key END fused), 6–9 malformed header
+/// (rejected), ≥10 redacts.
 #[test]
 fn junction_sweep_after_certificate_block() {
     let (engine, key) = engine_and_key();
@@ -231,8 +190,7 @@ fn junction_sweep_after_certificate_block() {
     }
 }
 
-/// Sanity: the realistic layout — newline-separated blocks — redacts
-/// both blocks.
+/// The realistic layout: newline-separated blocks both redact.
 #[test]
 fn newline_separated_blocks_redact_both() {
     let (engine, key) = engine_and_key();
@@ -240,11 +198,8 @@ fn newline_separated_blocks_redact_both() {
     check_shape(&engine, &key, "newline-separated", input, 2, false);
 }
 
-/// Large-input variant: padding before the first PEM block pushes the
-/// fused junction past the carry-over boundary (`max_window` = 2048),
-/// exercising the flush path. The dash-run guard — including its
-/// backward END-trailer read (up to 30 bytes) — must hold even when
-/// the junction straddles pushes.
+/// Padding pushes the fused junction past the carry-over boundary
+/// (`max_window` = 2048), exercising the flush path.
 #[test]
 fn junction_across_carry_boundary() {
     let (engine, key) = engine_and_key();
@@ -279,14 +234,10 @@ fn junction_across_carry_boundary() {
     }
 }
 
-/// Truncated-context regression (found by fuzz_pem_state in CI): a
-/// 6-dash junction near the stream start followed by >`max_window`
-/// bytes, so the drain boundary (`combined_len − max_window`) sweeps
-/// past the rejected anchor during streaming. The re-derived
-/// candidate would anchor at the carry start where the dash-run
-/// guard reads truncated backward context and flips the decision —
-/// the engine pins the boundary back instead (whole-buffer leaves
-/// the fused block unredacted; streaming must agree).
+/// Truncated-context regression (fuzz_pem_state CI crash): with more
+/// than `max_window` bytes after a rejected 6-dash junction, the drain
+/// boundary sweeps past the anchor — the shared-dash pin must keep
+/// its backward context so streaming agrees with whole-buffer.
 #[test]
 fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
     let (engine, key) = engine_and_key();
@@ -297,9 +248,6 @@ fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
     data.extend_from_slice(&vec![b'X'; 2100]);
     data.extend_from_slice(b"\n-----END EC PRIVATE KEY-----\n");
 
-    // Whole-buffer: the fused 6-dash junction is rejected — one
-    // unredacted EC block body stays in the clear — and the reference
-    // oracle agrees.
     let (pass1, stats1) = whole(&engine, &data);
     assert_eq!(stats1.total_matches(), 0, "fused junction must not confirm");
     assert!(pass1.windows(4).any(|w| w == b"BBBB"));
@@ -310,8 +258,6 @@ fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
         "stats diverge from reference"
     );
 
-    // Streaming must agree at every chunk size — cs=1 guarantees the
-    // drain boundary lands exactly on the rejected anchor.
     for cs in [1usize, 3, 7, 64, 1024] {
         let mut session = engine.session();
         let mut out = Vec::new();
@@ -327,18 +273,13 @@ fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
     }
 }
 
-/// Bail-out digest regression (found by fuzz_pem_state): an
-/// unterminated block whose body ends a few bytes past
-/// `PEM_BAIL_OUT`. The engine's finish path hashed the final carry
-/// without enforcing the budget — the digest covered more body bytes
-/// than the reference oracle's, which caps the tag at exactly
-/// `PEM_BAIL_OUT` (F05).
+/// Bail-out digest regression (fuzz_pem_state): an unterminated body
+/// ending past `PEM_BAIL_OUT` must produce the same tag as the
+/// reference, which caps the digest at exactly the budget (F05).
 #[test]
 fn unterminated_block_digest_capped_at_bail_out() {
     let (engine, key) = engine_and_key();
-    // Body = PEM_BAIL_OUT (16_384, F05) + 3 bytes, no END marker.
-    // The value is pinned by engine::pem::PEM_BAIL_OUT and the
-    // reference oracle's own constant (cross-checked by unit test).
+    // Pinned by engine::pem::PEM_BAIL_OUT and the oracle's constant.
     const PEM_BAIL_OUT: usize = 16_384;
     let mut data = b"-----BEGIN ENCRYPTED PRIVATE KEY-----\n".to_vec();
     data.extend_from_slice(&vec![b'A'; PEM_BAIL_OUT + 3]);
@@ -359,7 +300,6 @@ fn unterminated_block_digest_capped_at_bail_out() {
     );
     assert_eq!(stats.matches, ref_stats.matches);
 
-    // Streaming parity at boundary-straddling chunk sizes.
     for cs in [1usize, 37, 4096, 8192] {
         let mut session = engine.session();
         let mut out = Vec::new();

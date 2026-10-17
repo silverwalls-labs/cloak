@@ -65,8 +65,7 @@ jobs:
       - name: Extended fuzz (1h)
         working-directory: crates/cloak-core
         env:
-          # Strict: #44 (PEM shared-dash idempotence) is fixed. All
-          # three correctness equivalences are asserted.
+          # All three correctness equivalences are asserted (#44 fixed).
           CLOAK_FUZZ_STRICT: "1"
         run: |
           # A crash fails the job — that is the finding-filed signal; the

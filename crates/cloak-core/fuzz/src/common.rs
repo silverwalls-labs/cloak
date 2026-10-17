@@ -58,17 +58,8 @@ pub static KEY: LazyLock<[u8; 32]> =
 ///
 /// **Strict mode (`CLOAK_FUZZ_STRICT=1`), every input:** the three
 /// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
-/// idempotence. All three engine bugs are fixed:
-/// - **#27** (fixed) — carry-over context loss for context-keyed extents
-///   overlapping PEM blocks.
-/// - **#34** (fixed) — backward-guard context erased by adjacent
-///   redaction tags, and greedy phone-intl separator consumption into
-///   adjacent numeric content.
-/// - **#44** (fixed) — PEM shared-dash idempotence: fused
-///   `-----END …-----BEGIN …` markers (junction of 5–9 dashes)
-///   no longer break idempotence. The `confirm_pem_begin` dash-run
-///   guard rejects fused anchors on every pass, while junctions of
-///   ≥10 dashes (independent markers) still redact.
+/// idempotence. #27, #34 and #44 are all fixed; CI asserts all three
+/// unconditionally (corpus replay and generative smoke).
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
         Ok(v) => !matches!(

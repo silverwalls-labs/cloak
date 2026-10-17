@@ -1144,9 +1144,8 @@ fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
     blocks
 }
 
-/// Number of consecutive dashes immediately before `pos`, counting
-/// backward, capped at 10. Mirrors the engine's guard (cross-checked
-/// by the differential tests).
+/// Consecutive dashes immediately before `pos`, capped at 10. Mirrors
+/// the engine's guard.
 fn dashes_before(input: &[u8], pos: usize) -> usize {
     let mut n = 0;
     while n < 10 && pos > n && input[pos - n - 1] == b'-' {
@@ -1155,9 +1154,8 @@ fn dashes_before(input: &[u8], pos: usize) -> usize {
     n
 }
 
-/// True when the bytes ending at `pos` are a `-----END <private-key
-/// type>` trailer (a fused BEGIN's leading dashes double as its
-/// closing dashes). Mirrors the engine's guard.
+/// True when a `-----END <private-key type>` trailer ends exactly at
+/// `pos`. Mirrors the engine's guard.
 fn preceded_by_private_key_end(input: &[u8], pos: usize) -> bool {
     const END_PREFIX: &[u8] = b"-----END ";
     PEM_KEY_TYPES.iter().any(|&key_type| {
@@ -1171,10 +1169,6 @@ fn preceded_by_private_key_end(input: &[u8], pos: usize) -> bool {
 
 fn confirm_pem_begin_ref(input: &[u8], after_begin: usize) -> Option<(usize, &'static [u8])> {
     // Shared-dash guard (#44): mirrors the engine's confirm_pem_begin.
-    // 1–4 dashes before the anchor: fused with a preceding END trailer
-    // (junction of 6–9) or malformed — reject. >=5 (junction of >=10):
-    // independent markers — accept. 0 with a private-key END trailer
-    // right before (junction of exactly 5): fused — reject.
     let begin_start = after_begin.saturating_sub(PEM_BEGIN.len());
     let dashes = dashes_before(input, begin_start);
     if (1..=4).contains(&dashes) || (dashes == 0 && preceded_by_private_key_end(input, begin_start))
