@@ -671,6 +671,21 @@ impl Session<'_> {
             }
         }
 
+        // Shared-dash pin (#44): keep PEM_BACK_WINDOW bytes of backward
+        // context before every retained PEM candidate, so re-derivations
+        // confirm against full context instead of flipping an earlier
+        // full-context decision.
+        if !is_final {
+            for cand in &self.candidates {
+                if cand.rule != self.engine.pem_rule_idx {
+                    continue;
+                }
+                if cand.start >= emit_start {
+                    emit_start = emit_start.min(cand.start.saturating_sub(pem::PEM_BACK_WINDOW));
+                }
+            }
+        }
+
         // Adjust emit_start so no confirmed match spans the boundary: a
         // straddling match is retained and re-confirmed next push, by which
         // time any overlapping candidates (possibly not yet resolvable now)

@@ -11,6 +11,20 @@ a breaking change).
 
 ### Fixed
 
+- **#44** — PEM shared-dash idempotence: `confirm_pem_begin` counts
+  the dash run before a BEGIN anchor. 1–4 dashes (junction of 6–9)
+  or none with a `-----END <private-key type>` trailer right before
+  (junction of exactly 5) are fused markers — rejected on every
+  pass. Junctions of ≥10 dashes are independent markers and redact
+  normally. Fused blocks (junction 5–9) stay unredacted: a strict
+  RFC 7468 reader cannot extract them; extraction-resistance for
+  malformed headers is a separate decision (#46). Strict fuzz
+  equivalences are unconditional in CI. Also fixed in this PR (both
+  found by the strict gates): PEM candidates re-derived at the
+  emission boundary confirmed against truncated backward context —
+  the boundary is now pinned `PEM_BACK_WINDOW` bytes behind every
+  retained candidate; and `finish_pem` hashed the final carry past
+  `PEM_BAIL_OUT`, diverging the bail-out digest from the oracle.
 - **#34** — idempotence restored: backward/forward tag guards reject
   candidates fused to `[CLOAK:…]` tags, and the phone-intl greedy
   separator scan falls back to the longest valid match when adjacent
@@ -60,10 +74,10 @@ First release: the `cloak` CLI and the `cloak-core` engine.
   missed (opt-in decode layer tracked as ledger F11; single-line tokens are
   unaffected).
 - ~~Two tracked engine bugs (#27, #34)~~ — both fixed in [Unreleased].
-  Strict fuzz equivalence checks remain opt-in
+  ~~Strict fuzz equivalence checks remain opt-in
   (`CLOAK_FUZZ_STRICT=1`) until the PEM shared-dash idempotence bug
   ([#44](https://github.com/silverwalls-labs/cloak/issues/44)) is
-  fixed.
+  fixed.~~ — #44 fixed in [Unreleased]; strict is now unconditional.
 
 [Unreleased]: https://github.com/silverwalls-labs/cloak/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/silverwalls-labs/cloak/releases/tag/v0.1.0

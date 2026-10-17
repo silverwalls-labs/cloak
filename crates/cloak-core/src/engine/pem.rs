@@ -141,13 +141,52 @@ pub(crate) struct PemBeginMatch {
 /// Tag prefix used to detect already-redacted PEM blocks (idempotence).
 const CLOAK_TAG_PREFIX: &[u8] = b"[CLOAK:";
 
+/// `-----END ` — the fixed prefix of every private-key END trailer.
+const PEM_END_PREFIX: &[u8] = b"-----END ";
+
+/// Longest backward read of the shared-dash guard (#44): the capped
+/// dash run plus the longest `-----END <key type>` trailer. The engine
+/// pins the emission boundary this far behind every retained PEM
+/// candidate so re-derivations confirm against full context.
+pub(crate) const PEM_BACK_WINDOW: usize = 30;
+
+/// Consecutive dashes immediately before `pos`, capped at 10.
+fn dashes_before(buf: &[u8], pos: usize) -> usize {
+    let mut n = 0;
+    while n < 10 && pos > n && buf[pos - n - 1] == b'-' {
+        n += 1;
+    }
+    n
+}
+
+/// True when a `-----END <private-key type>` trailer ends exactly at
+/// `pos` — the anchor's five leading dashes double as its closing
+/// dashes (fused junction of exactly 5).
+fn preceded_by_private_key_end(buf: &[u8], pos: usize) -> bool {
+    PEM_KEY_TYPES.iter().any(|&key_type| {
+        pos.checked_sub(PEM_END_PREFIX.len() + key_type.len())
+            .is_some_and(|start| {
+                &buf[start..start + PEM_END_PREFIX.len()] == PEM_END_PREFIX
+                    && &buf[start + PEM_END_PREFIX.len()..pos] == key_type
+            })
+    })
+}
+
 /// Check whether the anchor at `begin_pos` is a private-key BEGIN line.
 /// Returns the key-type index and the position just after the line's
 /// closing dashes if confirmed; `None` otherwise.
 ///
-/// Rejects already-redacted PEM blocks (body starts with `[CLOAK:`) so
-/// that `redact(redact(S)) == redact(S)` holds for PEM.
+/// Rejects already-redacted blocks (body starts with `[CLOAK:`) and
+/// fused markers (#44), so `redact(redact(S)) == redact(S)` holds:
+/// `dashes_before` counts the dash run before the anchor's own five
+/// leading dashes — 1–4 means a fused/malformed junction (6–9 total),
+/// and 0 with a private-key END trailer right before means the exactly-5
+/// boundary case. A run of ≥5 (junction ≥10) is two independent markers.
 pub(crate) fn confirm_pem_begin(buf: &[u8], begin_pos: usize) -> Option<PemBeginMatch> {
+    let dashes = dashes_before(buf, begin_pos);
+    if (1..=4).contains(&dashes) || (dashes == 0 && preceded_by_private_key_end(buf, begin_pos)) {
+        return None;
+    }
     let after_anchor = begin_pos + PEM_ANCHOR.len();
     let rest = buf.get(after_anchor..)?;
     for (i, &key_type) in PEM_KEY_TYPES.iter().enumerate() {
@@ -155,8 +194,7 @@ pub(crate) fn confirm_pem_begin(buf: &[u8], begin_pos: usize) -> Option<PemBegin
             let after_type = rest.get(key_type.len()..)?;
             if after_type.starts_with(PEM_DASHES) {
                 let begin_line_end = after_anchor + key_type.len() + PEM_DASHES.len();
-                // Idempotence: skip if the body starts with a CLOAK tag
-                // (this is a previously-redacted PEM block).
+                // Idempotence: skip already-redacted blocks.
                 if buf
                     .get(begin_line_end..)
                     .is_some_and(|b| b.starts_with(CLOAK_TAG_PREFIX))
@@ -472,12 +510,18 @@ pub(crate) fn finish_pem(state: &mut PemState, out: &mut impl io::Write) -> io::
     match state {
         PemState::InBlock(block) => {
             let PemBlockData {
-                hasher, pem_carry, ..
+                hasher,
+                body_bytes,
+                pem_carry,
+                ..
             } = &mut **block;
 
-            // Hash any remaining carry bytes.
+            // Cap at the bail-out budget (F05) — the final carry can
+            // straddle the boundary.
             if !pem_carry.is_empty() {
-                hasher.update(pem_carry);
+                let budget = PEM_BAIL_OUT.saturating_sub(*body_bytes);
+                let n = pem_carry.len().min(budget);
+                hasher.update(&pem_carry[..n]);
             }
 
             let digest = crate::redact::digest_from_hasher(hasher);
@@ -583,6 +627,79 @@ mod tests {
         assert!(confirm_pem_begin(buf, 0).is_none());
     }
 
+    // --- shared-dash guard (#44) -------------------------------------------
+
+    #[test]
+    fn reject_fused_run_1() {
+        let buf = b"------BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 1).is_none());
+    }
+
+    #[test]
+    fn reject_fused_run_2() {
+        let buf = b"-------BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 2).is_none());
+    }
+
+    #[test]
+    fn reject_fused_run_4() {
+        let buf = b"---------BEGIN EC PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 4).is_none());
+    }
+
+    #[test]
+    fn accept_independent_run_5() {
+        let buf = b"----------BEGIN EC PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 5).expect("independent markers confirm");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
+    }
+
+    #[test]
+    fn accept_independent_long_run() {
+        let buf = b"---------------------BEGIN RSA PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 16).expect("long dash run confirms");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"RSA PRIVATE KEY");
+    }
+
+    #[test]
+    fn reject_fused_run_0_after_private_key_end() {
+        let buf = b"-----END RSA PRIVATE KEY-----BEGIN EC PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 24).is_none());
+    }
+
+    #[test]
+    fn reject_fused_run_0_after_pkcs8_end() {
+        let buf = b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 20).is_none());
+    }
+
+    #[test]
+    fn accept_run_0_after_certificate_end() {
+        let buf = b"-----END CERTIFICATE-----BEGIN EC PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 20).expect("certificate trailer fuses nothing");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
+    }
+
+    #[test]
+    fn accept_run_0_after_malformed_trailer() {
+        let buf = b"-----END RSA PRIVATE KEYX-----BEGIN EC PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 25).expect("malformed trailer fuses nothing");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
+    }
+
+    #[test]
+    fn accept_begin_at_buffer_start() {
+        let buf = b"-----BEGIN RSA PRIVATE KEY-----\ndata";
+        assert!(confirm_pem_begin(buf, 0).is_some());
+    }
+
+    #[test]
+    fn accept_begin_after_newline() {
+        let buf = b"\n-----BEGIN RSA PRIVATE KEY-----\ndata";
+        let m = confirm_pem_begin(buf, 1).expect("should confirm");
+        assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"RSA PRIVATE KEY");
+    }
+
     // --- end_marker_for ----------------------------------------------------
 
     #[test]
@@ -597,6 +714,20 @@ mod tests {
             .position(|&t| t == b"PRIVATE KEY")
             .unwrap();
         assert_eq!(end_marker_for(idx), b"-----END PRIVATE KEY-----".to_vec());
+    }
+
+    #[test]
+    fn back_window_covers_longest_trailer() {
+        let longest = PEM_KEY_TYPES
+            .iter()
+            .map(|t| t.len())
+            .max()
+            .expect("PEM_KEY_TYPES is non-empty");
+        assert_eq!(
+            PEM_BACK_WINDOW,
+            b"-----END ".len() + longest,
+            "PEM_BACK_WINDOW must equal the longest trailer read"
+        );
     }
 
     // --- process_pem_body --------------------------------------------------

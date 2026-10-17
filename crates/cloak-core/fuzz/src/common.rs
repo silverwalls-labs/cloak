@@ -49,28 +49,17 @@ pub static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
 pub static KEY: LazyLock<[u8; 32]> =
     LazyLock::new(|| blake3::derive_key("cloak digest key", KEY_MATERIAL.as_bytes()));
 
-/// Assertion tiers, split by what actually holds today.
+/// Assertion tiers, split by robustness vs. correctness.
 ///
 /// **Both modes, every input:** no panic and the carry-over bound. These are
 /// universal — the robustness half of the guarantee (docs/03 threat model:
 /// malicious input must not crash / hang / OOM). This is the PR-gate and
 /// nightly signal.
 ///
-/// **Strict mode only (`CLOAK_FUZZ_STRICT=1`), every input:** the three
+/// **Strict mode (`CLOAK_FUZZ_STRICT=1`), every input:** the three
 /// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
-/// idempotence. #27 and #34 are fixed; CI replays the corpus with
-/// `CLOAK_FUZZ_STRICT=1` (F15). Strict remains opt-in until the PEM
-/// shared-dash idempotence bug is fixed: the generative smoke fuzz
-/// stays non-strict too — it found #44 in CI (2026-10-11, both ISAs):
-/// - **#27** (fixed) — carry-over context loss for context-keyed extents
-///   overlapping PEM blocks.
-/// - **#34** (fixed) — backward-guard context erased by adjacent
-///   redaction tags, and greedy phone-intl separator consumption into
-///   adjacent numeric content.
-/// - **PEM shared-dash** (#44, open) — `-----END ...------BEGIN ...`
-///   with overlapping dashes breaks redaction idempotence: pass 1
-///   skips the fused BEGIN, pass 2 redacts it (reproducers attached
-///   to #44; pre-existing on main).
+/// idempotence. #27, #34 and #44 are all fixed; CI asserts all three
+/// unconditionally (corpus replay and generative smoke).
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
         Ok(v) => !matches!(
