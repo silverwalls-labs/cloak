@@ -438,6 +438,88 @@ jobs:
             console.log('packed-artifact smoke ok:', output.toString().trim());
           "
 
+  # ── Python parity (E3) ────────────────────────────────────────────
+
+  python-parity:
+    name: Python Parity
+    needs: wasm-build
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Setup Rust (for vector freshness check)
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cloak-wasm
+          path: wasm-artifact
+
+      - name: Verify vectors.json freshness
+        run: |
+          cargo run --example export-vectors -p cloak-core > /tmp/vectors-fresh.json
+          diff adapters/python/tests/fixtures/vectors.json /tmp/vectors-fresh.json \
+            || { echo "::error::vectors.json is stale — regenerate with: cargo run --example export-vectors -p cloak-core > adapters/python/tests/fixtures/vectors.json"; exit 1; }
+
+      - name: Install Python dependencies (locked)
+        working-directory: adapters/python
+        run: uv sync --locked
+
+      - name: Ruff (lint + format)
+        working-directory: adapters/python
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Mypy (strict)
+        working-directory: adapters/python
+        run: uv run mypy
+
+      - name: Python parity + streaming + hooks tests
+        env:
+          CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
+        working-directory: adapters/python
+        run: uv run pytest
+
+      - name: Wheel build + install-in-clean-venv smoke
+        # Mirrors the npm pack smoke above: the wheel is what a consumer
+        # installs — verify it is complete and functional from a clean
+        # venv outside the source tree.
+        env:
+          CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
+        working-directory: adapters/python
+        run: |
+          uv build --wheel --out-dir /tmp/dist
+          SMOKE_DIR=$(mktemp -d)
+          uv venv "$SMOKE_DIR/venv" --python 3.13
+          uv pip install --python "$SMOKE_DIR/venv/bin/python" /tmp/dist/cloak_python-*.whl
+          cd "$SMOKE_DIR"
+          ./venv/bin/python -c "
+          from cloak_python import create_engine
+          engine = create_engine()
+          output, stats = engine.redact('token=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')
+          assert b'ghp_Ab' not in output, 'secret leaked through packed artifact'
+          assert b'[CLOAK:github-token:' in output, output
+          engine.dispose()
+          print('wheel smoke ok:', output.decode().strip())
+          "
+
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
   # main.rs coverage via instrumented binary + inherited LLVM_PROFILE_FILE).
