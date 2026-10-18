@@ -25,8 +25,12 @@ logger.addHandler(handler)
 
 # ── Example usage ──────────────────────────────────────────────────
 
+# A fake token — the example exists to show it being redacted on the
+# way out (semgrep: python-logger-credential-disclosure).
+fake_token = "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"
+
 logger.info("Application starting")
-logger.info("User authenticated token=%s", "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")
+logger.info("User authenticated token=%s", fake_token)  # nosemgrep
 logger.warning("External API call failed apiKey=%s", "AKIAIOSFODNN7EXAMPLE")
 logger.info("Clean log line — no secrets here")
 
