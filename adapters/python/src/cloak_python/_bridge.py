@@ -67,14 +67,14 @@ class _FastFunc:
         self._n_params = len(params)
         self._n_results = len(results)
         # Probe the internals once so _make_caller can fall back early.
-        self._ffi = wasmtime._ffi  # type: ignore[attr-defined]
+        self._ffi = wasmtime._ffi
         self._trap_type = ctypes.POINTER(self._ffi.wasm_trap_t)
         # Pre-built, reused per call (the bridge is single-threaded by
         # contract). Param kinds never change — set them once.
         self._func_ref = ctypes.byref(func._func)
         self._params = (self._ffi.wasmtime_val_t * max(self._n_params, 1))()
         for i in range(self._n_params):
-            self._params[i].kind = self._ffi.WASMTIME_I32.value
+            self._params[i].kind = ctypes.c_ubyte(self._ffi.WASMTIME_I32.value)
         self._results = (self._ffi.wasmtime_val_t * max(self._n_results, 1))()
         self._trap = self._trap_type()
 
@@ -96,18 +96,16 @@ class _FastFunc:
             ctypes.byref(trap),
         )
         if error:
-            raise wasmtime.WasmtimeError._from_ptr(error)  # type: ignore[attr-defined]
+            raise wasmtime.WasmtimeError._from_ptr(error)
         if trap:
             self._trap = self._trap_type()  # the raised Trap consumes this one
-            raise wasmtime.Trap._from_ptr(trap)  # type: ignore[attr-defined]
+            raise wasmtime.Trap._from_ptr(trap)
         if self._n_results == 0:
             return 0
-        return cast(int, self._results[0].of.i32)
+        return self._results[0].of.i32
 
 
-def _make_caller(
-    func: wasmtime.Func, store: wasmtime.Store
-) -> Callable[..., int]:
+def _make_caller(func: wasmtime.Func, store: wasmtime.Store) -> Callable[..., int]:
     """Wrap a WASM export in the fast i32 caller, or the stock path.
 
     The fallback keeps the adapter correct (just slower) if wasmtime-py

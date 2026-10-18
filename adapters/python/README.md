@@ -23,9 +23,11 @@ dependency ([wasmtime](https://pypi.org/project/wasmtime/)).
 from cloak_python import create_engine
 
 # Create an engine with a stable digest key for cross-run correlation.
-engine = create_engine({
-    "redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"},
-})
+engine = create_engine(
+    {
+        "redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"},
+    }
+)
 
 # One-shot: str or bytes in, (output, stats) out.
 output, stats = engine.redact("token=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")
@@ -69,14 +71,16 @@ carry-over window means the bytes emitted to the target may differ.
 Pass a dict — it's serialized to TOML internally (keys map 1:1):
 
 ```python
-engine = create_engine({
-    "redaction": {
-        "digest_key": "env:CLOAK_DIGEST_KEY",  # read from WASM env
-    },
-    "rules": {
-        "phone-intl": {"enabled": False},      # disable a rule
-    },
-})
+engine = create_engine(
+    {
+        "redaction": {
+            "digest_key": "env:CLOAK_DIGEST_KEY",  # read from WASM env
+        },
+        "rules": {
+            "phone-intl": {"enabled": False},  # disable a rule
+        },
+    }
+)
 ```
 
 Or pass a raw TOML string:
@@ -111,8 +115,9 @@ part2 = session.push("second chunk\n")
 tail, stats = session.finish()
 
 full = part1 + part2 + tail
-print(f"Processed {stats['bytes_processed']} bytes, "
-      f"{len(stats['matches'])} rules matched")
+print(
+    f"Processed {stats['bytes_processed']} bytes, {len(stats['matches'])} rules matched"
+)
 ```
 
 Abort a session without flushing (abandoned stream):
