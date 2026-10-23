@@ -242,3 +242,44 @@ def test_handler_respects_formatter(engine: CloakEngine) -> None:
     assert out.startswith(b"WARNING ")
     assert b"[CLOAK:github-token:" in out
     assert b"ghp_" not in out
+
+
+def test_writer_raises_on_zero_progress_target(engine: CloakEngine) -> None:
+    # A target returning 0 for a nonempty write makes no progress; the
+    # writer must surface it (BlockingIOError) instead of spinning forever.
+    class ZeroWriter:
+        closed = False
+
+        def write(self, b: bytes) -> int:
+            return 0
+
+        def flush(self) -> None:
+            pass
+
+    writer = CloakWriter(engine, cast(BinaryIO, ZeroWriter()))
+    with pytest.raises(BlockingIOError):
+        # Enough clean bytes that push flushes past the carry-over window
+        # and the forward actually runs inside write().
+        writer.write(b"clean filler line\n" * 1024)
+    assert writer.closed, "writer must land terminal after a failed forward"
+
+
+def test_writer_aborts_when_forwarding_fails(engine: CloakEngine) -> None:
+    # If the target fails mid-forward after the session consumed the
+    # input, the writer must abort — a later close() succeeding would
+    # report completeness over truncated output.
+    class FailingWriter:
+        closed = False
+
+        def write(self, b: bytes) -> int:
+            raise OSError("target gone")
+
+        def flush(self) -> None:
+            pass
+
+    writer = CloakWriter(engine, cast(BinaryIO, FailingWriter()))
+    with pytest.raises(OSError, match="target gone"):
+        writer.write(b"clean filler line\n" * 1024)
+    assert writer.closed
+    writer.close()  # idempotent no-op, must not raise or "succeed"
+    assert writer.stats is None

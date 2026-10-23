@@ -13,7 +13,11 @@ Example::
     from cloak_python import create_engine, CloakHandler
 
     engine = create_engine()
-    logging.basicConfig(handlers=[CloakHandler(engine)], level=logging.INFO)
+    # force=True replaces existing root handlers (which would bypass
+    # redaction); without it basicConfig is a no-op when handlers exist.
+    logging.basicConfig(
+        handlers=[CloakHandler(engine)], level=logging.INFO, force=True
+    )
     logging.info("token=%s", some_secret)  # redacted on the way out
 """
 

@@ -19,6 +19,14 @@ dependency ([wasmtime](https://pypi.org/project/wasmtime/)).
 
 ## Quick start
 
+Set the digest key first — with `CLOAK_DIGEST_KEY` unset the engine
+still works but falls back to an ephemeral per-process key, so tags
+don't correlate across runs:
+
+```sh
+export CLOAK_DIGEST_KEY="my-stable-key"
+```
+
 ```python
 from cloak_python import create_engine
 
@@ -151,7 +159,10 @@ from cloak_python import create_engine, CloakHandler
 engine = create_engine({"redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"}})
 
 handler = CloakHandler(engine)  # writes to sys.stdout.buffer
-logging.basicConfig(handlers=[handler], level=logging.INFO)
+# force=True replaces any handlers already on the root logger —
+# without it basicConfig is a no-op when handlers exist, and records
+# keep flowing to handlers that bypass redaction.
+logging.basicConfig(handlers=[handler], level=logging.INFO, force=True)
 
 logging.info("token=%s", some_secret)
 # stdout: token=[CLOAK:github-token:xxxx]
@@ -173,7 +184,9 @@ log_queue: queue.Queue = queue.Queue()
 listener = logging.handlers.QueueListener(log_queue, CloakHandler(engine))
 listener.start()
 
-logging.getLogger().addHandler(logging.handlers.QueueHandler(log_queue))
+# Replace (not append to) the root handlers: anything left beside the
+# QueueHandler would receive the same records unredacted.
+logging.getLogger().handlers = [logging.handlers.QueueHandler(log_queue)]
 ```
 
 See [`examples/logging_queue.py`](examples/logging_queue.py) for the

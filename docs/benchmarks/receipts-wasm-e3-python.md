@@ -6,7 +6,7 @@
 > Host runtime: wasmtime-py 50.0.1 (CPython 3.13.15; bumped past the
 > vulnerable 49.0.0 for RUSTSEC-2026-0378/0379 — no 49.0.4 wheel exists)
 > Host CPU: Apple Silicon (M1, aarch64-apple-darwin)
-> Corpus: mixed log lines (4,064 B ≈ 4.0 KiB, 2 embedded secrets)
+> Corpus: mixed log lines (4,064 B ≈ 4.0 KiB, 22 matches: 2 secrets + 20 email-bearing lines)
 >
 > **E3 acceptance** (docs/06-embedding.md) — the receipts baseline
 > E5 (cloak-py, pyo3) must beat.
@@ -54,9 +54,13 @@ why the streaming rows fall off faster than Node's.
 - **Bench**: `adapters/python/bench/throughput.py` — line-for-line port
   of `adapters/node/bench/throughput.ts` (same corpus construction, same
   warmup and iteration counts: 100/50 warmup, 50,000 iterations).
-- **Corpus**: ~60 clean log lines interspersed with 2 secrets (GitHub
-  token, AWS access key). Total 4,064 B (~4.0 KiB) — identical to the
-  E1/E2 corpora.
+- **Corpus**: ~60 log lines — 20 request lines each carrying
+  `user=alice@example.com` (the `email` rule matches every one), plus
+  1 GitHub token and 1 AWS access key: **22 matches per iteration**,
+  a match-dense workload rather than a sparse one. Total 4,064 B
+  (~4.0 KiB) — byte-identical to the E1/E2 bench corpora (whose own
+  receipts describe it as sparse; the numbers are unaffected, only
+  the description differs).
 - **Environment**: single-threaded, engine created once, session per
   iteration, digest key via WASI env (`CLOAK_DIGEST_KEY=bench-key`).
 - **Node comparison rows**: measured on the same machine and artifact

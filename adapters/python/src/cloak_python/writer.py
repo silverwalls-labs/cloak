@@ -72,9 +72,10 @@ class CloakWriter(io.RawIOBase):
         pos = 0
         while pos < len(data):
             n = self._target.write(data[pos:])
-            if n is None:
-                # Non-blocking target with no progress — this writer has
-                # no buffer to park the bytes in, so surface it.
+            if not n:
+                # None (non-blocking) or 0 for a nonempty write — zero
+                # progress either way, and this writer has no buffer to
+                # park the bytes in, so surface it instead of spinning.
                 raise BlockingIOError()
             pos += n
 
@@ -91,17 +92,18 @@ class CloakWriter(io.RawIOBase):
         data = bytes(b)
         try:
             out = self._session.push(data)
+            if out:
+                self._write_all(out)
         except Exception:
             # Abort the whole writer, not just the session, so it lands in a
             # terminal state: the session is released (so `engine.dispose()`
             # is not blocked) and a later `close()` — explicit or via GC —
             # won't call `finish()` on the now-consumed session and raise a
-            # spurious "already consumed" error. Mirrors the Node transform's
-            # destroy-on-error path.
+            # spurious "already consumed" error, or report a successful
+            # close after output was truncated by a failed forward.
+            # Mirrors the Node transform's destroy-on-error path.
             self.abort()
             raise
-        if out:
-            self._write_all(out)
         return len(data)
 
     def flush(self) -> None:
