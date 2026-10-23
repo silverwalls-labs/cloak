@@ -62,7 +62,11 @@ _VALID_RULE_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 def _validate_rule_id(rule_id: str) -> None:
     """Reject rule IDs that would produce a broken TOML section header."""
-    if not _VALID_RULE_ID.match(rule_id):
+    # fullmatch, not match: `$` in a `re.match` pattern also matches just
+    # before a trailing "\n", so "github-token\n" would otherwise slip
+    # through and emit a broken `[rules.github-token\n]` header (and
+    # diverge from the Node adapter, whose `.test()` rejects it).
+    if not _VALID_RULE_ID.fullmatch(rule_id):
         raise ValueError(
             f'invalid rule ID "{rule_id}": must be kebab-case '
             '(e.g. "github-token", "phone-intl")'

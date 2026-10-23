@@ -8,7 +8,7 @@ from __future__ import annotations
 import io
 import logging
 from collections.abc import Iterator
-from typing import cast
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -20,7 +20,13 @@ CLEAN_INPUT = b"hello world, nothing secret here\n"
 
 @pytest.fixture(scope="module")
 def engine() -> Iterator[CloakEngine]:
-    engine = create_engine(env={"CLOAK_DIGEST_KEY": "test-key"})
+    # Pass the digest_key config too: with config=None the engine uses an
+    # ephemeral (random) key and never consults CLOAK_DIGEST_KEY, so the
+    # env would be dead. Mirror conftest's pattern so the pinned key is live.
+    engine = create_engine(
+        {"redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"}},
+        {"CLOAK_DIGEST_KEY": "test-key"},
+    )
     yield engine
     engine.dispose()
 
@@ -84,6 +90,47 @@ def test_writer_close_is_idempotent(engine: CloakEngine) -> None:
     writer.close()  # no error
 
 
+def test_writer_close_target_closes_target_without_error(engine: CloakEngine) -> None:
+    # close_target=True must close the wrapped target exactly once. The
+    # inherited RawIOBase.close() calls self.flush() before marking the
+    # writer closed, so without a target-closed guard it would re-flush the
+    # just-closed target and raise ValueError("I/O operation on closed file").
+    buf = io.BytesIO()
+    writer = CloakWriter(engine, buf, close_target=True)
+    writer.write(DIRTY_INPUT)
+    writer.close()  # must not raise
+    assert buf.closed, "close_target=True must close the target"
+    assert writer.closed
+    assert writer.stats is not None  # finish ran to completion
+
+
+def test_writer_loops_over_short_writing_target(engine: CloakEngine) -> None:
+    # Raw/unbuffered targets may legally write fewer bytes than given per
+    # call; the writer must loop until the redacted output is fully
+    # written — dropping the remainder would silently truncate output.
+    class ShortWriter:
+        def __init__(self) -> None:
+            self.buf = io.BytesIO()
+
+        @property
+        def closed(self) -> bool:
+            return self.buf.closed
+
+        def write(self, b: bytes) -> int:
+            return self.buf.write(b[:3])  # at most 3 bytes per call
+
+        def flush(self) -> None:
+            self.buf.flush()
+
+    target = ShortWriter()
+    writer = CloakWriter(engine, cast(BinaryIO, target))
+    writer.write(DIRTY_INPUT)
+    writer.close()
+    out = target.buf.getvalue()
+    assert b"[CLOAK:github-token:" in out, f"short-writing target lost data: {out!r}"
+    assert b"ghp_" not in out
+
+
 def test_writer_write_after_close_raises(engine: CloakEngine) -> None:
     writer = CloakWriter(engine, io.BytesIO())
     writer.close()
@@ -142,7 +189,11 @@ def test_writer_aborts_session_when_push_fails() -> None:
     with pytest.raises(RuntimeError, match="push failed"):
         writer.write(b"data")
     assert aborted, "session must be aborted when push raises"
-    writer.abort()  # mark closed so GC does not re-run close() → finish()
+    # A failed push must leave the writer terminal, so a later close()
+    # (explicit or via GC) is a no-op — it must not call finish() on the
+    # already-consumed session and raise a spurious "already consumed".
+    assert writer.closed, "writer must be closed after a failed push"
+    writer.close()  # no error, no second finish/abort
 
 
 # ── CloakHandler ───────────────────────────────────────────────────

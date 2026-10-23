@@ -62,6 +62,22 @@ class CloakWriter(io.RawIOBase):
     def writable(self) -> bool:
         return True
 
+    def _write_all(self, data: bytes) -> None:
+        """Write all of ``data`` to ``target``, looping over short writes.
+
+        Raw/unbuffered targets (``open(..., buffering=0)``, pipes) may
+        legally write fewer bytes than given — dropping the remainder
+        would silently truncate *redacted* output downstream.
+        """
+        pos = 0
+        while pos < len(data):
+            n = self._target.write(data[pos:])
+            if n is None:
+                # Non-blocking target with no progress — this writer has
+                # no buffer to park the bytes in, so surface it.
+                raise BlockingIOError()
+            pos += n
+
     def write(self, b: Buffer) -> int:
         """Push a chunk through the scanner, forwarding flushed bytes.
 
@@ -76,17 +92,24 @@ class CloakWriter(io.RawIOBase):
         try:
             out = self._session.push(data)
         except Exception:
-            # Release the session so `engine.dispose()` is not blocked
-            # (mirrors the Node transform's abort-on-error path).
-            self._session.abort()
+            # Abort the whole writer, not just the session, so it lands in a
+            # terminal state: the session is released (so `engine.dispose()`
+            # is not blocked) and a later `close()` — explicit or via GC —
+            # won't call `finish()` on the now-consumed session and raise a
+            # spurious "already consumed" error. Mirrors the Node transform's
+            # destroy-on-error path.
+            self.abort()
             raise
         if out:
-            self._target.write(out)
+            self._write_all(out)
         return len(data)
 
     def flush(self) -> None:
         """Flush ``target``. Carry-over bytes cannot flush without close."""
-        if self.closed or self._aborted:
+        # ``super().close()`` calls ``self.flush()`` before this writer is
+        # marked closed, so guard the target too: a ``close_target`` close
+        # (or an already-closed target) must not provoke a flush-after-close.
+        if self.closed or self._aborted or self._target.closed:
             return
         self._target.flush()
 
@@ -101,7 +124,7 @@ class CloakWriter(io.RawIOBase):
         try:
             output, stats = self._session.finish()
             if output:
-                self._target.write(output)
+                self._write_all(output)
             self.stats = stats
             self._target.flush()
             if self._close_target:

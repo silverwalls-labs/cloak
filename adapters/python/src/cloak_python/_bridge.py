@@ -66,9 +66,17 @@ class _FastFunc:
         self._store = store
         self._n_params = len(params)
         self._n_results = len(results)
-        # Probe the internals once so _make_caller can fall back early.
+        # Probe every private wasmtime-py symbol __call__ touches, so a
+        # wasmtime-py rename trips the fallback here at construction rather
+        # than as an AttributeError mid-call (where nothing catches it). This
+        # covers both the hot path (func-call entry point, store context) and
+        # the error/trap constructors on the failure path.
         self._ffi = wasmtime._ffi
         self._trap_type = ctypes.POINTER(self._ffi.wasm_trap_t)
+        self._func_call = self._ffi.wasmtime_func_call
+        self._context = store._context
+        self._error_from_ptr = wasmtime.WasmtimeError._from_ptr
+        self._trap_from_ptr = wasmtime.Trap._from_ptr
         # Pre-built, reused per call (the bridge is single-threaded by
         # contract). Param kinds never change — set them once.
         self._func_ref = ctypes.byref(func._func)
@@ -79,15 +87,14 @@ class _FastFunc:
         self._trap = self._trap_type()
 
     def __call__(self, *args: int) -> int:
-        ffi = self._ffi
         if len(args) != self._n_params:
             raise TypeError(f"expected {self._n_params} arguments, got {len(args)}")
         params = self._params
         for i, value in enumerate(args):
             params[i].of.i32 = value
         trap = self._trap
-        error = ffi.wasmtime_func_call(
-            self._store._context(),
+        error = self._func_call(
+            self._context(),
             self._func_ref,
             params,
             self._n_params,
@@ -96,13 +103,19 @@ class _FastFunc:
             ctypes.byref(trap),
         )
         if error:
-            raise wasmtime.WasmtimeError._from_ptr(error)
+            raise self._error_from_ptr(error)
         if trap:
             self._trap = self._trap_type()  # the raised Trap consumes this one
-            raise wasmtime.Trap._from_ptr(trap)
+            raise self._trap_from_ptr(trap)
         if self._n_results == 0:
             return 0
-        return self._results[0].of.i32
+        # Normalize to unsigned: the cloak ABI's i32 returns are all u32
+        # (handles, pointers, flags). A signed read would turn a pointer
+        # >= 2 GiB negative, and wasmtime-py's slice-semantics memory
+        # read/write would silently accept the negative offset — wrong
+        # address, wrong output. Feeding the unsigned value back into
+        # `of.i32` is safe (ctypes wraps to the same bit pattern).
+        return self._results[0].of.i32 & 0xFFFFFFFF
 
 
 def _make_caller(func: wasmtime.Func, store: wasmtime.Store) -> Callable[..., int]:
@@ -117,7 +130,8 @@ def _make_caller(func: wasmtime.Func, store: wasmtime.Store) -> Callable[..., in
 
         def slow(*args: int) -> int:
             result = func(store, *args)
-            return 0 if result is None else cast(int, result)
+            # Same unsigned normalization as the fast path (u32 ABI).
+            return 0 if result is None else cast(int, result) & 0xFFFFFFFF
 
         return slow
 

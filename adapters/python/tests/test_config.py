@@ -49,7 +49,12 @@ def test_escapes_special_characters_in_values() -> None:
     assert "\\n" in toml
 
 
-@pytest.mark.parametrize("rule_id", ["my.rule", "my]rule", "MyRule"])
+# "github-token\n" guards the re.match-vs-fullmatch footgun: `$` matches
+# before a trailing newline, so `re.match` would accept it and emit a
+# broken `[rules.github-token\n]` header.
+@pytest.mark.parametrize(
+    "rule_id", ["my.rule", "my]rule", "MyRule", "github-token\n", "github-token\nx"]
+)
 def test_rejects_invalid_rule_ids(rule_id: str) -> None:
     with pytest.raises(ValueError, match="invalid rule ID"):
         config_to_toml({"rules": {rule_id: {"enabled": False}}})
