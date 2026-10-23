@@ -1,9 +1,10 @@
 # Performance Receipts — WASM Python adapter (E3)
 
-> Generated: 2026-10-18
+> Generated: 2026-10-23
 > rustc: 1.98.1
 > WASM target: wasm32-wasip1, RUSTFLAGS="-Ctarget-feature=+simd128"
-> Host runtime: wasmtime-py 49.0.0 (CPython 3.13.15)
+> Host runtime: wasmtime-py 50.0.1 (CPython 3.13.15; bumped past the
+> vulnerable 49.0.0 for RUSTSEC-2026-0378/0379 — no 49.0.4 wheel exists)
 > Host CPU: Apple Silicon (M1, aarch64-apple-darwin)
 > Corpus: mixed log lines (4,064 B ≈ 4.0 KiB, 2 embedded secrets)
 >
@@ -21,9 +22,9 @@ smaller deltas as noise.
 
 | Path | Throughput (MiB/s) | Time/iter (µs) | Notes |
 |---|---|---|---|
-| Python WASM (one-shot `redact`) | **36** | 108 | wasmtime-py, ctypes FFI |
-| Python WASM (streaming, 1 KiB chunks) | **17** | 230 | session per iteration |
-| Python WASM (streaming, 256 B chunks) | **6** | 648 | per-call overhead dominates |
+| Python WASM (one-shot `redact`) | **36** | 109 | wasmtime-py, ctypes FFI |
+| Python WASM (streaming, 1 KiB chunks) | **17** | 234 | session per iteration |
+| Python WASM (streaming, 256 B chunks) | **6** | 673 | per-call overhead dominates |
 | Node WASM (one-shot), same machine | 64 | 61 | `adapters/node/bench/throughput.ts`, Node 24.19 |
 | Node WASM (streaming 1 KiB), same machine | 40 | 98 | |
 | Rust wasmtime (reference, E1) | 129 | 30.1 | `receipts-wasm-e1.md` |
