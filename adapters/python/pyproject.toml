@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cloak-python"
+version = "0.1.0"
+description = "Python adapter for cloak — guarantee-grade secrets redaction via WASM"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+  # Tracks wasmtime's monthly majors — pin one major, uv.lock pins exact.
+  # Keep roughly in sync with the Rust-side wasmtime used by crates/wasm-parity
+  # so throughput receipts stay comparable. (50.x while Rust sits on 49.0.4:
+  # RUSTSEC-2026-0378/0379 — no patched 49.x wheel exists on PyPI.)
+  "wasmtime>=50,<51",
+]
+classifiers = [
+  # Never published — this adapter is consumed from the repo (see README).
+  "Private :: Do Not Upload",
+]
+
+[project.urls]
+repository = "https://github.com/silverwalls-labs/cloak"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "mypy>=1.14",
+  "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cloak_python"]
+
+[tool.ruff]
+target-version = "py313"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["src", "tests", "bench", "examples"]
+mypy_path = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
