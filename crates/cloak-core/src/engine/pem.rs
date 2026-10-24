@@ -147,7 +147,10 @@ const PEM_END_PREFIX: &[u8] = b"-----END ";
 /// Longest backward read of the shared-dash guard (#44): the capped
 /// dash run plus the longest `-----END <key type>` trailer. The engine
 /// pins the emission boundary this far behind every retained PEM
-/// candidate so re-derivations confirm against full context.
+/// candidate as a retention aid, and floors `max_window` by this much
+/// past [`pem_confirm_window`] so an anchor's FIRST resolvable
+/// evaluation always sees its full guard context — decision stability
+/// across re-scans is owned by the confirm-decision memo (#49).
 pub(crate) const PEM_BACK_WINDOW: usize = 30;
 
 /// Consecutive dashes immediately before `pos`, capped at 10.
@@ -209,6 +212,14 @@ pub(crate) fn confirm_pem_begin(buf: &[u8], begin_pos: usize) -> Option<PemBegin
         }
     }
     None
+}
+
+/// Position just past the BEGIN line's closing dashes for an anchor at
+/// `begin_pos` confirmed as `key_type_idx` — rebuilds
+/// `PemBeginMatch::begin_line_end` from a memoized confirm decision
+/// (#49) without re-reading the buffer.
+pub(crate) fn begin_line_end_for(begin_pos: usize, key_type_idx: usize) -> usize {
+    begin_pos + PEM_ANCHOR.len() + PEM_KEY_TYPES[key_type_idx].len() + PEM_DASHES.len()
 }
 
 /// Build the END marker for a confirmed key type.
@@ -574,6 +585,26 @@ mod tests {
         let m = confirm_pem_begin(buf, 6).expect("should confirm");
         assert_eq!(PEM_KEY_TYPES[m.key_type_idx], b"EC PRIVATE KEY");
         assert_eq!(m.begin_line_end, 6 + 11 + 14 + 5);
+    }
+
+    #[test]
+    fn begin_line_end_for_matches_confirm_for_every_key_type() {
+        // The memo (#49) rebuilds `begin_line_end` from the key-type index
+        // alone — it must agree with `confirm_pem_begin`'s computation for
+        // every key type, at a zero and a non-zero anchor position.
+        for (i, key_type) in PEM_KEY_TYPES.iter().enumerate() {
+            for prefix in ["", "prefix: "] {
+                let mut buf = prefix.as_bytes().to_vec();
+                let begin_pos = buf.len();
+                buf.extend_from_slice(PEM_ANCHOR);
+                buf.extend_from_slice(key_type);
+                buf.extend_from_slice(PEM_DASHES);
+                buf.extend_from_slice(b"\ndata");
+                let m = confirm_pem_begin(&buf, begin_pos).expect("should confirm");
+                assert_eq!(m.key_type_idx, i);
+                assert_eq!(begin_line_end_for(begin_pos, i), m.begin_line_end);
+            }
+        }
     }
 
     #[test]

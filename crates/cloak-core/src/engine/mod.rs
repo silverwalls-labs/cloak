@@ -120,9 +120,16 @@ impl Engine {
         // PEM's confirm window must be included when PEM is enabled —
         // otherwise carry-over drops to 0 when all regular rules are
         // disabled, and a PEM BEGIN anchor split across chunks is flushed
-        // before the scanner can match it.
+        // before the scanner can match it. The extra PEM_BACK_WINDOW
+        // guarantees a PEM anchor's first resolvable evaluation always has
+        // its full backward guard context (#49): an unresolved candidate
+        // satisfies `cand.start > combined_len - pem_confirm_window()`, so
+        // with `max_window >= pem_confirm_window() + PEM_BACK_WINDOW` the
+        // pre-adjustment boundary `combined_len - max_window` sits below
+        // `cand.start - PEM_BACK_WINDOW`, and every later adjustment only
+        // lowers it.
         if pem_enabled {
-            max_window = max_window.max(pem::pem_confirm_window());
+            max_window = max_window.max(pem::pem_confirm_window() + pem::PEM_BACK_WINDOW);
         }
 
         Ok(Self {
@@ -145,6 +152,7 @@ impl Engine {
             carry_abs: 0,
             ctx_len: 0,
             retained: Vec::new(),
+            pem_decisions: Vec::new(),
             pem_state: pem::PemState::Idle,
             pem_pre_block: Vec::new(),
             candidates: Vec::new(),
@@ -182,6 +190,19 @@ pub struct Session<'e> {
     /// window has been flushed past is never re-confirmed, so it can never
     /// re-confirm differently than it did with full context.
     retained: Vec<RawMatch>,
+    /// PEM confirm decisions already made (#49), keyed by ABSOLUTE anchor
+    /// offset: `Some(key_type_idx)` for a confirmed BEGIN, `None` for a
+    /// rejection. Recorded at an anchor's first resolvable evaluation —
+    /// which always sees the full backward guard context (see the
+    /// `max_window` floor in [`Engine::new`]) — and reused on every
+    /// re-scan, so flush-boundary placement can never flip a decision the
+    /// whole-buffer pass made with full context. The counterpart of
+    /// `retained` for the confirm step itself. Sorted by offset (PEM
+    /// candidates are equal-length anchors, so they arrive start-ordered
+    /// and resolvability is monotone in position — a decided anchor can
+    /// never retroactively fall inside an earlier block's body); pruned to
+    /// `>= carry_abs` each scan, which bounds it by the carry size.
+    pem_decisions: Vec<(u64, Option<usize>)>,
     /// Number of LEADING carry bytes that are already-emitted context
     /// retained after a PEM block close (#27): the confirm steps may scan
     /// backward into them, but they must never be re-emitted, and
@@ -463,6 +484,9 @@ impl Session<'_> {
         let mut pem_entry: Option<(usize, usize)> = None;
 
         {
+            // Decisions behind the carry can never be re-derived — their
+            // anchor bytes were flushed (#49).
+            self.pem_decisions.retain(|&(abs, _)| abs >= self.carry_abs);
             let mut pem_scan_pos = 0;
             for cand in &self.candidates {
                 if cand.rule != self.engine.pem_rule_idx {
@@ -481,9 +505,44 @@ impl Session<'_> {
                 if !resolvable {
                     continue;
                 }
-                if let Some(pm) = pem::confirm_pem_begin(&self.carry_over, cand.start) {
-                    let body_start = pm.begin_line_end;
-                    let end_marker = pem::end_marker_for(pm.key_type_idx);
+                // Confirm each anchor ONCE (#49): the first resolvable
+                // evaluation sees the full backward guard context (the
+                // `max_window` floor in `Engine::new`), and its outcome is
+                // memoized by absolute offset. Re-scans after a flush reuse
+                // the decision instead of re-deciding against a carry whose
+                // backward context a neighboring candidate's shared-dash
+                // pin may have bisected — `confirm_pem_begin`'s guards fail
+                // open on missing backward bytes, so a truncated re-check
+                // could flip a full-context rejection into a confirm.
+                let abs = self.carry_abs + cand.start as u64;
+                let decision = match self.pem_decisions.binary_search_by_key(&abs, |e| e.0) {
+                    Ok(i) => self.pem_decisions[i].1,
+                    Err(i) => {
+                        let authoritative =
+                            self.carry_abs == 0 || cand.start >= pem::PEM_BACK_WINDOW;
+                        debug_assert!(
+                            authoritative,
+                            "PEM anchor first evaluated with truncated backward context"
+                        );
+                        let d = pem::confirm_pem_begin(&self.carry_over, cand.start).map(|pm| {
+                            debug_assert_eq!(
+                                pm.begin_line_end,
+                                pem::begin_line_end_for(cand.start, pm.key_type_idx),
+                                "memo rebuild must agree with the confirm step"
+                            );
+                            pm.key_type_idx
+                        });
+                        // A non-authoritative evaluation (should not happen;
+                        // see the debug_assert) is used but not memoized.
+                        if authoritative {
+                            self.pem_decisions.insert(i, (abs, d));
+                        }
+                        d
+                    }
+                };
+                if let Some(key_type_idx) = decision {
+                    let body_start = pem::begin_line_end_for(cand.start, key_type_idx);
+                    let end_marker = pem::end_marker_for(key_type_idx);
                     if let Some(end_offset) = self.carry_over[body_start..]
                         .windows(end_marker.len())
                         .position(|w| w == end_marker.as_slice())
@@ -547,7 +606,7 @@ impl Session<'_> {
                         // Streaming: BEGIN confirmed, END not yet seen.
                         // Emit the BEGIN line and hand the body to the
                         // caller for the incremental PEM state machine.
-                        pem_entry = Some((body_start, pm.key_type_idx));
+                        pem_entry = Some((body_start, key_type_idx));
                         break;
                     }
                 }
@@ -672,9 +731,11 @@ impl Session<'_> {
         }
 
         // Shared-dash pin (#44): keep PEM_BACK_WINDOW bytes of backward
-        // context before every retained PEM candidate, so re-derivations
-        // confirm against full context instead of flipping an earlier
-        // full-context decision.
+        // context before every retained PEM candidate. Since #49 this is a
+        // retention aid only — it is a single forward pass, so a later
+        // candidate's pin can still land inside an earlier candidate's
+        // guard window — and decision stability across re-scans is owned
+        // by the confirm-decision memo above.
         if !is_final {
             for cand in &self.candidates {
                 if cand.rule != self.engine.pem_rule_idx {
@@ -1260,15 +1321,17 @@ mod tests {
     #[test]
     fn max_window_includes_pem_when_pem_enabled() {
         // All catalog rules disabled but PEM stays enabled (default) →
-        // max_window must be at least pem_confirm_window (37), not 0.
+        // max_window must be at least pem_confirm_window + PEM_BACK_WINDOW
+        // (44 + 30), not 0: the floor guarantees a PEM anchor's first
+        // resolvable evaluation has its full backward guard context (#49).
         let catalog_off: Vec<(&str, bool)> = all_rules_off()
             .into_iter()
             .filter(|(id, _)| *id != "pem-private-key")
             .collect();
         let engine = engine_with_rules(&catalog_off);
         assert!(
-            engine.max_window >= 37,
-            "PEM enabled → max_window must include PEM confirm window, got {}",
+            engine.max_window >= pem::pem_confirm_window() + pem::PEM_BACK_WINDOW,
+            "PEM enabled → max_window must include confirm window + back window, got {}",
             engine.max_window
         );
     }
@@ -1355,6 +1418,73 @@ mod tests {
             );
             assert_eq!(stats.matches, whole_stats.matches);
         }
+    }
+
+    /// Two garbled anchors 29 bytes apart (#49): c1 fused to a private-key
+    /// END trailer, c2 with a dash run of 3 and an invalid label. See
+    /// `tests/pem_shared_dash_regression.rs` for the full equivalence sweep.
+    fn pin_bisection_input() -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(b"-----END PRIVATE KEY"); // trailer [0, 20)
+        d.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY"); // c1 = 20, exactly-5 fusion
+        d.extend_from_slice(b"--------"); // closes c1's line AND hosts c2
+        d.extend_from_slice(b"BEGIN Y-----\n"); // c2 = 49: dash run 3, label invalid
+        d.resize(d.len() + 2200, b'A'); // boundary sweeps (c1, c2]
+        d
+    }
+
+    #[test]
+    fn pin_bisected_anchor_rejected_at_every_chunk_size() {
+        // fuzz_pem_state regression (#49): when the emission boundary lands
+        // between the two anchors, c2's shared-dash pin used to flush to
+        // c2 - PEM_BACK_WINDOW = 19 — inside c1's backward guard window —
+        // and the next scan confirmed c1 against the truncated context.
+        // The confirm-decision memo keeps c1's full-context rejection.
+        let engine = test_engine();
+        let input = pin_bisection_input();
+        let (whole, whole_stats) = push_all(&engine, &input);
+        assert_eq!(whole, input, "garbled markers must not confirm");
+        for chunk_size in [1, 3, 7, 41, 64, 1024] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert_eq!(
+                out, whole,
+                "chunk-size={chunk_size} streaming diverges from whole-buffer"
+            );
+            assert_eq!(stats.matches, whole_stats.matches);
+        }
+    }
+
+    #[test]
+    fn pem_decision_memory_pruned_and_bounded() {
+        // The memo is pruned to `>= carry_abs` at the start of every scan,
+        // so it is bounded by the anchors still inside the carry — it must
+        // not grow with stream length (#49). 8 pushes of a 2-anchor shape
+        // create 16 anchors; without pruning the memo would hold them all.
+        // (Entries can briefly trail `carry_abs` between the prune and that
+        // same scan's flush, so only the bound is asserted per push.)
+        let engine = test_engine();
+        let mut session = engine.session();
+        let mut out = Vec::new();
+        for i in 0..8 {
+            session.push(&pin_bisection_input(), &mut out).unwrap();
+            if i == 0 {
+                assert!(
+                    !session.pem_decisions.is_empty(),
+                    "the garbled anchors must be memoized as rejections"
+                );
+            }
+            assert!(
+                session.pem_decisions.len() <= 4,
+                "decision memo must stay bounded by the carry, got {}",
+                session.pem_decisions.len()
+            );
+        }
+        session.finish(&mut out).unwrap();
     }
 
     #[test]
