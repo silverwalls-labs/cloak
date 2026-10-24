@@ -229,10 +229,8 @@ jobs:
       - name: Corpus regression replay (strict)
         working-directory: crates/cloak-core
         env:
-          # Strict is opt-in (env unset → strict() = false) until the
-          # PEM shared-dash idempotence bug (#44) is fixed. This "1"
-          # is load-bearing — it is what enables the equivalence
-          # assertions (F15). Do not remove it.
+          # This "1" is load-bearing — it is what enables the
+          # equivalence assertions (F15). Do not remove it.
           CLOAK_FUZZ_STRICT: "1"
         run: |
           for t in fuzz_engine_stream fuzz_pem_state fuzz_config; do
@@ -242,7 +240,7 @@ jobs:
       - name: Fuzz smoke (time-boxed)
         working-directory: crates/cloak-core
         env:
-          # All three correctness equivalences are asserted (#44 fixed).
+          # All three correctness equivalences are asserted (#44, #49 fixed).
           CLOAK_FUZZ_STRICT: "1"
         run: |
           cargo fuzz run fuzz_engine_stream fuzz/corpus/fuzz_engine_stream -O --debug-assertions -- \

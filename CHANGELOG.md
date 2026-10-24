@@ -11,6 +11,18 @@ a breaking change).
 
 ### Fixed
 
+- **#49** — PEM streaming ≢ whole-buffer on nested/garbled markers
+  (post-#44 variant): when the emission boundary landed between two
+  PEM anchors, the later candidate's shared-dash pin could flush the
+  boundary into the earlier (rejected) candidate's backward guard
+  window — `confirm_pem_begin`'s guards fail open on missing backward
+  bytes, so the next scan confirmed a fused BEGIN the whole-buffer
+  pass rejects. PEM confirm decisions are now memoized by absolute
+  anchor offset at their first resolvable evaluation and reused on
+  every re-scan, making boundary placement irrelevant to the confirm
+  outcome; `max_window` is floored at the PEM confirm window plus
+  `PEM_BACK_WINDOW` so that first evaluation always sees the full
+  guard context.
 - **#44** — PEM shared-dash idempotence: `confirm_pem_begin` counts
   the dash run before a BEGIN anchor. 1–4 dashes (junction of 6–9)
   or none with a `-----END <private-key type>` trailer right before
