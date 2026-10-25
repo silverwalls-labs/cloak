@@ -65,7 +65,10 @@ jobs:
       - name: Extended fuzz (1h)
         working-directory: crates/cloak-core
         env:
-          # All three correctness equivalences are asserted (#44, #49 fixed).
+          # All three correctness equivalences are asserted (#44, #49, #50 fixed).
+          # The #53 class (gitlab-token / pypi-token / gcp-api-key /
+          # credit-card junctions) is still open — a red here can be a #53
+          # rediscovery, not a regression from the last fix.
           CLOAK_FUZZ_STRICT: "1"
         run: |
           # A crash fails the job — that is the finding-filed signal; the

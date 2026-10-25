@@ -22,7 +22,7 @@ slow, obviously correct, the oracle.
 
 ### How chunk-invariance is kept (the load-bearing machinery)
 
-The invariant above is not an accident of implementation; five mechanisms hold it,
+The invariant above is not an accident of implementation; six mechanisms hold it,
 each pinned by a regression test and exercised by strict fuzz:
 
 - **Carry-over + retained spans.** The engine retains up to `W_max + B_max` bytes
@@ -34,6 +34,12 @@ each pinned by a regression test and exercised by strict fuzz:
   a candidate abutting an already-emitted tag cannot re-anchor inside the tag, and
   forward windows carry the same margin where a confirm scans across a following
   tag. This is what makes redaction idempotent.
+- **Greedy-scan marker rollback (#50/#34).** A confirm whose scan alphabet can
+  consume adjacent structure rolls back to the longest match that leaves that
+  structure intact — phone-intl falls back to its last valid separator, and the
+  jwt signature scan returns a trailing dash run plus `END`/`BEGIN` marker word
+  (the entire run, so the #44 guards' `dashes_before` counts are pass-stable) —
+  so a pass-1 redaction never erases bytes a pass-2 guard reads.
 - **PEM close-context synthesis (#27).** When a PEM block closes mid-stream, the
   engine rebuilds the emitted-stream context (pre-block tail + BEGIN + tag + END,
   capped at 94 bytes) in front of the unread remainder, so candidates after the

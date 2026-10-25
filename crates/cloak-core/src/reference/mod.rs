@@ -471,6 +471,11 @@ fn confirm_jwt_oracle(input: &[u8], start: usize) -> Option<usize> {
     while sig_end < rest.len() && is_b64url_oracle(rest[sig_end]) {
         sig_end += 1;
     }
+    // #50: mirrors the engine's rollback_pem_marker.
+    let at_cap = sig_end == limit && limit == 2048;
+    if let Some(keep) = rollback_pem_marker_oracle(&rest[after2..sig_end], at_cap) {
+        sig_end = after2 + keep;
+    }
     if sig_end == after2 {
         return None;
     }
@@ -495,6 +500,36 @@ fn confirm_jwt_oracle(input: &[u8], start: usize) -> Option<usize> {
 
 fn is_b64url_oracle(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// Mirrors the engine's #50 rollback (`rules::validators::rollback_pem_marker`):
+/// length of `sig` to keep when its tail is the consumed head of an adjacent
+/// PEM marker junction. Rolls back the entire trailing dash run so the
+/// trailer/dash-run bytes the shared-dash guard (#44) reads survive
+/// redaction; `at_cap` loosens the word to any prefix of END/BEGIN and the
+/// run to >= 1 (the 2048-byte cap can cut the junction anywhere).
+fn rollback_pem_marker_oracle(sig: &[u8], at_cap: bool) -> Option<usize> {
+    const END_WORD: &[u8] = b"END";
+    const BEGIN_WORD: &[u8] = b"BEGIN";
+    let mut i = sig.len();
+    while i > 0 && matches!(sig[i - 1], b'B' | b'D' | b'E' | b'G' | b'I' | b'N') {
+        i -= 1;
+    }
+    let word = &sig[i..];
+    let word_ok = if at_cap {
+        END_WORD.starts_with(word) || BEGIN_WORD.starts_with(word)
+    } else {
+        word == END_WORD || word == BEGIN_WORD
+    };
+    if !word_ok {
+        return None;
+    }
+    let word_start = i;
+    while i > 0 && sig[i - 1] == b'-' {
+        i -= 1;
+    }
+    let min_dashes = if at_cap { 1 } else { 5 };
+    (word_start - i >= min_dashes).then_some(i)
 }
 
 fn b64url_decode_oracle(input: &[u8]) -> Option<Vec<u8>> {
@@ -1458,6 +1493,57 @@ mod tests {
                 ends_with_cloak_tag_oracle(input, pos),
                 crate::rules::validators::ends_with_cloak_tag(input, pos),
                 "oracle/engine tag-tail divergence at pos {pos} in {input:?}"
+            );
+        }
+    }
+
+    // --- #50 jwt PEM-marker rollback cross-check ----------------------------
+
+    #[test]
+    fn jwt_pem_rollback_cross_check_engine() {
+        // The #50 rollback exists on both sides with deliberately
+        // independent implementations; this battery pins semantic
+        // agreement across junction shapes, dash-run widths and
+        // window-cap cuts.
+        const JWT108: &[u8] = b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+        let mut fixtures: Vec<Vec<u8>> = Vec::new();
+        // END and BEGIN junctions at dash-run widths 0..=12.
+        for run in 0..=12usize {
+            for tail in [
+                b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n".as_slice(),
+                b"BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+            ] {
+                let mut h = JWT108.to_vec();
+                h.extend(std::iter::repeat_n(b'-', run));
+                h.extend_from_slice(tail);
+                fixtures.push(h);
+            }
+        }
+        // Lookalikes, truncated words, empty signature.
+        for tail in [
+            b"-----BEND ".as_slice(),
+            b"-----ENDEND ",
+            b"-----EN(",
+            b"-----END",
+        ] {
+            let mut h = JWT108.to_vec();
+            h.extend_from_slice(tail);
+            fixtures.push(h);
+        }
+        fixtures.push(b"eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.-----END PRIVATE KEY-----".to_vec());
+        // Window-cap cuts: 1..=8 junction bytes inside the 2048 window.
+        for cut in 1..=8usize {
+            let mut h = b"eyJhbGciOiJIUzI1NiJ9.A.".to_vec();
+            h.extend(std::iter::repeat_n(b'S', 2048 - cut - h.len()));
+            h.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
+            fixtures.push(h);
+        }
+        for input in &fixtures {
+            assert_eq!(
+                confirm_jwt_oracle(input, 0),
+                crate::rules::validators::confirm_jwt(input, 0).map(|m| m.match_end),
+                "oracle/engine jwt rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
             );
         }
     }
