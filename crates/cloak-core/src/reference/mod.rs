@@ -370,6 +370,10 @@ fn pem_marker_overlaps_fixed_oracle(body: &[u8], after: &[u8]) -> bool {
     if dash_count == 0 {
         return false;
     }
+    // #53: bare-dash BEGIN junction (mirrors engine).
+    if word_start == body.len() && dash_count <= 4 && after.starts_with(PEM_BEGIN) {
+        return true;
+    }
     let tail = &body[i..];
     let max_off = dash_count.saturating_sub(5);
     for o in 0..=max_off {
@@ -1628,7 +1632,16 @@ mod tests {
             // Body too short — rejected for length.
             b"AIzaSyC0123456789abcdefghijklmnopqrst",
         ];
-        for input in fixtures {
+        let mut fixtures: Vec<Vec<u8>> = fixtures.iter().map(|f| f.to_vec()).collect();
+        // #53 begin junction: 0..=12 body dashes + complete marker after.
+        for dashes in 0..=12usize {
+            let mut h = b"AIza".to_vec();
+            h.extend(std::iter::repeat_n(b'a', 35 - dashes));
+            h.resize(h.len() + dashes, b'-');
+            h.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
+            fixtures.push(h);
+        }
+        for input in &fixtures {
             assert_eq!(
                 confirm_gcp_api(input, 0),
                 crate::rules::validators::confirm_gcp_api_key(input, 0).map(|m| m.match_end),

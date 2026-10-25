@@ -203,3 +203,43 @@ fn gcp_clean_before_pem_block() {
     // Space separates the gcp key from the PEM block — no overlap.
     check_shape(&engine, &key, "gcp-clean-then-pem", &input, 2, false);
 }
+
+/// gcp + N body dashes + a complete `-----BEGIN ` marker after the body.
+///
+/// With 1–4 body dashes the marker's dash run lives entirely in `after`,
+/// so the overlap helper's alignment loop cannot reconstruct it (it
+/// compares `after` against `BEGIN[k..]`, never the full marker). The
+/// token was accepted and tagged while the fused marker stayed rejected
+/// by the shared-dash guard; pass 2 then saw a clean marker and redacted
+/// the block — not idempotent. The bare-dash BEGIN guard rejects the
+/// token instead, leaving the junction pass-stable.
+///
+/// dash counts 0 and 5..=12: the marker is already valid on pass 1
+/// (0 or ≥5 preceding dashes pass the shared-dash guard), so token and
+/// block are both redacted and the output is stable.
+#[test]
+fn gcp_begin_junction_sweep() {
+    let (engine, key) = engine_and_key();
+    for dashes in 0..=12usize {
+        // Body is always exactly 35 chars: alnum + trailing dashes.
+        let mut input = b"AIza".to_vec();
+        input.extend(std::iter::repeat_n(b'a', 35 - dashes));
+        input.resize(input.len() + dashes, b'-');
+        // After the body: a complete `-----BEGIN ` marker + block.
+        input.extend_from_slice(
+            b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+        );
+        let (matches, visible) = match dashes {
+            1..=4 => (0u64, true),
+            _ => (2, false),
+        };
+        check_shape(
+            &engine,
+            &key,
+            &format!("begin dashes={dashes}"),
+            &input,
+            matches,
+            visible,
+        );
+    }
+}

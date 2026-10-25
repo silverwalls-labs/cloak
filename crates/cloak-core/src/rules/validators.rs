@@ -728,6 +728,14 @@ fn pem_marker_overlaps_fixed(body: &[u8], after: &[u8]) -> bool {
     if dash_count == 0 {
         return false; // No dashes before the word — not a PEM junction.
     }
+    // #53: bare-dash BEGIN junction — the body ends in 1–4 dashes and a
+    // complete marker follows. The alignment loop below cannot see it
+    // (the marker's dashes are all in `after`), but redacting the
+    // fixed-length body would leave a clean marker that the shared-dash
+    // guard rejected on pass 1 — not idempotent.
+    if word_start == body.len() && dash_count <= 4 && after.starts_with(BEGIN_MARKER) {
+        return true;
+    }
     let tail = &body[i..]; // dashes + word chars
 
     // The PEM marker's 5-dash prefix can start at any offset within the
@@ -2143,6 +2151,39 @@ mod tests {
         // Combined at offset 0: `-----END PRIVATE KEY-----` → reject.
         let input = b"AIzaSyA0123456789abcdefghijklmno-----END PRIVATE KEY-----";
         assert!(confirm_gcp_api_key(input, 0).is_none());
+    }
+
+    #[test]
+    fn gcp_pem_begin_bare_dashes_rejected() {
+        // Body ends in 1–4 dashes, after starts with the complete
+        // `-----BEGIN ` marker — the alignment loop cannot reconstruct
+        // it, so the bare-dash guard fires.
+        for dashes in 1..=4usize {
+            let mut input = b"AIza".to_vec();
+            input.extend(std::iter::repeat_n(b'a', 35 - dashes));
+            input.resize(input.len() + dashes, b'-');
+            input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
+            assert!(
+                confirm_gcp_api_key(&input, 0).is_none(),
+                "dashes={dashes} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn gcp_pem_begin_many_dashes_accepted() {
+        // 5+ body dashes: the following marker is already valid on pass
+        // 1 (the shared-dash guard passes), so accepting the token keeps
+        // redaction idempotent.
+        for dashes in 5..=12usize {
+            let mut input = b"AIza".to_vec();
+            input.extend(std::iter::repeat_n(b'a', 35 - dashes));
+            input.resize(input.len() + dashes, b'-');
+            input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
+            let m = confirm_gcp_api_key(&input, 0)
+                .unwrap_or_else(|| panic!("dashes={dashes} must be accepted"));
+            assert_eq!(m.match_end, 39);
+        }
     }
 
     // --- #53 pypi-token PEM-marker rollback -----------------------------------
