@@ -353,6 +353,11 @@ fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
     while taken < body.len() && taken < BODY_CAP && is_pypi_body(body[taken]) {
         taken += 1;
     }
+    // #53: roll back consumed PEM marker fragment (mirrors engine).
+    let at_cap = taken == BODY_CAP;
+    if let Some(keep) = rollback_pem_marker_oracle(&body[..taken], at_cap) {
+        taken = keep;
+    }
     (taken >= PYPI_MIN).then_some(start + PYPI_PREFIX.len() + taken)
 }
 
@@ -1549,6 +1554,54 @@ mod tests {
                 confirm_jwt_oracle(input, 0),
                 crate::rules::validators::confirm_jwt(input, 0).map(|m| m.match_end),
                 "oracle/engine jwt rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 pypi-token PEM-marker rollback cross-check ----------------------
+
+    #[test]
+    fn pypi_pem_rollback_cross_check_engine() {
+        let body50 = "A".repeat(50);
+        let mut fixtures: Vec<Vec<u8>> = Vec::new();
+        for run in 0..=12usize {
+            for tail in [
+                b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n".as_slice(),
+                b"BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+            ] {
+                let mut h = format!("pypi-{body50}").into_bytes();
+                h.extend(std::iter::repeat_n(b'-', run));
+                h.extend_from_slice(tail);
+                fixtures.push(h);
+            }
+        }
+        for tail in [
+            b"-----BEND ".as_slice(),
+            b"-----ENDEND ",
+            b"-----EN(",
+            b"-----END",
+        ] {
+            let mut h = format!("pypi-{body50}").into_bytes();
+            h.extend_from_slice(tail);
+            fixtures.push(h);
+        }
+        // Short body → rejected after rollback.
+        {
+            let body45 = "A".repeat(45);
+            fixtures.push(format!("pypi-{body45}-----END PRIVATE KEY-----").into_bytes());
+        }
+        // Cap-cut.
+        {
+            let body250 = "A".repeat(250);
+            fixtures.push(format!("pypi-{body250}-----END PRIVATE KEY-----").into_bytes());
+        }
+        for input in &fixtures {
+            assert_eq!(
+                confirm_pypi(input, 0),
+                crate::rules::validators::confirm_pypi_token(input, 0)
+                    .map(|m| m.match_end),
+                "oracle/engine pypi rollback divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
         }

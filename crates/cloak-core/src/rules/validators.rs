@@ -665,6 +665,44 @@ fn is_gitlab_body(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
+// ── pypi-token ──────────────────────────────────────────────────────
+
+/// Custom confirm for `pypi-token`.
+///
+/// Anchor: `pypi-`. Body: `[A-Za-z0-9_-]{50,255}`.
+/// Replaces the DFA Pattern that could not perform PEM-marker rollback
+/// (#53): same charset vulnerability as gitlab-token.
+pub(crate) fn confirm_pypi_token(
+    haystack: &[u8],
+    anchor: usize,
+) -> Option<ConfirmMatch> {
+    const PREFIX: &[u8] = b"pypi-";
+    const BODY_MIN: usize = 50;
+    const BODY_CAP: usize = 255;
+
+    let rest = &haystack[anchor..];
+    if !rest.starts_with(PREFIX) {
+        return None;
+    }
+    let body_start = anchor + PREFIX.len();
+    let cap = (body_start + BODY_CAP).min(haystack.len());
+    let mut pos = body_start;
+    while pos < cap && is_pypi_body(haystack[pos]) {
+        pos += 1;
+    }
+    let mut body_len = pos - body_start;
+    // #53: roll back consumed PEM marker fragment.
+    let at_cap = body_len == BODY_CAP;
+    if let Some(keep) = rollback_pem_marker(&haystack[body_start..pos], at_cap) {
+        body_len = keep;
+    }
+    (body_len >= BODY_MIN).then(|| ConfirmMatch::full(anchor, body_start + body_len))
+}
+
+fn is_pypi_body(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
 // ── credit-card ─────────────────────────────────────────────────────
 
 /// Custom confirm for `credit-card`.
@@ -1955,6 +1993,56 @@ mod tests {
         assert!(!iin_check(&[]));
         assert!(!iin_check(b"60"));
         assert!(iin_check(b"6510000000000000"));
+    }
+
+    // --- #53 pypi-token PEM-marker rollback -----------------------------------
+
+    #[test]
+    fn pypi_pem_trailer_rollback() {
+        // pypi- + 50 alnum + `-----END` — rollback strips the junction.
+        let mut input = b"pypi-".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 50));
+        input.extend_from_slice(b"-----END PRIVATE KEY-----");
+        let m = confirm_pypi_token(&input, 0).unwrap();
+        assert_eq!(m.match_end, 55); // 5 prefix + 50 body
+    }
+
+    #[test]
+    fn pypi_pem_begin_rollback() {
+        let mut input = b"pypi-".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 50));
+        input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----");
+        let m = confirm_pypi_token(&input, 0).unwrap();
+        assert_eq!(m.match_end, 55);
+    }
+
+    #[test]
+    fn pypi_pem_rollback_body_too_short_after() {
+        // Body = 45 alnum + `-----END` = 53 chars. After rollback body is
+        // 45 — below the 50-char minimum — rejected.
+        let mut input = b"pypi-".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 45));
+        input.extend_from_slice(b"-----END PRIVATE KEY-----");
+        assert!(confirm_pypi_token(&input, 0).is_none());
+    }
+
+    #[test]
+    fn pypi_pem_rollback_at_cap() {
+        // Body at 255-char cap with junction at boundary.
+        let mut input = b"pypi-".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 250));
+        input.extend_from_slice(b"-----END PRIVATE KEY-----");
+        let m = confirm_pypi_token(&input, 0).unwrap();
+        assert_eq!(m.match_end, 255); // 5 prefix + 250 body
+    }
+
+    #[test]
+    fn pypi_no_rollback_on_lookalike() {
+        let mut input = b"pypi-".to_vec();
+        input.extend(std::iter::repeat_n(b'A', 50));
+        input.extend_from_slice(b"-----BEND ");
+        let m = confirm_pypi_token(&input, 0).unwrap();
+        assert_eq!(m.match_end, 64); // includes dashes + BEND
     }
 
     // --- #53 gitlab-token PEM-marker rollback --------------------------------

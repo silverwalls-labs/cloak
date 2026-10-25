@@ -48,6 +48,16 @@ pub static POSITIVE: &[Vector] = &[
             rule: "pypi-token",
         }],
     },
+    // #53: PEM-marker rollback — match ends before the dash run.
+    Vector {
+        name: "pypi-before-pem-trailer",
+        input: b"pypi-AgEIcHlwaS5vcmcCJDU4ZjYyYjQ5LTk4OTAtNDA5OC1hOWJiYQ-----END PRIVATE KEY-----",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 55,
+            rule: "pypi-token",
+        }],
+    },
 ];
 
 pub static NEGATIVE: &[Vector] = &[

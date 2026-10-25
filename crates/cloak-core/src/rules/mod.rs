@@ -121,10 +121,10 @@ pub static CATALOG: &[RuleSpec] = &[
     RuleSpec {
         id: "pypi-token",
         anchors: &[b"pypi-"],
-        // Macaroon body: base64url alphabet, min 50 chars, cap 255.
-        confirm: ConfirmSpec::Pattern("pypi-[A-Za-z0-9_\\-]{50,255}"),
+        // #53: converted from Pattern to Custom for PEM-marker rollback.
+        confirm: ConfirmSpec::Custom(validators::confirm_pypi_token),
         window: 5 + 255,
-        // Anchored DFA match: forward from the anchor only.
+        // Confirm scans forward from the anchor only.
         back: 0,
     },
     RuleSpec {
