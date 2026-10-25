@@ -563,10 +563,13 @@ jobs:
           go vet ./...
 
       - name: Go parity + streaming + hooks tests
+        # -race: the adapter's concurrency claims (Engine-safe,
+        # Handler clones sharing one lock/buffer) are Go-specific and
+        # only the race detector exercises them.
         env:
           CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
         working-directory: adapters/go
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Fresh-module consume smoke
         # The Go analog of the npm-pack / wheel smokes: a consumer
