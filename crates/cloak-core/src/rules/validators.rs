@@ -636,10 +636,7 @@ fn base64url_decode(input: &[u8]) -> Option<Vec<u8>> {
 /// Replaces the DFA Pattern that could not perform PEM-marker rollback
 /// (#53): the greedy body charset includes `-` and `B/D/E/G/I/N`, so it
 /// consumed `-----END` / `-----BEGIN` from abutting PEM trailers.
-pub(crate) fn confirm_gitlab_token(
-    haystack: &[u8],
-    anchor: usize,
-) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_gitlab_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
     const PREFIXES: [&[u8]; 3] = [b"glpat-", b"glrt-", b"gldt-"];
     const BODY_MIN: usize = 20;
     const BODY_CAP: usize = 255;
@@ -665,6 +662,95 @@ fn is_gitlab_body(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
+// ── gcp-api-key ─────────────────────────────────────────────────────
+
+/// Custom confirm for `gcp-api-key`.
+///
+/// Anchor: `AIza`. Body: `[0-9A-Za-z_-]{35}` — exactly 35 chars.
+/// Replaces the DFA Pattern that could not perform PEM-junction
+/// rejection (#53): the fixed-length body may consume part of an
+/// abutting PEM marker's dash run (and possibly its word), but cannot
+/// be shortened (must remain exactly 35). When an overlap is detected
+/// the match is rejected entirely.
+pub(crate) fn confirm_gcp_api_key(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+    const PREFIX: &[u8] = b"AIza";
+    const BODY_LEN: usize = 35;
+
+    let rest = &haystack[anchor..];
+    if !rest.starts_with(PREFIX) {
+        return None;
+    }
+    let body_start = anchor + PREFIX.len();
+    let body_end = body_start + BODY_LEN;
+    if body_end > haystack.len() {
+        return None;
+    }
+    let body = &haystack[body_start..body_end];
+    if !body.iter().all(|&b| is_gcp_body(b)) {
+        return None;
+    }
+    // #53: reject if the fixed-length body consumed bytes from an
+    // adjacent PEM marker junction.
+    if pem_marker_overlaps_fixed(body, haystack.get(body_end..).unwrap_or(&[])) {
+        return None;
+    }
+    Some(ConfirmMatch::full(anchor, body_end))
+}
+
+fn is_gcp_body(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
+/// #53: detect when a fixed-length body's trailing dashes (+ optional
+/// word chars) overlap with a PEM `-----END ` or `-----BEGIN ` marker
+/// that follows the body. Because the body is fixed-length it cannot be
+/// shortened — the match must be rejected entirely.
+///
+/// Algorithm: scan backward from body's end for word chars
+/// (`B/D/E/G/I/N`) then dashes. The PEM marker's 5-dash prefix can
+/// start at any offset within the body's dash run, so every valid
+/// alignment is checked against `after`.
+fn pem_marker_overlaps_fixed(body: &[u8], after: &[u8]) -> bool {
+    const END_MARKER: &[u8] = b"-----END ";
+    const BEGIN_MARKER: &[u8] = b"-----BEGIN ";
+
+    let mut i = body.len();
+    // Scan backward past PEM marker word chars.
+    while i > 0 && matches!(body[i - 1], b'B' | b'D' | b'E' | b'G' | b'I' | b'N') {
+        i -= 1;
+    }
+    let word_start = i;
+    // Scan backward past dashes.
+    while i > 0 && body[i - 1] == b'-' {
+        i -= 1;
+    }
+    let dash_count = word_start - i;
+    if dash_count == 0 {
+        return false; // No dashes before the word — not a PEM junction.
+    }
+    let tail = &body[i..]; // dashes + word chars
+
+    // The PEM marker's 5-dash prefix can start at any offset within the
+    // body's dash run. Check each valid alignment.
+    let max_offset = dash_count.saturating_sub(5);
+    for o in 0..=max_offset {
+        let tail_part = &tail[o..];
+        for marker in [END_MARKER, BEGIN_MARKER] {
+            if marker.len() <= tail_part.len() {
+                if tail_part.starts_with(marker) {
+                    return true;
+                }
+            } else {
+                let (head, rest) = marker.split_at(tail_part.len());
+                if tail_part == head && after.starts_with(rest) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 // ── pypi-token ──────────────────────────────────────────────────────
 
 /// Custom confirm for `pypi-token`.
@@ -672,10 +758,7 @@ fn is_gitlab_body(b: u8) -> bool {
 /// Anchor: `pypi-`. Body: `[A-Za-z0-9_-]{50,255}`.
 /// Replaces the DFA Pattern that could not perform PEM-marker rollback
 /// (#53): same charset vulnerability as gitlab-token.
-pub(crate) fn confirm_pypi_token(
-    haystack: &[u8],
-    anchor: usize,
-) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_pypi_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
     const PREFIX: &[u8] = b"pypi-";
     const BODY_MIN: usize = 50;
     const BODY_CAP: usize = 255;
@@ -1993,6 +2076,73 @@ mod tests {
         assert!(!iin_check(&[]));
         assert!(!iin_check(b"60"));
         assert!(iin_check(b"6510000000000000"));
+    }
+
+    // --- #53 gcp-api-key PEM-junction overlap ---------------------------------
+
+    #[test]
+    fn gcp_pem_trailer_5_dashes_rejected() {
+        // Body's last 5 chars are PEM dashes, after starts with `END `.
+        let input = b"AIzaSyA0123456789abcdefghijklmnop-----END PRIVATE KEY-----";
+        assert!(confirm_gcp_api_key(input, 0).is_none());
+    }
+
+    #[test]
+    fn gcp_pem_trailer_body_ends_with_end_rejected() {
+        // Body consumed `-----END`, after starts with ` PRIVATE KEY-----`.
+        let input = b"AIzaSyA0123456789abcdefghijklm-----END PRIVATE KEY-----";
+        assert!(confirm_gcp_api_key(input, 0).is_none());
+    }
+
+    #[test]
+    fn gcp_pem_trailer_1_dash_rejected() {
+        // Body consumed 1 dash, remaining 4 dashes + END in after.
+        let input = b"AIzaSyA0123456789abcdefghijklmnopqr-----END PRIVATE KEY-----";
+        assert!(confirm_gcp_api_key(input, 0).is_none());
+    }
+
+    #[test]
+    fn gcp_pem_begin_rejected() {
+        let input = b"AIzaSyA0123456789abcdefghijklmnop-----BEGIN RSA PRIVATE KEY-----\nAAAA\n";
+        assert!(confirm_gcp_api_key(input, 0).is_none());
+    }
+
+    #[test]
+    fn gcp_pem_6_dashes_rejected() {
+        // 6 dashes + END — the marker's 5-dash prefix starts at offset 1.
+        let input = b"AIzaSyA0123456789abcdefghijklmno------END PRIVATE KEY-----";
+        assert!(confirm_gcp_api_key(input, 0).is_none());
+    }
+
+    #[test]
+    fn gcp_legitimate_trailing_dash_accepted() {
+        // Body ends in `-`, after = `xyz` — not a PEM junction.
+        let input = b"AIzaSyA0123456789abcdefghijklmnopqr-xyz";
+        let m = confirm_gcp_api_key(input, 0).unwrap();
+        assert_eq!(m.match_end, 39);
+    }
+
+    #[test]
+    fn gcp_legitimate_trailing_five_dashes_accepted() {
+        // Body ends in `-----`, after = `foo bar` — no PEM context.
+        let input = b"AIzaSyA0123456789abcdefghijklmnop-----foo bar";
+        let m = confirm_gcp_api_key(input, 0).unwrap();
+        assert_eq!(m.match_end, 39);
+    }
+
+    #[test]
+    fn gcp_no_dashes_accepted() {
+        let input = b"AIzaSyC0123456789abcdefghijklmnopqrstuv";
+        let m = confirm_gcp_api_key(input, 0).unwrap();
+        assert_eq!(m.match_end, 39);
+    }
+
+    #[test]
+    fn gcp_overlap_check_partial_word() {
+        // Body consumed `-----EN`, after starts with `D PRIVATE KEY-----`.
+        // Combined at offset 0: `-----END PRIVATE KEY-----` → reject.
+        let input = b"AIzaSyA0123456789abcdefghijklmno-----END PRIVATE KEY-----";
+        assert!(confirm_gcp_api_key(input, 0).is_none());
     }
 
     // --- #53 pypi-token PEM-marker rollback -----------------------------------
