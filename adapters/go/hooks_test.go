@@ -6,10 +6,12 @@ package cloak_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	cloak "github.com/silverwalls-labs/cloak/adapters/go"
 )
@@ -212,6 +214,18 @@ func TestHandlerWithAttrsRedacts(t *testing.T) {
 	}
 	if !bytes.Contains(out, []byte("[CLOAK:github-token:")) {
 		t.Errorf("expected a CLOAK tag, got %q", out)
+	}
+}
+
+func TestHandlerSurfacesShortWrites(t *testing.T) {
+	engine := newTestEngine(t)
+	// shortWriter drops the last byte without an error — the handler
+	// must surface it instead of silently truncating the record.
+	h := cloak.NewHandler(engine, shortWriter{}, nil)
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "auth granted", 0)
+	err := h.Handle(context.Background(), record)
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Errorf("want io.ErrShortWrite, got %v", err)
 	}
 }
 

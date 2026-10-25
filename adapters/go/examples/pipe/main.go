@@ -1,9 +1,9 @@
 // stdin → cloak → stdout: the layer-1 pipe via the io.WriteCloser
 // hook (the Go analog of the Node transform-pipe example).
 //
-// Run from the repo root:
+// Run from the Go module directory:
 //
-//	printf 'token=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\n' | go run ./adapters/go/examples/pipe
+//	printf 'token=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\n' | go run ./examples/pipe
 package main
 
 import (

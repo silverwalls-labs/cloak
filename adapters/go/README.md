@@ -89,7 +89,7 @@ if _, err := io.Copy(w, os.Stdin); err != nil {
 if err := w.Close(); err != nil { // flushes the carry-over tail
 	log.Fatal(err)
 }
-fmt.Println(w.Stats().Matches) // populated by Close
+fmt.Fprintln(os.Stderr, w.Stats().Matches) // populated by Close — stderr, so the pipe stays clean
 ```
 
 Note that `Write` returns the number of *input* bytes consumed per the
@@ -173,9 +173,13 @@ engine, err := cloak.CreateEngine(ctx, cloak.WithConfig(cfg),
 
 `WithWASM` supplies the artifact bytes directly instead of resolving
 `CLOAK_WASM_PATH` — useful with `go:embed` for self-contained
-binaries:
+binaries. Copy `cloak_wasm.wasm` into your package's directory first
+(the build output under `target/` can't be embedded from an unrelated
+location), and note the blank `embed` import the pattern requires:
 
 ```go
+import _ "embed"
+
 //go:embed cloak_wasm.wasm
 var cloakWasm []byte
 

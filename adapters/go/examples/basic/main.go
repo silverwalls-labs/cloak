@@ -1,9 +1,10 @@
 // One-shot and session basics — "embed cloak today" in Go.
 //
-// Run from the repo root (builds on the default config: ephemeral
-// digest key, all rules enabled — see the README for stable keys):
+// Run from the Go module directory (builds on the default config:
+// ephemeral digest key, all rules enabled — see the README for stable
+// keys):
 //
-//	go run ./adapters/go/examples/basic
+//	cd adapters/go && go run ./examples/basic
 package main
 
 import (

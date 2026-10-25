@@ -184,28 +184,33 @@ func (e *Engine) Session() (*Session, error) {
 // Close releases the engine and its WASM resources (io.Closer).
 //
 // Fails if any sessions created from this engine are still live —
-// finish or abort them first. A failed Close is retryable; closing
-// an already-closed engine returns an error.
+// finish or abort them first. A failure freeing the engine handle is
+// retryable (the runtime is still alive); a failed runtime teardown
+// is terminal: wazero marks a runtime closed before tearing it down,
+// so the engine is marked closed and the error returned. Closing an
+// already-closed engine returns an error.
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
 		return errEngineClosed()
 	}
-	// Two retryable stages: free the engine handle, then tear down the
-	// runtime. closed is only set once both succeed, so a failure at
-	// either stage can be retried instead of leaking the runtime.
+	// Two stages: free the engine handle, then tear down the runtime.
+	// closed is set once the handle is freed, so a handle-free failure
+	// can be retried instead of leaking the runtime.
 	if !e.freed {
 		if err := e.bridge.engineFree(e.handle); err != nil {
 			return err
 		}
 		e.freed = true
+		e.closed = true
 	}
-	if err := e.bridge.close(); err != nil {
-		return err
-	}
+	// wazero marks the runtime closed before running teardown, so a
+	// close error here cannot be retried — mark the engine closed and
+	// surface the error (Redact/Session must not reach the dead
+	// runtime, and a retry Close would only no-op and report nil).
 	e.closed = true
-	return nil
+	return e.bridge.close()
 }
 
 // ── Session ────────────────────────────────────────────────────────

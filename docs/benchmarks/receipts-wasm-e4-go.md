@@ -34,12 +34,12 @@ treat smaller deltas as noise.
 
 The WASM module does the same ~30 µs of scanning work per 4 KiB
 regardless of host; everything above that is host-binding overhead.
-Go's is the smallest of the three adapter hosts in kind: wazero is
+Go's is the thinnest of the three adapter hosts in kind: wazero is
 pure Go, so a boundary crossing is a Go function call into
 ahead-of-time-compiled machine code — no FFI marshaling layer at all.
-That puts Go essentially at Node's level (~15% apart; both are
-"compiled WASM + thin host-native glue") and ~1.6× ahead of Python's
-ctypes floor.
+In measured one-shot latency Go lands near but above Node (69 µs vs
+61 µs; both are "compiled WASM + thin host-native glue") and ~1.6×
+ahead of Python's ctypes floor.
 
 The remaining ~2.3× gap to the Rust wasmtime host is mostly codegen
 quality — wazero's compiler optimizes less aggressively than

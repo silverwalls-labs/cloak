@@ -94,7 +94,12 @@ func (h *Handler) Handle(ctx context.Context, record slog.Record) error {
 	if err != nil {
 		return err
 	}
-	_, err = h.target.Write(res.Output)
+	// Surface short writes instead of silently truncating the redacted
+	// record — same discipline as Writer.writeAll.
+	n, err := h.target.Write(res.Output)
+	if err == nil && n < len(res.Output) {
+		return io.ErrShortWrite
+	}
 	return err
 }
 

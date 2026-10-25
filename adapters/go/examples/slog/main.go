@@ -1,9 +1,9 @@
 // log/slog with the cloak Handler: every record is redacted on the
 // way out (the Go analog of the Python logging-handler example).
 //
-// Run from the repo root:
+// Run from the Go module directory:
 //
-//	go run ./adapters/go/examples/slog
+//	cd adapters/go && go run ./examples/slog
 package main
 
 import (

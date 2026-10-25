@@ -5,9 +5,9 @@
 // port of adapters/node/bench/throughput.ts (same corpus
 // construction, same warmup and iteration counts).
 //
-// Run:
+// Run from the Go module directory:
 //
-//	go run ./adapters/go/bench
+//	cd adapters/go && go run ./bench
 package main
 
 import (
