@@ -84,10 +84,11 @@ pub static CATALOG: &[RuleSpec] = &[
     RuleSpec {
         id: "gitlab-token",
         anchors: &[b"glpat-", b"glrt-", b"gldt-"],
-        confirm: ConfirmSpec::Pattern("(?:glpat-|glrt-|gldt-)[0-9A-Za-z_-]{20,255}"),
+        // #53: converted from Pattern to Custom for PEM-marker rollback.
+        confirm: ConfirmSpec::Custom(validators::confirm_gitlab_token),
         // Body capped at 255 to bound W; longest anchor is "glpat-" (6 bytes).
         window: 6 + 255,
-        // Anchored DFA match: forward from the anchor only.
+        // Confirm scans forward from the anchor only.
         back: 0,
     },
     RuleSpec {
@@ -112,18 +113,22 @@ pub static CATALOG: &[RuleSpec] = &[
     RuleSpec {
         id: "gcp-api-key",
         anchors: &[b"AIza"],
-        confirm: ConfirmSpec::Pattern("AIza[0-9A-Za-z_\\-]{35}"),
-        window: 4 + 35,
-        // Anchored DFA match: forward from the anchor only.
+        // #53: converted from Pattern to Custom for PEM-junction rejection.
+        // Window widened from 39 to 50: the overlap check needs up to 11
+        // bytes after the 35-char body to reconstruct a PEM `-----BEGIN `
+        // marker that the body partially consumed.
+        confirm: ConfirmSpec::Custom(validators::confirm_gcp_api_key),
+        window: 4 + 35 + 11,
+        // Confirm scans forward from the anchor only.
         back: 0,
     },
     RuleSpec {
         id: "pypi-token",
         anchors: &[b"pypi-"],
-        // Macaroon body: base64url alphabet, min 50 chars, cap 255.
-        confirm: ConfirmSpec::Pattern("pypi-[A-Za-z0-9_\\-]{50,255}"),
+        // #53: converted from Pattern to Custom for PEM-marker rollback.
+        confirm: ConfirmSpec::Custom(validators::confirm_pypi_token),
         window: 5 + 255,
-        // Anchored DFA match: forward from the anchor only.
+        // Confirm scans forward from the anchor only.
         back: 0,
     },
     RuleSpec {
@@ -374,7 +379,7 @@ mod tests {
             // DFA rules
             ("gitlab-token", 261),
             ("aws-access-key", 20),
-            ("gcp-api-key", 39),
+            ("gcp-api-key", 50), // #53: widened from 39 for PEM overlap check
             ("pypi-token", 260),
         ];
         for (id, w) in expected {

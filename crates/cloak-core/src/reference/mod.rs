@@ -289,6 +289,11 @@ fn confirm_gitlab(input: &[u8], start: usize) -> Option<usize> {
     while taken < body.len() && taken < BODY_CAP && is_gitlab_body(body[taken]) {
         taken += 1;
     }
+    // #53: roll back consumed PEM marker fragment (mirrors engine).
+    let at_cap = taken == BODY_CAP;
+    if let Some(keep) = rollback_pem_marker_oracle(&body[..taken], at_cap) {
+        taken = keep;
+    }
     (taken >= GITLAB_MIN).then_some(start + prefix.len() + taken)
 }
 
@@ -335,7 +340,58 @@ fn confirm_gcp_api(input: &[u8], start: usize) -> Option<usize> {
     while taken < body.len() && taken < GCP_BODY && is_gcp_body(body[taken]) {
         taken += 1;
     }
-    (taken == GCP_BODY).then_some(start + GCP_PREFIX.len() + taken)
+    if taken != GCP_BODY {
+        return None;
+    }
+    // #53: reject if the fixed-length body overlaps a PEM marker
+    // junction (mirrors engine).
+    let body_end = GCP_PREFIX.len() + taken;
+    if pem_marker_overlaps_fixed_oracle(&rest[GCP_PREFIX.len()..body_end], &rest[body_end..]) {
+        return None;
+    }
+    Some(start + body_end)
+}
+
+/// #53: oracle mirror of `pem_marker_overlaps_fixed` (validators.rs).
+/// Independently reimplemented per the oracle-duplication doctrine.
+fn pem_marker_overlaps_fixed_oracle(body: &[u8], after: &[u8]) -> bool {
+    const PEM_END: &[u8] = b"-----END ";
+    const PEM_BEGIN: &[u8] = b"-----BEGIN ";
+
+    let mut i = body.len();
+    while i > 0 && matches!(body[i - 1], b'B' | b'D' | b'E' | b'G' | b'I' | b'N') {
+        i -= 1;
+    }
+    let word_start = i;
+    while i > 0 && body[i - 1] == b'-' {
+        i -= 1;
+    }
+    let dash_count = word_start - i;
+    if dash_count == 0 {
+        return false;
+    }
+    // #53: bare-dash BEGIN junction (mirrors engine).
+    if word_start == body.len() && dash_count <= 4 && after.starts_with(PEM_BEGIN) {
+        return true;
+    }
+    let tail = &body[i..];
+    let max_off = dash_count.saturating_sub(5);
+    for o in 0..=max_off {
+        let part = &tail[o..];
+        for marker in [PEM_END, PEM_BEGIN] {
+            if marker.len() <= part.len() {
+                if part.starts_with(marker) {
+                    return true;
+                }
+            } else {
+                let (head, rest) = marker.split_at(part.len());
+                if part == head && after.starts_with(rest) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
@@ -347,6 +403,11 @@ fn confirm_pypi(input: &[u8], start: usize) -> Option<usize> {
     let mut taken = 0;
     while taken < body.len() && taken < BODY_CAP && is_pypi_body(body[taken]) {
         taken += 1;
+    }
+    // #53: roll back consumed PEM marker fragment (mirrors engine).
+    let at_cap = taken == BODY_CAP;
+    if let Some(keep) = rollback_pem_marker_oracle(&body[..taken], at_cap) {
+        taken = keep;
     }
     (taken >= PYPI_MIN).then_some(start + PYPI_PREFIX.len() + taken)
 }
@@ -972,7 +1033,8 @@ fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
     {
         return None;
     }
-    if end > 0 && !rest[end - 1].is_ascii_digit() {
+    // #53: trim ALL trailing separators (mirrors engine while-loop).
+    while end > 0 && !rest[end - 1].is_ascii_digit() {
         end -= 1;
     }
     if digits.len() < 13 || digits.len() > 19 {
@@ -1543,6 +1605,175 @@ mod tests {
                 confirm_jwt_oracle(input, 0),
                 crate::rules::validators::confirm_jwt(input, 0).map(|m| m.match_end),
                 "oracle/engine jwt rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 gcp-api-key PEM-junction overlap cross-check --------------------
+
+    #[test]
+    fn gcp_pem_overlap_cross_check_engine() {
+        let fixtures: &[&[u8]] = &[
+            // No PEM context — accepted.
+            b"AIzaSyC0123456789abcdefghijklmnopqrstuv",
+            b"AIzaSyA0123456789abcdefghijklmnopqr-xyz",
+            b"AIzaSyA0123456789abcdefghijklmnop-----foo bar",
+            // PEM END junction — rejected.
+            b"AIzaSyA0123456789abcdefghijklmnop-----END PRIVATE KEY-----",
+            b"AIzaSyA0123456789abcdefghijklm-----END PRIVATE KEY-----",
+            b"AIzaSyA0123456789abcdefghijklmnopqr-----END PRIVATE KEY-----",
+            // 6-dash junction.
+            b"AIzaSyA0123456789abcdefghijklmno------END PRIVATE KEY-----",
+            // PEM BEGIN junction — rejected.
+            b"AIzaSyA0123456789abcdefghijklmnop-----BEGIN RSA PRIVATE KEY-----\nAAAA\n",
+            // 1 body dash + 4 after dashes.
+            b"AIzaSyA0123456789abcdefghijklmnopqr-----BEGIN RSA PRIVATE KEY-----\n",
+            // Body too short — rejected for length.
+            b"AIzaSyC0123456789abcdefghijklmnopqrst",
+        ];
+        let mut fixtures: Vec<Vec<u8>> = fixtures.iter().map(|f| f.to_vec()).collect();
+        // #53 begin junction: 0..=12 body dashes + complete marker after.
+        for dashes in 0..=12usize {
+            let mut h = b"AIza".to_vec();
+            h.extend(std::iter::repeat_n(b'a', 35 - dashes));
+            h.resize(h.len() + dashes, b'-');
+            h.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
+            fixtures.push(h);
+        }
+        for input in &fixtures {
+            assert_eq!(
+                confirm_gcp_api(input, 0),
+                crate::rules::validators::confirm_gcp_api_key(input, 0).map(|m| m.match_end),
+                "oracle/engine gcp overlap divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 pypi-token PEM-marker rollback cross-check ----------------------
+
+    #[test]
+    fn pypi_pem_rollback_cross_check_engine() {
+        let body50 = "A".repeat(50);
+        let mut fixtures: Vec<Vec<u8>> = Vec::new();
+        for run in 0..=12usize {
+            for tail in [
+                b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n".as_slice(),
+                b"BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+            ] {
+                let mut h = format!("pypi-{body50}").into_bytes();
+                h.extend(std::iter::repeat_n(b'-', run));
+                h.extend_from_slice(tail);
+                fixtures.push(h);
+            }
+        }
+        for tail in [
+            b"-----BEND ".as_slice(),
+            b"-----ENDEND ",
+            b"-----EN(",
+            b"-----END",
+        ] {
+            let mut h = format!("pypi-{body50}").into_bytes();
+            h.extend_from_slice(tail);
+            fixtures.push(h);
+        }
+        // Short body → rejected after rollback.
+        {
+            let body45 = "A".repeat(45);
+            fixtures.push(format!("pypi-{body45}-----END PRIVATE KEY-----").into_bytes());
+        }
+        // Cap-cut.
+        {
+            let body250 = "A".repeat(250);
+            fixtures.push(format!("pypi-{body250}-----END PRIVATE KEY-----").into_bytes());
+        }
+        for input in &fixtures {
+            assert_eq!(
+                confirm_pypi(input, 0),
+                crate::rules::validators::confirm_pypi_token(input, 0).map(|m| m.match_end),
+                "oracle/engine pypi rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 gitlab-token PEM-marker rollback cross-check --------------------
+
+    #[test]
+    fn gitlab_pem_rollback_cross_check_engine() {
+        let mut fixtures: Vec<Vec<u8>> = Vec::new();
+        // END and BEGIN junctions at dash-run widths 0..=12.
+        for run in 0..=12usize {
+            for tail in [
+                b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n".as_slice(),
+                b"BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+            ] {
+                let mut h = b"glpat-abcdefghij0123456789".to_vec();
+                h.extend(std::iter::repeat_n(b'-', run));
+                h.extend_from_slice(tail);
+                fixtures.push(h);
+            }
+        }
+        // Lookalikes.
+        for tail in [
+            b"-----BEND ".as_slice(),
+            b"-----ENDEND ",
+            b"-----EN(",
+            b"-----END",
+        ] {
+            let mut h = b"glpat-abcdefghij0123456789".to_vec();
+            h.extend_from_slice(tail);
+            fixtures.push(h);
+        }
+        // Short body → rejected after rollback.
+        fixtures.push(b"glpat-abcdefghij01234-----END PRIVATE KEY-----".to_vec());
+        // Cap-cut: 255 body chars with junction at boundary.
+        {
+            let mut h = b"glpat-".to_vec();
+            h.extend(std::iter::repeat_n(b'a', 250));
+            h.extend_from_slice(b"-----END PRIVATE KEY-----");
+            fixtures.push(h);
+        }
+        for input in &fixtures {
+            assert_eq!(
+                confirm_gitlab(input, 0),
+                crate::rules::validators::confirm_gitlab_token(input, 0).map(|m| m.match_end),
+                "oracle/engine gitlab rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 credit-card PEM-junction cross-check ----------------------------
+
+    #[test]
+    fn credit_card_pem_rollback_cross_check_engine() {
+        // The #53 while-loop trim exists on both sides; this battery pins
+        // agreement across trailing-separator shapes and PEM junctions.
+        let fixtures: &[&[u8]] = &[
+            // Trailing dashes (1..=5) — all trimmed to the last digit.
+            b"4539578763621486-",
+            b"4539578763621486--",
+            b"4539578763621486---",
+            b"4539578763621486----",
+            b"4539578763621486-----",
+            // Full PEM junction.
+            b"4539578763621486-----END PRIVATE KEY-----",
+            // Mixed trailing separators.
+            b"4539578763621486- -",
+            b"4539578763621486   ",
+            // No trailing separator (control).
+            b"4539578763621486",
+            // Dashed-group card (internal dashes preserved).
+            b"4539-5787-6362-1486",
+            b"4539-5787-6362-1486-",
+        ];
+        for input in fixtures {
+            assert_eq!(
+                confirm_credit_card_oracle(input, 0),
+                crate::rules::validators::confirm_credit_card(input, 0).map(|m| m.match_end),
+                "oracle/engine cc trim divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
         }

@@ -11000,7 +11000,7 @@
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=10997
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=10998
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=10999
-2026-09-06T12:00:00Z WARN [planted] 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
+2026-09-06T12:00:00Z WARN [planted] glpat-abcdefghij0123456789-----END PRIVATE KEY-----
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=11001
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=11002
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=11003
@@ -11500,7 +11500,7 @@
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=11497
 2026-09-06T12:00:00Z INFO [app] health check passed seq=11498
 2026-09-06T12:00:00Z INFO [app] health check passed seq=11499
-2026-09-06T12:00:00Z WARN [planted] npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeX
+2026-09-06T12:00:00Z WARN [planted] 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
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=11501
 2026-09-06T12:00:00Z INFO [app] health check passed seq=11502
 2026-09-06T12:00:00Z INFO [app] health check passed seq=11503
@@ -12000,7 +12000,7 @@
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=11997
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=11998
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=11999
-2026-09-06T12:00:00Z WARN [planted] npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeAbCdEfGhIjKlMnOpQrStUvWxYz0123456789
+2026-09-06T12:00:00Z WARN [planted] npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeX
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=12001
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=12002
 2026-09-06T12:00:00Z INFO [app] health check passed seq=12003
@@ -12500,7 +12500,7 @@
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=12497
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=12498
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=12499
-2026-09-06T12:00:00Z WARN [planted] publish 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 ok
+2026-09-06T12:00:00Z WARN [planted] npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeAbCdEfGhIjKlMnOpQrStUvWxYz0123456789
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=12501
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=12502
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=12503
@@ -13000,7 +13000,7 @@
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=12997
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=12998
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=12999
-2026-09-06T12:00:00Z WARN [planted] pkg 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
+2026-09-06T12:00:00Z WARN [planted] publish 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 ok
 2026-09-06T12:00:00Z INFO [app] health check passed seq=13001
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=13002
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=13003
@@ -13500,7 +13500,7 @@
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=13497
 2026-09-06T12:00:00Z INFO [app] health check passed seq=13498
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=13499
-2026-09-06T12:00:00Z WARN [planted] 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
+2026-09-06T12:00:00Z WARN [planted] pkg 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
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=13501
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=13502
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=13503
@@ -14000,7 +14000,7 @@
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=13997
 2026-09-06T12:00:00Z INFO [app] health check passed seq=13998
 2026-09-06T12:00:00Z INFO [app] health check passed seq=13999
-2026-09-06T12:00:00Z WARN [planted] github_pat_a1b2c3d4e5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xyzAB
+2026-09-06T12:00:00Z WARN [planted] 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
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=14001
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=14002
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=14003
@@ -14500,7 +14500,7 @@
 2026-09-06T12:00:00Z INFO [app] health check passed seq=14497
 2026-09-06T12:00:00Z INFO [app] health check passed seq=14498
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=14499
-2026-09-06T12:00:00Z WARN [planted] github_pat_AbCdEfGhIjKlMnOpQrStUvWxYz01234glpat-abcdefghij0123456789
+2026-09-06T12:00:00Z WARN [planted] github_pat_a1b2c3d4e5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xyzAB
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=14501
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=14502
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=14503
@@ -15000,7 +15000,7 @@
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=14997
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=14998
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=14999
-2026-09-06T12:00:00Z WARN [planted] npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeglpat-abcdefghij0123456789
+2026-09-06T12:00:00Z WARN [planted] github_pat_AbCdEfGhIjKlMnOpQrStUvWxYz01234glpat-abcdefghij0123456789
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=15001
 2026-09-06T12:00:00Z INFO [app] cache hit ratio=0.98 seq=15002
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=15003
@@ -15500,7 +15500,7 @@
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=15497
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=15498
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=15499
-2026-09-06T12:00:00Z WARN [planted] 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 glpat-abcdefghij0123456789
+2026-09-06T12:00:00Z WARN [planted] npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeglpat-abcdefghij0123456789
 2026-09-06T12:00:00Z INFO [app] batch processed count=100 seq=15501
 2026-09-06T12:00:00Z INFO [app] request completed duration=42 seq=15502
 2026-09-06T12:00:00Z INFO [app] config reloaded successfully seq=15503

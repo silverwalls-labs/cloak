@@ -59,4 +59,10 @@ pub static NEGATIVE: &[Vector] = &[
         input: b"see AIza key",
         spans: &[],
     },
+    // #53: fixed-length body overlaps a PEM marker junction — rejected.
+    Vector {
+        name: "gcp-pem-trailer-overlap",
+        input: b"AIzaSyA0123456789abcdefghijklmnop-----END PRIVATE KEY-----",
+        spans: &[],
+    },
 ];
