@@ -675,9 +675,10 @@ pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<Conf
     {
         return None;
     }
-    // Must end on a digit (not a trailing separator).
-    if end > 0 && !rest[end - 1].is_ascii_digit() {
-        // Trim trailing separator.
+    // Must end on a digit (not a trailing separator). #53: trim ALL
+    // trailing separators — a single `if` left 4 of 5 PEM-junction
+    // dashes in the match, breaking the shared-dash guard on pass 2.
+    while end > 0 && !rest[end - 1].is_ascii_digit() {
         end -= 1;
     }
     let digit_count = digits.len();
@@ -1917,6 +1918,43 @@ mod tests {
         assert!(!iin_check(&[]));
         assert!(!iin_check(b"60"));
         assert!(iin_check(b"6510000000000000"));
+    }
+
+    // --- #53 credit-card PEM-junction trailing separator trim ---------------
+
+    #[test]
+    fn credit_card_pem_trailer_trims_all_dashes() {
+        // Five trailing dashes from an abutting PEM `-----END` — the while
+        // loop must trim all of them, leaving the match on the last digit.
+        let input = b"4539578763621486-----END PRIVATE KEY-----";
+        let m = confirm_credit_card(input, 0).unwrap();
+        assert_eq!(m.match_end, 16);
+    }
+
+    #[test]
+    fn credit_card_single_trailing_dash_trimmed() {
+        let m = confirm_credit_card(b"4539578763621486-", 0).unwrap();
+        assert_eq!(m.match_end, 16);
+    }
+
+    #[test]
+    fn credit_card_multiple_trailing_mixed_seps() {
+        // Trailing dash-space-dash — all three trimmed.
+        let m = confirm_credit_card(b"4539578763621486- -", 0).unwrap();
+        assert_eq!(m.match_end, 16);
+    }
+
+    #[test]
+    fn credit_card_trailing_spaces_trimmed() {
+        let m = confirm_credit_card(b"4539578763621486   ", 0).unwrap();
+        assert_eq!(m.match_end, 16);
+    }
+
+    #[test]
+    fn credit_card_dashes_between_groups_preserved() {
+        // Internal dashes are part of the match — only trailing ones trim.
+        let m = confirm_credit_card(b"4539-5787-6362-1486", 0).unwrap();
+        assert_eq!(m.match_end, 19);
     }
 
     #[test]

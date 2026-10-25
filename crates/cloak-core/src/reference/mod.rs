@@ -972,7 +972,8 @@ fn confirm_credit_card_oracle(input: &[u8], start: usize) -> Option<usize> {
     {
         return None;
     }
-    if end > 0 && !rest[end - 1].is_ascii_digit() {
+    // #53: trim ALL trailing separators (mirrors engine while-loop).
+    while end > 0 && !rest[end - 1].is_ascii_digit() {
         end -= 1;
     }
     if digits.len() < 13 || digits.len() > 19 {
@@ -1543,6 +1544,41 @@ mod tests {
                 confirm_jwt_oracle(input, 0),
                 crate::rules::validators::confirm_jwt(input, 0).map(|m| m.match_end),
                 "oracle/engine jwt rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 credit-card PEM-junction cross-check ----------------------------
+
+    #[test]
+    fn credit_card_pem_rollback_cross_check_engine() {
+        // The #53 while-loop trim exists on both sides; this battery pins
+        // agreement across trailing-separator shapes and PEM junctions.
+        let fixtures: &[&[u8]] = &[
+            // Trailing dashes (1..=5) — all trimmed to the last digit.
+            b"4539578763621486-",
+            b"4539578763621486--",
+            b"4539578763621486---",
+            b"4539578763621486----",
+            b"4539578763621486-----",
+            // Full PEM junction.
+            b"4539578763621486-----END PRIVATE KEY-----",
+            // Mixed trailing separators.
+            b"4539578763621486- -",
+            b"4539578763621486   ",
+            // No trailing separator (control).
+            b"4539578763621486",
+            // Dashed-group card (internal dashes preserved).
+            b"4539-5787-6362-1486",
+            b"4539-5787-6362-1486-",
+        ];
+        for input in fixtures {
+            assert_eq!(
+                confirm_credit_card_oracle(input, 0),
+                crate::rules::validators::confirm_credit_card(input, 0)
+                    .map(|m| m.match_end),
+                "oracle/engine cc trim divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
         }

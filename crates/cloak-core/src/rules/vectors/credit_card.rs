@@ -99,6 +99,16 @@ pub static POSITIVE: &[Vector] = &[
             rule: "credit-card",
         }],
     },
+    // #53: trailing PEM dashes trimmed — match ends on the last digit.
+    Vector {
+        name: "cc-before-pem-trailer",
+        input: b"4539578763621486-----END PRIVATE KEY-----",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 16,
+            rule: "credit-card",
+        }],
+    },
 ];
 
 pub static NEGATIVE: &[Vector] = &[
