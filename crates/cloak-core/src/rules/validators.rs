@@ -570,8 +570,11 @@ fn is_base64url_char(b: u8) -> bool {
 /// guards (engine/pem.rs: `dashes_before`, `preceded_by_private_key_end`)
 /// are byte-identical before and after redaction. `at_cap` loosens the
 /// word to any prefix of END/BEGIN (including empty) and the run to >= 1:
-/// the 2048-byte scan cap can cut the junction anywhere. The word
-/// literals are tripwire-tested against `engine::pem` constants.
+/// the 2048-byte scan cap can cut the junction anywhere. A tripwire test
+/// (`pem_marker_literals_match_engine_pem`) pins the END/BEGIN marker
+/// vocabulary against `engine::pem` constants; this helper's own word
+/// literals and letter set are pinned behaviorally by the rollback unit
+/// tests and the engine/oracle cross-check battery.
 fn rollback_pem_marker(sig: &[u8], at_cap: bool) -> Option<usize> {
     const END_WORD: &[u8] = b"END";
     const BEGIN_WORD: &[u8] = b"BEGIN";
