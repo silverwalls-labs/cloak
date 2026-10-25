@@ -22,7 +22,7 @@ slow, obviously correct, the oracle.
 
 ### How chunk-invariance is kept (the load-bearing machinery)
 
-The invariant above is not an accident of implementation; four mechanisms hold it,
+The invariant above is not an accident of implementation; five mechanisms hold it,
 each pinned by a regression test and exercised by strict fuzz:
 
 - **Carry-over + retained spans.** The engine retains up to `W_max + B_max` bytes
@@ -38,6 +38,13 @@ each pinned by a regression test and exercised by strict fuzz:
   engine rebuilds the emitted-stream context (pre-block tail + BEGIN + tag + END,
   capped at 94 bytes) in front of the unread remainder, so candidates after the
   block confirm against the same backward context at every chunk size.
+- **PEM confirm-decision memo (#49).** Every PEM BEGIN anchor is confirmed or
+  rejected exactly once — at its first resolvable evaluation, which always sees
+  the full backward guard context (`max_window` is floored at confirm window +
+  back window) — and the decision is memoized by absolute offset. Re-scans after
+  a flush reuse it, so emission-boundary placement can never flip a decision the
+  whole-buffer pass made with full context (the backward guards fail open on
+  missing context).
 - **Bounded-slice push (F10).** `push` processes any chunk — however large — in
   internal slices of `2 × W_max`, so peak memory is independent of chunk size.
   Slicing is just a finer chunking of the same stream, so chunk-invariance makes
@@ -207,11 +214,13 @@ context beyond max_window) and issue #34 (adjacent redaction erasing a backward
 guard, breaking idempotence). Both are closed: the fixes (retained spans, PEM
 close-context synthesis, and the `CLOAK_TAG_MAX` tag-tail/head guards — see
 [the machinery above](#how-chunk-invariance-is-kept-the-load-bearing-machinery))
-are pinned by `tests/differential.rs`, and **the PR-gate corpus replay is
-strict** (`CLOAK_FUZZ_STRICT=1`, `fuzz/src/common.rs`). Strict stays opt-in
-(default off) until the PEM shared-dash idempotence bug (#44) is fixed; the
-generative smoke fuzz and the nightly extended run therefore stay
-non-strict for now — the smoke found #44 in CI (2026-10-11, both ISAs).
+are pinned by `tests/differential.rs`. Two later PEM streaming bugs went through
+the same cycle — #44 (shared-dash fused markers, fixed by the preceding-dash
+guard) and #49 (a neighboring candidate's boundary pin bisecting a rejected
+anchor's guard window, fixed by the confirm-decision memo) — both found by the
+smoke in CI (2026-10-11 and 2026-10-24). With all four closed, **strict is
+asserted unconditionally** (`CLOAK_FUZZ_STRICT=1`, `fuzz/src/common.rs`) in the
+PR-gate corpus replay, the generative smoke, and the nightly extended run.
 
 ### CI staging (all blocking at their stage)
 
