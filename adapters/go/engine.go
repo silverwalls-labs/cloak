@@ -71,9 +71,10 @@ func WithWASM(wasmBytes []byte) Option {
 // engine from the configured ruleset. Call with no options for the
 // default config (ephemeral digest key, all rules enabled).
 //
-// The context covers compilation/instantiation and every later call
-// into the module — use context.Background() unless you need
-// cancellation.
+// The context governs compilation/instantiation only; later calls
+// into the module run on a non-cancellable derivative, so an engine
+// created with a request-scoped context keeps working (and closing)
+// after that context ends.
 //
 // Example:
 //
@@ -136,7 +137,8 @@ type Engine struct {
 	mu     sync.Mutex
 	bridge *bridge
 	handle uint32
-	closed bool
+	freed  bool // engine handle released in the WASM module
+	closed bool // handle freed AND runtime torn down
 }
 
 func errEngineClosed() error { return &CloakError{msg: "engine is closed"} }
@@ -182,19 +184,28 @@ func (e *Engine) Session() (*Session, error) {
 // Close releases the engine and its WASM resources (io.Closer).
 //
 // Fails if any sessions created from this engine are still live —
-// finish or abort them first. Closing an already-closed engine
-// returns an error.
+// finish or abort them first. A failed Close is retryable; closing
+// an already-closed engine returns an error.
 func (e *Engine) Close() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
 		return errEngineClosed()
 	}
-	if err := e.bridge.engineFree(e.handle); err != nil {
+	// Two retryable stages: free the engine handle, then tear down the
+	// runtime. closed is only set once both succeed, so a failure at
+	// either stage can be retried instead of leaking the runtime.
+	if !e.freed {
+		if err := e.bridge.engineFree(e.handle); err != nil {
+			return err
+		}
+		e.freed = true
+	}
+	if err := e.bridge.close(); err != nil {
 		return err
 	}
 	e.closed = true
-	return e.bridge.close()
+	return nil
 }
 
 // ── Session ────────────────────────────────────────────────────────
@@ -270,6 +281,13 @@ func (s *Session) Abort() error {
 	if s.engine.closed {
 		return errEngineClosed()
 	}
+	// Unlike finish, the ABI does not consume the handle on a failed
+	// session_free — mark consumed only on success so a failed abort
+	// stays retryable (otherwise the leaked handle blocks engine_free
+	// forever).
+	if err := s.engine.bridge.sessionFree(s.handle); err != nil {
+		return err
+	}
 	s.consumed = true
-	return s.engine.bridge.sessionFree(s.handle)
+	return nil
 }

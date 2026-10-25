@@ -68,12 +68,17 @@ func (w *Writer) Write(p []byte) (int, error) {
 		return 0, &CloakError{msg: "write on closed cloak.Writer"}
 	}
 	out, err := w.session.Push(p)
-	if err == nil && len(out) > 0 {
-		err = w.writeAll(out)
-	}
 	if err != nil {
 		_ = w.Abort()
 		return 0, err
+	}
+	if len(out) > 0 {
+		if err := w.writeAll(out); err != nil {
+			_ = w.Abort()
+			// The scanner consumed all of p before the forward failed —
+			// report n accordingly so byte accounting stays correct.
+			return len(p), err
+		}
 	}
 	return len(p), nil
 }

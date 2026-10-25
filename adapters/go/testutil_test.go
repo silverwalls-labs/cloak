@@ -43,14 +43,10 @@ func newTestEngine(t *testing.T) *cloak.Engine {
 	return engine
 }
 
-// artifactPath mirrors the bridge's resolution for tests that need
-// the raw bytes (WithWASM).
+// artifactPath reuses the bridge's resolution (via the test-only
+// export) for tests that need the raw bytes (WithWASM).
 func artifactPath() string {
-	if p := os.Getenv("CLOAK_WASM_PATH"); p != "" {
-		return p
-	}
-	return filepath.Join("..", "..",
-		"target", "wasm32-wasip1", "release", "cloak_wasm.wasm")
+	return cloak.WasmPathForTest()
 }
 
 type vector struct {

@@ -252,10 +252,10 @@ RUSTFLAGS="-Ctarget-feature=+simd128" \
 cargo run --example export-vectors -p cloak-core \
   > adapters/go/testdata/vectors.json
 
-# Run all tests + gates
+# Run all tests + gates (same checks as the go-parity CI job)
 cd adapters/go
 go test ./...
-gofmt -l . && go vet ./...
+test -z "$(gofmt -l .)" && go vet ./...
 ```
 
 ## Benchmarks

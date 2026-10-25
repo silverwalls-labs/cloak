@@ -69,12 +69,24 @@ func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
 	return h.inner.Enabled(ctx, level)
 }
 
+// maxRetainedBufCap bounds the formatting buffer retained between
+// records — one oversized record must not pin its capacity for the
+// lifetime of the handler and every clone sharing the buffer.
+const maxRetainedBufCap = 64 << 10
+
 // Handle formats, redacts, and writes one record (terminator included
 // by the inner handler).
 func (h *Handler) Handle(ctx context.Context, record slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.buf.Reset()
+	defer func() {
+		if h.buf.Cap() > maxRetainedBufCap {
+			// Replace through the shared pointer so clones drop the
+			// oversized backing array too.
+			*h.buf = bytes.Buffer{}
+		}
+	}()
 	if err := h.inner.Handle(ctx, record); err != nil {
 		return err
 	}

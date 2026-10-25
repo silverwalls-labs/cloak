@@ -167,7 +167,11 @@ func newBridge(ctx context.Context, wasmBytes []byte, env map[string]string) (b 
 		}
 	}
 
-	b = &bridge{ctx: ctx, rt: rt, mem: mod.Memory()}
+	// The creation ctx governs compile/instantiate above. Later calls
+	// run on a non-cancellable derivative: an engine often outlives
+	// the (possibly request-scoped) ctx it was created with, and a
+	// dead stored ctx must not break Redact/Finish/Close.
+	b = &bridge{ctx: context.WithoutCancel(ctx), rt: rt, mem: mod.Memory()}
 	var missing []string
 	lookup := func(name string) api.Function {
 		fn := mod.ExportedFunction(name)
@@ -411,6 +415,13 @@ func (b *bridge) finishStats() (Stats, error) {
 	}
 	stats := Stats{Matches: map[string]int{}}
 	if resultPtr == 0 {
+		// Null means "no stats available" — unless the module set the
+		// error slot, which signals a stats-serialization failure
+		// (cloakwasm_finish_stats docs). Don't silently report zero
+		// stats for a stream that did match.
+		if msg := b.lastErrorMsg(); msg != "" {
+			return Stats{}, cloakErrorf("finish_stats: %s", msg)
+		}
 		return stats, nil
 	}
 	data, err := b.readBufResult(resultPtr)

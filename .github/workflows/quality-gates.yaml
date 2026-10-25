@@ -614,7 +614,7 @@ jobs:
           cd "$SMOKE_DIR"
           go mod init cloak-smoke >/dev/null
           go mod edit -replace github.com/silverwalls-labs/cloak/adapters/go="$GITHUB_WORKSPACE/adapters/go"
-          go mod tidy >/dev/null 2>&1
+          go mod tidy
           go run .
 
   # ── Coverage (single platform, instrumented) ─────────────────────
