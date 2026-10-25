@@ -84,10 +84,11 @@ pub static CATALOG: &[RuleSpec] = &[
     RuleSpec {
         id: "gitlab-token",
         anchors: &[b"glpat-", b"glrt-", b"gldt-"],
-        confirm: ConfirmSpec::Pattern("(?:glpat-|glrt-|gldt-)[0-9A-Za-z_-]{20,255}"),
+        // #53: converted from Pattern to Custom for PEM-marker rollback.
+        confirm: ConfirmSpec::Custom(validators::confirm_gitlab_token),
         // Body capped at 255 to bound W; longest anchor is "glpat-" (6 bytes).
         window: 6 + 255,
-        // Anchored DFA match: forward from the anchor only.
+        // Confirm scans forward from the anchor only.
         back: 0,
     },
     RuleSpec {

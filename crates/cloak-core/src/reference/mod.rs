@@ -289,6 +289,11 @@ fn confirm_gitlab(input: &[u8], start: usize) -> Option<usize> {
     while taken < body.len() && taken < BODY_CAP && is_gitlab_body(body[taken]) {
         taken += 1;
     }
+    // #53: roll back consumed PEM marker fragment (mirrors engine).
+    let at_cap = taken == BODY_CAP;
+    if let Some(keep) = rollback_pem_marker_oracle(&body[..taken], at_cap) {
+        taken = keep;
+    }
     (taken >= GITLAB_MIN).then_some(start + prefix.len() + taken)
 }
 
@@ -1544,6 +1549,54 @@ mod tests {
                 confirm_jwt_oracle(input, 0),
                 crate::rules::validators::confirm_jwt(input, 0).map(|m| m.match_end),
                 "oracle/engine jwt rollback divergence on {:?}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    // --- #53 gitlab-token PEM-marker rollback cross-check --------------------
+
+    #[test]
+    fn gitlab_pem_rollback_cross_check_engine() {
+        let mut fixtures: Vec<Vec<u8>> = Vec::new();
+        // END and BEGIN junctions at dash-run widths 0..=12.
+        for run in 0..=12usize {
+            for tail in [
+                b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n".as_slice(),
+                b"BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
+            ] {
+                let mut h = b"glpat-abcdefghij0123456789".to_vec();
+                h.extend(std::iter::repeat_n(b'-', run));
+                h.extend_from_slice(tail);
+                fixtures.push(h);
+            }
+        }
+        // Lookalikes.
+        for tail in [
+            b"-----BEND ".as_slice(),
+            b"-----ENDEND ",
+            b"-----EN(",
+            b"-----END",
+        ] {
+            let mut h = b"glpat-abcdefghij0123456789".to_vec();
+            h.extend_from_slice(tail);
+            fixtures.push(h);
+        }
+        // Short body → rejected after rollback.
+        fixtures.push(b"glpat-abcdefghij01234-----END PRIVATE KEY-----".to_vec());
+        // Cap-cut: 255 body chars with junction at boundary.
+        {
+            let mut h = b"glpat-".to_vec();
+            h.extend(std::iter::repeat_n(b'a', 250));
+            h.extend_from_slice(b"-----END PRIVATE KEY-----");
+            fixtures.push(h);
+        }
+        for input in &fixtures {
+            assert_eq!(
+                confirm_gitlab(input, 0),
+                crate::rules::validators::confirm_gitlab_token(input, 0)
+                    .map(|m| m.match_end),
+                "oracle/engine gitlab rollback divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
         }

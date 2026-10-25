@@ -628,6 +628,43 @@ fn base64url_decode(input: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+// ── gitlab-token ────────────────────────────────────────────────────
+
+/// Custom confirm for `gitlab-token`.
+///
+/// Anchors: `glpat-`, `glrt-`, `gldt-`. Body: `[0-9A-Za-z_-]{20,255}`.
+/// Replaces the DFA Pattern that could not perform PEM-marker rollback
+/// (#53): the greedy body charset includes `-` and `B/D/E/G/I/N`, so it
+/// consumed `-----END` / `-----BEGIN` from abutting PEM trailers.
+pub(crate) fn confirm_gitlab_token(
+    haystack: &[u8],
+    anchor: usize,
+) -> Option<ConfirmMatch> {
+    const PREFIXES: [&[u8]; 3] = [b"glpat-", b"glrt-", b"gldt-"];
+    const BODY_MIN: usize = 20;
+    const BODY_CAP: usize = 255;
+
+    let rest = &haystack[anchor..];
+    let prefix = PREFIXES.iter().find(|p| rest.starts_with(p))?;
+    let body_start = anchor + prefix.len();
+    let cap = (body_start + BODY_CAP).min(haystack.len());
+    let mut pos = body_start;
+    while pos < cap && is_gitlab_body(haystack[pos]) {
+        pos += 1;
+    }
+    let mut body_len = pos - body_start;
+    // #53: roll back consumed PEM marker fragment.
+    let at_cap = body_len == BODY_CAP;
+    if let Some(keep) = rollback_pem_marker(&haystack[body_start..pos], at_cap) {
+        body_len = keep;
+    }
+    (body_len >= BODY_MIN).then(|| ConfirmMatch::full(anchor, body_start + body_len))
+}
+
+fn is_gitlab_body(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
+}
+
 // ── credit-card ─────────────────────────────────────────────────────
 
 /// Custom confirm for `credit-card`.
@@ -1918,6 +1955,69 @@ mod tests {
         assert!(!iin_check(&[]));
         assert!(!iin_check(b"60"));
         assert!(iin_check(b"6510000000000000"));
+    }
+
+    // --- #53 gitlab-token PEM-marker rollback --------------------------------
+
+    #[test]
+    fn gitlab_pem_trailer_rollback() {
+        // glpat + 20 alnum + `-----END PRIVATE KEY-----` — rollback
+        // strips the dash run + word, match ends after the 20 alnum chars.
+        let input = b"glpat-abcdefghij0123456789-----END PRIVATE KEY-----";
+        let m = confirm_gitlab_token(input, 0).unwrap();
+        assert_eq!(m.match_end, 26);
+    }
+
+    #[test]
+    fn gitlab_pem_begin_rollback() {
+        let input = b"glpat-abcdefghij0123456789-----BEGIN RSA PRIVATE KEY-----";
+        let m = confirm_gitlab_token(input, 0).unwrap();
+        assert_eq!(m.match_end, 26);
+    }
+
+    #[test]
+    fn gitlab_pem_rollback_strips_entire_dash_run() {
+        // 7-dash junction — entire run rolled back (not just 5).
+        let input = b"glpat-abcdefghij0123456789-------END PRIVATE KEY-----";
+        let m = confirm_gitlab_token(input, 0).unwrap();
+        assert_eq!(m.match_end, 26);
+    }
+
+    #[test]
+    fn gitlab_pem_rollback_requires_five_dashes() {
+        // 4-dash junction — below the guard threshold, no rollback.
+        // Body ends at the space: 20 alnum + 4 dashes + END = 27 body chars.
+        let input = b"glpat-abcdefghij0123456789----END PRIVATE KEY-----";
+        let m = confirm_gitlab_token(input, 0).unwrap();
+        assert_eq!(m.match_end, 33); // 6 prefix + 20 alnum + 4 dashes + END
+    }
+
+    #[test]
+    fn gitlab_pem_rollback_body_too_short_after() {
+        // Body = 15 alnum + `-----END` = 23 chars. After rollback body is
+        // 15 — below the 20-char minimum — rejected.
+        let input = b"glpat-abcdefghij01234-----END PRIVATE KEY-----";
+        assert!(confirm_gitlab_token(input, 0).is_none());
+    }
+
+    #[test]
+    fn gitlab_pem_rollback_at_cap() {
+        // Body at 255-char cap with junction at the boundary — loose
+        // rollback (1+ dashes, partial word) fires.
+        let mut input = b"glpat-".to_vec();
+        input.extend(std::iter::repeat_n(b'a', 250));
+        input.extend_from_slice(b"-----END PRIVATE KEY-----");
+        // 250 alnum + 5 dashes = 255 = cap → at_cap = true, rollback fires.
+        let m = confirm_gitlab_token(&input, 0).unwrap();
+        assert_eq!(m.match_end, 256); // 6 prefix + 250 alnum
+    }
+
+    #[test]
+    fn gitlab_no_rollback_on_lookalike() {
+        // `-----BEND` is not a PEM marker word — no rollback.
+        let input = b"glpat-abcdefghij0123456789-----BEND ";
+        let m = confirm_gitlab_token(input, 0).unwrap();
+        assert_eq!(m.match_end, 35); // includes dashes + BEND
     }
 
     // --- #53 credit-card PEM-junction trailing separator trim ---------------

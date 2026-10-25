@@ -79,6 +79,16 @@ pub static POSITIVE: &[Vector] = &[
             rule: "gitlab-token",
         }],
     },
+    // #53: PEM-marker rollback — match ends before the dash run.
+    Vector {
+        name: "gitlab-before-pem-trailer",
+        input: b"glpat-abcdefghij0123456789-----END PRIVATE KEY-----",
+        spans: &[ExpectedSpan {
+            start: 0,
+            end: 26,
+            rule: "gitlab-token",
+        }],
+    },
 ];
 
 pub static NEGATIVE: &[Vector] = &[
