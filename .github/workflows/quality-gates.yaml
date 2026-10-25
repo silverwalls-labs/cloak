@@ -518,6 +518,108 @@ jobs:
           print('wheel smoke ok:', output.decode().strip())
           "
 
+  # ── Go parity (E4) ────────────────────────────────────────────────
+
+  go-parity:
+    name: Go Parity
+    needs: wasm-build
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: adapters/go/go.mod
+          cache-dependency-path: adapters/go/go.sum
+
+      - name: Setup Rust (for vector freshness check)
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cloak-wasm
+          path: wasm-artifact
+
+      - name: Verify vectors.json freshness
+        run: |
+          cargo run --example export-vectors -p cloak-core > /tmp/vectors-fresh.json
+          diff adapters/go/testdata/vectors.json /tmp/vectors-fresh.json \
+            || { echo "::error::vectors.json is stale — regenerate with: cargo run --example export-vectors -p cloak-core > adapters/go/testdata/vectors.json"; exit 1; }
+
+      - name: gofmt + go vet
+        working-directory: adapters/go
+        run: |
+          UNFORMATTED=$(gofmt -l .)
+          [ -z "$UNFORMATTED" ] || { echo "::error::gofmt violations:"; echo "$UNFORMATTED"; exit 1; }
+          go vet ./...
+
+      - name: Go parity + streaming + hooks tests
+        # -race: the adapter's concurrency claims (Engine-safe,
+        # Handler clones sharing one lock/buffer) are Go-specific and
+        # only the race detector exercises them.
+        env:
+          CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
+        working-directory: adapters/go
+        run: go test -race ./...
+
+      - name: Fresh-module consume smoke
+        # The Go analog of the npm-pack / wheel smokes: a consumer
+        # module outside the source tree must be able to import the
+        # adapter and redact — verifies the module is complete and
+        # carries no stray repo-relative assumptions beyond the
+        # documented artifact resolution.
+        env:
+          CLOAK_WASM_PATH: ${{ github.workspace }}/wasm-artifact/cloak_wasm.wasm
+        run: |
+          SMOKE_DIR=$(mktemp -d)
+          cat > "$SMOKE_DIR/main.go" <<'EOF'
+          package main
+
+          import (
+              "bytes"
+              "context"
+              "fmt"
+              "log"
+
+              cloak "github.com/silverwalls-labs/cloak/adapters/go"
+          )
+
+          func main() {
+              engine, err := cloak.CreateEngine(context.Background())
+              if err != nil {
+                  log.Fatal(err)
+              }
+              res, err := engine.Redact([]byte("token=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"))
+              if err != nil {
+                  log.Fatal(err)
+              }
+              if bytes.Contains(res.Output, []byte("ghp_Ab")) {
+                  log.Fatal("secret leaked through consumed module")
+              }
+              if !bytes.Contains(res.Output, []byte("[CLOAK:github-token:")) {
+                  log.Fatalf("expected a CLOAK tag, got: %s", res.Output)
+              }
+              if err := engine.Close(); err != nil {
+                  log.Fatal(err)
+              }
+              fmt.Printf("consume smoke ok: %s\n", res.Output)
+          }
+          EOF
+          cd "$SMOKE_DIR"
+          go mod init cloak-smoke >/dev/null
+          go mod edit -replace github.com/silverwalls-labs/cloak/adapters/go="$GITHUB_WORKSPACE/adapters/go"
+          go mod tidy
+          go run .
+
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
   # main.rs coverage via instrumented binary + inherited LLVM_PROFILE_FILE).
