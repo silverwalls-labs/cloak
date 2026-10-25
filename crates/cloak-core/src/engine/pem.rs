@@ -142,7 +142,8 @@ pub(crate) struct PemBeginMatch {
 const CLOAK_TAG_PREFIX: &[u8] = b"[CLOAK:";
 
 /// `-----END ` — the fixed prefix of every private-key END trailer.
-const PEM_END_PREFIX: &[u8] = b"-----END ";
+/// `pub(crate)` only for the #50 tripwire test in `rules::validators`.
+pub(crate) const PEM_END_PREFIX: &[u8] = b"-----END ";
 
 /// Longest backward read of the shared-dash guard (#44): the capped
 /// dash run plus the longest `-----END <key type>` trailer. The engine

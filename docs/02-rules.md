@@ -35,7 +35,7 @@ operators which ones to consider disabling per environment.
 | `gitlab-token` | `glpat-`, `glrt-`, `gldt-` | prefix + `[0-9A-Za-z_-]{20,255}` | Low |
 | `npm-token` | `npm_` | `npm_` + 36 base62 (30 entropy + 6 CRC32) ¹ | Low |
 | `pypi-token` | `pypi-` | `pypi-AgEIcHlwaS5vcmc…` (macaroon prefix) | Low |
-| `jwt` | `eyJ` | three dot-separated base64url segments, first two decode-shaped as JSON (`{"` prefix after decode of header) | Low-med |
+| `jwt` | `eyJ` | three dot-separated base64url segments, first two decode-shaped as JSON (`{"` prefix after decode of header); the signature scan rolls back an abutting PEM marker head (dash run + `END`/`BEGIN`, #50) so marker junctions stay pass-stable | Low-med |
 | `connection-string` | `://` (+ scheme set: `postgres`, `postgresql`, `mysql`, `mongodb`, `redis`, `amqp`, `amqps`…) | `scheme://user:PASSWORD@host` — only the password span is redacted. The userinfo/host split is the LAST `@` (passwords may contain `@`), and a non-empty host is required after it. | Low |
 | `pem-private-key` | `-----BEGIN` | stateful: `-----BEGIN (RSA \|EC \|DSA \|OPENSSH \|ENCRYPTED \|)PRIVATE KEY-----` … `-----END …-----`, multi-line, bounded bail-out (default 16 KiB). An oversized body redacts its first 16 KiB and **suppresses the tail through the END marker** (drain-to-end, F05) — private-key material past the truncation point never reaches the output. An unterminated block swallows everything to EOF the same way. | ~0 |
 

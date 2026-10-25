@@ -529,6 +529,12 @@ pub(crate) fn confirm_jwt(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch
     while sig_end < rest.len() && is_base64url_char(rest[sig_end]) {
         sig_end += 1;
     }
+    // #50: roll back a consumed PEM marker fragment so the trailer/dash-run
+    // bytes the #44 guards read survive redaction (see rollback_pem_marker).
+    let at_cap = sig_end == limit && limit == 2048;
+    if let Some(keep) = rollback_pem_marker(&rest[after_dot2..sig_end], at_cap) {
+        sig_end = after_dot2 + keep;
+    }
     if sig_end == after_dot2 {
         return None;
     }
@@ -553,6 +559,45 @@ pub(crate) fn confirm_jwt(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch
 
 fn is_base64url_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// #50: length of `sig` to keep when its tail is the consumed head of an
+/// adjacent PEM marker junction — dashes and `B/D/E/G/I/N` are all
+/// base64url, so the greedy signature scan eats `-----END` / `-----BEGIN`
+/// and stops only at the space before the key type. Rolls back the
+/// ENTIRE trailing dash run (not just the marker's five dashes) so the
+/// `-----END <type>` trailer and `dashes_before` counts read by the #44
+/// guards (engine/pem.rs: `dashes_before`, `preceded_by_private_key_end`)
+/// are byte-identical before and after redaction. `at_cap` loosens the
+/// word to any prefix of END/BEGIN (including empty) and the run to >= 1:
+/// the 2048-byte scan cap can cut the junction anywhere. The word
+/// literals are tripwire-tested against `engine::pem` constants.
+fn rollback_pem_marker(sig: &[u8], at_cap: bool) -> Option<usize> {
+    const END_WORD: &[u8] = b"END";
+    const BEGIN_WORD: &[u8] = b"BEGIN";
+    let mut i = sig.len();
+    while i > 0 && matches!(sig[i - 1], b'B' | b'D' | b'E' | b'G' | b'I' | b'N') {
+        i -= 1;
+    }
+    let word = &sig[i..];
+    let word_ok = if at_cap {
+        END_WORD.starts_with(word) || BEGIN_WORD.starts_with(word)
+    } else {
+        word == END_WORD || word == BEGIN_WORD
+    };
+    if !word_ok {
+        return None;
+    }
+    let word_start = i;
+    while i > 0 && sig[i - 1] == b'-' {
+        i -= 1;
+    }
+    let min_dashes = if at_cap {
+        1
+    } else {
+        crate::engine::pem::PEM_DASHES.len()
+    };
+    (word_start - i >= min_dashes).then_some(i)
 }
 
 /// Minimal base64url decoder (no padding, URL-safe alphabet).
@@ -1744,6 +1789,112 @@ mod tests {
         assert!(confirm_jwt(b"QUJD.abcd.efgh", 0).is_none());
         // `-`/`_` decode arms of base64url.
         assert!(base64url_decode(b"eyJ-_w").is_some());
+    }
+
+    // --- #50 jwt PEM-marker rollback ---
+
+    /// 108-byte jwt: header(36) `.` payload(27) `.` signature(43).
+    const JWT108: &[u8] = b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+
+    fn jwt_with_tail(tail: &[u8]) -> Vec<u8> {
+        let mut h = JWT108.to_vec();
+        h.extend_from_slice(tail);
+        h
+    }
+
+    #[test]
+    fn jwt_pem_trailer_rollback() {
+        // The #50 repro junction: the greedy scan would eat `-----END`.
+        let h = jwt_with_tail(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
+    }
+
+    #[test]
+    fn jwt_pem_begin_rollback() {
+        // A directly abutting BEGIN marker is rolled back too.
+        let h = jwt_with_tail(b"-----BEGIN RSA PRIVATE KEY-----");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
+    }
+
+    #[test]
+    fn jwt_pem_rollback_strips_entire_dash_run() {
+        // 7-dash junction: the whole run is rolled back, not just 5 dashes,
+        // so `dashes_before` counts are pass-stable.
+        let h = jwt_with_tail(b"-------END PRIVATE KEY-----");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
+    }
+
+    #[test]
+    fn jwt_pem_rollback_requires_five_dashes() {
+        // 4 dashes: below the guard-relevant run, greedy span unchanged
+        // (`----END` stays consumed; already idempotent today).
+        let h = jwt_with_tail(b"----END PRIVATE KEY-----");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 7);
+    }
+
+    #[test]
+    fn jwt_pem_rollback_requires_complete_word() {
+        // Off-cap, a truncated word is not a marker.
+        let h = jwt_with_tail(b"-----EN(");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 7);
+    }
+
+    #[test]
+    fn jwt_pem_rollback_ignores_lookalike_words() {
+        let h = jwt_with_tail(b"-----BEND ");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 9);
+        let h = jwt_with_tail(b"-----ENDEND ");
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 11);
+    }
+
+    #[test]
+    fn jwt_pem_rollback_empty_signature_rejects() {
+        // The "signature" was nothing but the eaten marker: no jwt at all.
+        assert!(
+            confirm_jwt(
+                b"eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.-----END PRIVATE KEY-----",
+                0
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn jwt_pem_rollback_at_window_cap() {
+        // When the greedy scan ends exactly on the 2048-byte cap, the cap
+        // can have cut the junction anywhere; the loose arm rolls back any
+        // dash run >= 1 plus a (possibly empty/partial) END/BEGIN prefix.
+        let junction = b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n";
+        for cut in [1usize, 5, 6, 7, 8] {
+            // `cut` junction bytes lie inside the 2048-byte window.
+            let mut h = Vec::new();
+            h.extend_from_slice(b"eyJhbGciOiJIUzI1NiJ9."); // header + dot (21)
+            let sig_fill = 2048 - cut - 21 - 1 - 1; // minus dot2 and 1-byte payload
+            h.extend_from_slice(b"A."); // payload + dot2
+            h.extend(std::iter::repeat_n(b'S', sig_fill));
+            let junction_start = h.len();
+            assert_eq!(junction_start, 2048 - cut);
+            h.extend_from_slice(junction);
+            assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, junction_start);
+        }
+        // Control: scan stops one byte short of the cap on a non-base64url
+        // byte with a partial word — the loose arm must NOT fire.
+        let mut h = Vec::new();
+        h.extend_from_slice(b"eyJhbGciOiJIUzI1NiJ9.");
+        h.extend_from_slice(b"A.");
+        h.extend(std::iter::repeat_n(b'S', 2047 - 21 - 2 - 7));
+        h.extend_from_slice(b"-----EN!"); // scan stops at `!` = offset 2047
+        h.extend(std::iter::repeat_n(b'!', 64)); // keep rest.len() >= 2048
+        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, 2047);
+    }
+
+    #[test]
+    fn pem_marker_literals_match_engine_pem() {
+        // Tripwire (#50): the rollback's local END/BEGIN literals must
+        // compose into the engine's PEM marker constants.
+        use crate::engine::pem::{PEM_ANCHOR, PEM_DASHES, PEM_END_PREFIX};
+        assert_eq!([PEM_DASHES, b"END ".as_slice()].concat(), PEM_END_PREFIX);
+        assert_eq!([PEM_DASHES, b"BEGIN ".as_slice()].concat(), PEM_ANCHOR);
     }
 
     #[test]

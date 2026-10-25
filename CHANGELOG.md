@@ -11,6 +11,18 @@ a breaking change).
 
 ### Fixed
 
+- **#50** — jwt idempotence vs PEM markers (post-#44 variant): the
+  greedy third-segment (signature) scan consumed the head of an
+  adjacent `-----END <type>` / `-----BEGIN ` marker — dashes and
+  `B/D/E/G/I/N` are all base64url — erasing the trailer bytes the #44
+  shared-dash guard reads, so pass 2 confirmed a fused BEGIN that
+  pass 1 had rejected. The scan now rolls back a trailing dash run
+  (≥5) plus `END`/`BEGIN` marker word — the entire run, keeping
+  `dashes_before` counts pass-stable — with a loosened arm (run ≥1,
+  partial word) when the scan ends exactly at the 2048-byte cap,
+  which can cut the junction anywhere. Mirrored in the reference
+  oracle. Same class deferred for gitlab-token / pypi-token /
+  gcp-api-key / credit-card (follow-up issue).
 - **#49** — PEM streaming ≢ whole-buffer on nested/garbled markers
   (post-#44 variant): when the emission boundary landed between two
   PEM anchors, the later candidate's shared-dash pin could flush the

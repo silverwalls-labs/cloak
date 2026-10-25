@@ -58,7 +58,7 @@ pub static KEY: LazyLock<[u8; 32]> =
 ///
 /// **Strict mode (`CLOAK_FUZZ_STRICT=1`), every input:** the three
 /// correctness equivalences — engine ≡ reference, streaming ≡ whole-buffer,
-/// idempotence. #27, #34, #44 and #49 are all fixed; CI asserts all three
+/// idempotence. #27, #34, #44, #49 and #50 are all fixed; CI asserts all three
 /// unconditionally (corpus replay and generative smoke).
 pub fn strict() -> bool {
     static STRICT: LazyLock<bool> = LazyLock::new(|| match std::env::var("CLOAK_FUZZ_STRICT") {
