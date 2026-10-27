@@ -1,0 +1,65 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "cloak-py"
+# Version-locked to cloak-core (docs/06-embedding.md §Versioning & CI):
+# keep in sync with [workspace.package] version in the root Cargo.toml.
+version = "0.1.0"
+description = "Native Python binding for cloak — guarantee-grade secrets redaction via pyo3"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+classifiers = [
+  # Never published — wheels are CI artifacts, installed from the repo
+  # or a release (see README).
+  "Private :: Do Not Upload",
+]
+
+[project.urls]
+repository = "https://github.com/silverwalls-labs/cloak"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "mypy>=1.14",
+  "ruff>=0.9",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "cloak_py._native"
+# Release profile for PEP 517 builds (`uv sync`): the receipts bench
+# (bench/throughput.py) must never measure a debug build.
+profile = "release"
+
+[tool.uv]
+# maturin builds happen through PEP 517, which uv caches by project
+# metadata alone — without these keys, edits to the Rust side would not
+# trigger a rebuild on `uv sync`.
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "src/**/*.rs" },
+  # .py/.pyi only — a bare python/**/* would also hash __pycache__,
+  # whose import-time churn forces a rebuild on every `uv run`.
+  { file = "python/**/*.py" },
+  { file = "python/**/*.pyi" },
+]
+
+[tool.ruff]
+target-version = "py313"
+src = ["python"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+python_version = "3.13"
+files = ["python", "tests", "bench"]
+mypy_path = ["python"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

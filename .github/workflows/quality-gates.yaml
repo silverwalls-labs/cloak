@@ -623,6 +623,119 @@ jobs:
           go mod tidy
           go run .
 
+  # ── cloak-py native binding (E5) ─────────────────────────────────
+  # No `needs: wasm-build` — cloak-py binds cloak-core directly; the
+  # native module is compiled by maturin through `uv sync`.
+
+  cloak-py-parity:
+    name: cloak-py Parity
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Verify vectors.json freshness
+        run: |
+          cargo run --example export-vectors -p cloak-core > /tmp/vectors-fresh.json
+          diff crates/cloak-py/tests/fixtures/vectors.json /tmp/vectors-fresh.json \
+            || { echo "::error::vectors.json is stale — regenerate with: cargo run --example export-vectors -p cloak-core > crates/cloak-py/tests/fixtures/vectors.json"; exit 1; }
+
+      - name: Install dependencies + build native module (locked)
+        working-directory: crates/cloak-py
+        run: uv sync --locked
+
+      - name: Ruff (lint + format)
+        working-directory: crates/cloak-py
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Mypy (strict)
+        working-directory: crates/cloak-py
+        run: uv run mypy
+
+      - name: Parity + streaming + hooks + threading tests
+        working-directory: crates/cloak-py
+        run: uv run pytest
+
+  cloak-py-wheels:
+    name: cloak-py Wheel (${{ matrix.target }})
+    # abi3-py313: one cp313-abi3 wheel per platform, not per Python
+    # version (docs/06-embedding.md §E5). Artifacts only — wheels are
+    # never published; releases are cut manually from these artifacts.
+    needs: cloak-py-parity
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Build abi3 wheel (maturin, manylinux on Linux)
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          working-directory: crates/cloak-py
+          target: ${{ matrix.target }}
+          args: --release --locked --out dist
+          manylinux: auto
+          rust-toolchain: 1.98.1
+
+      - name: Wheel install-in-clean-venv smoke
+        # Mirrors the cloak-python wheel smoke: the wheel is what a
+        # consumer installs — verify it is complete and functional from
+        # a clean venv outside the source tree.
+        run: |
+          SMOKE_DIR=$(mktemp -d)
+          python3 -m venv "$SMOKE_DIR/venv"
+          "$SMOKE_DIR/venv/bin/pip" install crates/cloak-py/dist/cloak_py-*.whl
+          cd "$SMOKE_DIR"
+          ./venv/bin/python -c "
+          from cloak_py import create_engine
+          engine = create_engine()
+          output, stats = engine.redact('token=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')
+          assert b'ghp_Ab' not in output, 'secret leaked through wheel'
+          assert b'[CLOAK:github-token:' in output, output
+          engine.dispose()
+          print('wheel smoke ok:', output.decode().strip())
+          "
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloak-py-wheel-${{ matrix.target }}
+          path: crates/cloak-py/dist/*.whl
+
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
   # main.rs coverage via instrumented binary + inherited LLVM_PROFILE_FILE).
