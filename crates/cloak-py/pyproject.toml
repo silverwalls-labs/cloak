@@ -35,6 +35,10 @@ module-name = "cloak_py._native"
 profile = "release"
 
 [tool.uv]
+# Dependency cooldown (supply chain): wait out newly published versions
+# before resolving them — a malicious release gets yanked well within a
+# week. Semgrep enforces this on every pyproject configuring uv.
+exclude-newer = "7 days"
 # maturin builds happen through PEP 517, which uv caches by project
 # metadata alone — without these keys, edits to the Rust side would not
 # trigger a rebuild on `uv sync`.

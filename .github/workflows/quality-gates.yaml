@@ -764,7 +764,11 @@ jobs:
       - name: Unit Tests with Coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --lib --lcov --output-path coverage/unit.lcov
+          # cloak-py is excluded: it has no Rust tests by design (test =
+          # false — all behavior is pytest-covered in cloak-py-parity), so
+          # its lines would only deflate the unit denominator.
+          cargo llvm-cov --workspace --lib --lcov --output-path coverage/unit.lcov \
+            --ignore-filename-regex 'crates/cloak-py/'
 
       - name: Upload Coverage
         if: ${{ !cancelled() }}
