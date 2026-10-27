@@ -1169,6 +1169,23 @@ const PEM_KEY_TYPES: [&[u8]; 6] = [
     b"PRIVATE KEY",
 ];
 
+/// After a PEM block close, check whether the END marker's trailing
+/// dashes are fused with a new `-----BEGIN ` anchor (junction 5–9, #46).
+/// Oracle-independent mirror of `engine::pem::fused_begin_backup`.
+fn fused_begin_backup(input: &[u8], end_line_end: usize) -> usize {
+    for back in 1..=5usize {
+        if let Some(candidate) = end_line_end.checked_sub(back) {
+            if input
+                .get(candidate..candidate + PEM_BEGIN.len())
+                .is_some_and(|s| s == PEM_BEGIN)
+            {
+                return back;
+            }
+        }
+    }
+    0
+}
+
 /// Find all PEM private-key blocks. Returns match spans: `start..end` is
 /// the full extent (body, plus the suppressed tail and END line for
 /// oversized blocks), `redact_start..redact_end` the sub-span covered by
@@ -1214,7 +1231,11 @@ fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
                             rule: PEM,
                         });
                     }
-                    pos = end_line_end;
+                    // Fused junction (#46): the END marker's trailing
+                    // dashes may be the leading dashes of a new BEGIN
+                    // anchor. Back up so the next iteration finds it.
+                    let back = fused_begin_backup(input, end_line_end);
+                    pos = end_line_end - back;
                     continue;
                 } else {
                     // No END marker: bail-out over the remaining body
@@ -1241,37 +1262,9 @@ fn find_pem_blocks(input: &[u8]) -> Vec<RefMatch> {
     blocks
 }
 
-/// Consecutive dashes immediately before `pos`, capped at 10. Mirrors
-/// the engine's guard.
-fn dashes_before(input: &[u8], pos: usize) -> usize {
-    let mut n = 0;
-    while n < 10 && pos > n && input[pos - n - 1] == b'-' {
-        n += 1;
-    }
-    n
-}
-
-/// True when a `-----END <private-key type>` trailer ends exactly at
-/// `pos`. Mirrors the engine's guard.
-fn preceded_by_private_key_end(input: &[u8], pos: usize) -> bool {
-    const END_PREFIX: &[u8] = b"-----END ";
-    PEM_KEY_TYPES.iter().any(|&key_type| {
-        pos.checked_sub(END_PREFIX.len() + key_type.len())
-            .is_some_and(|start| {
-                &input[start..start + END_PREFIX.len()] == END_PREFIX
-                    && &input[start + END_PREFIX.len()..pos] == key_type
-            })
-    })
-}
-
 fn confirm_pem_begin_ref(input: &[u8], after_begin: usize) -> Option<(usize, &'static [u8])> {
-    // Shared-dash guard (#44): mirrors the engine's confirm_pem_begin.
-    let begin_start = after_begin.saturating_sub(PEM_BEGIN.len());
-    let dashes = dashes_before(input, begin_start);
-    if (1..=4).contains(&dashes) || (dashes == 0 && preceded_by_private_key_end(input, begin_start))
-    {
-        return None;
-    }
+    // Fused markers (junction 5–9 dashes, #46) are accepted — the
+    // `[CLOAK:` idempotence guard prevents re-redaction on pass 2.
     let rest = input.get(after_begin..)?;
     for &key_type in &PEM_KEY_TYPES {
         if rest.starts_with(key_type) {

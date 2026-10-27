@@ -119,7 +119,7 @@ fn repro_pypi_pem_trailer() {
     let (engine, key) = engine_and_key();
     let mut input = pypi55();
     input.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-    check_shape(&engine, &key, "issue-53-pypi-repro", &input, 1, true);
+    check_shape(&engine, &key, "issue-53-pypi-repro", &input, 2, false);
 }
 
 #[test]
@@ -129,10 +129,7 @@ fn pypi_trailer_junction_sweep() {
         let mut input = pypi55();
         input.resize(input.len() + dashes, b'-');
         input.extend_from_slice(b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-        let (matches, visible) = match dashes {
-            0..=4 => (2u64, false),
-            _ => (1, true),
-        };
+        let (matches, visible) = (2u64, false);
         check_shape(
             &engine,
             &key,
@@ -155,8 +152,6 @@ fn pypi_begin_junction_sweep() {
         );
         let (matches, visible) = match dashes {
             0..=4 => (1u64, true),
-            5 => (2, false),
-            6..=9 => (1, true),
             _ => (2, false),
         };
         check_shape(
