@@ -22,7 +22,7 @@ import io
 from collections.abc import Buffer
 from typing import BinaryIO
 
-from .engine import CloakEngine, CloakStats
+from .engine import CloakEngine, CloakStats, _to_bytes
 
 __all__ = ["CloakWriter"]
 
@@ -89,7 +89,9 @@ class CloakWriter(io.RawIOBase):
         """
         if self.closed:
             raise ValueError("I/O operation on closed file")
-        data = bytes(b)
+        # Rejects int/list/… with TypeError — bytes(500) would otherwise
+        # silently "write" 500 zero bytes.
+        data = _to_bytes(b)
         try:
             out = self._session.push(data)
             if out:

@@ -9,9 +9,13 @@ Rust via ``cargo run --example export-vectors -p cloak-core``.
 
 from __future__ import annotations
 
+from array import array
+from typing import cast
+
 import pytest
 
 from cloak_py import CloakEngine
+from cloak_py.engine import Bytes
 
 from .conftest import VECTORS, Vector
 
@@ -73,3 +77,38 @@ def test_redact_returns_stats(engine: CloakEngine) -> None:
     stats = engine.redact("token=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").stats
     assert stats["bytes_processed"] > 0
     assert stats["matches"]["github-token"] >= 1
+
+
+# ── Input coercion ─────────────────────────────────────────────────
+# int is the dangerous one: bytes(1_000_000) is a megabyte of zeros,
+# not an error — a naive bytes(data) fallback would silently scan it
+# and lie in bytes_processed. bool (bytes(True) == b"\x01") and any
+# iterable are the same trap.
+
+
+@pytest.mark.parametrize("bad", [12345, 10**9, 12.5, None, True, ["a", "b"], {"a": 1}])
+def test_redact_rejects_non_buffer_input(engine: CloakEngine, bad: object) -> None:
+    with pytest.raises(TypeError, match="bytes-like"):
+        engine.redact(cast("Bytes", bad))
+
+
+@pytest.mark.parametrize("bad", [12345, 12.5, None, True])
+def test_push_rejects_non_buffer_input(engine: CloakEngine, bad: object) -> None:
+    session = engine.session()
+    with pytest.raises(TypeError, match="bytes-like"):
+        session.push(cast("Bytes", bad))
+    # The failed coercion must not consume the session.
+    session.push(b"clean")  # still usable
+    session.finish()
+
+
+def test_push_accepts_buffer_protocol_objects(engine: CloakEngine) -> None:
+    # array implements the buffer protocol like bytes/bytearray/memoryview;
+    # runtime accepts any Buffer (a deliberate superset of the typed
+    # `Bytes` union).
+    session = engine.session()
+    out = session.push(
+        cast("Bytes", array("B", b"token=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\n"))
+    )
+    out += session.finish().output
+    assert b"[CLOAK:github-token:" in out, f"array input not redacted: {out!r}"

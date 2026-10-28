@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import io
 import logging
-from collections.abc import Iterator
+from collections.abc import Buffer, Iterator
 from typing import BinaryIO, cast
 
 import pytest
@@ -136,6 +136,20 @@ def test_writer_write_after_close_raises(engine: CloakEngine) -> None:
     writer.close()
     with pytest.raises(ValueError, match="closed"):
         writer.write(b"more")
+
+
+@pytest.mark.parametrize("bad", [12345, 12.5, None, True, ["a", "b"]])
+def test_writer_rejects_non_buffer_input(engine: CloakEngine, bad: object) -> None:
+    # bytes(500) would silently write 500 zero bytes through the scanner —
+    # int (and every non-Buffer type) must raise TypeError instead.
+    buf = io.BytesIO()
+    writer = CloakWriter(engine, buf)
+    with pytest.raises(TypeError, match="bytes-like"):
+        writer.write(cast("Buffer", bad))
+    # The writer (and its session) must stay usable after the rejection.
+    writer.write(DIRTY_INPUT)
+    writer.close()
+    assert b"[CLOAK:github-token:" in buf.getvalue()
 
 
 def test_writer_works_through_buffered_writer(engine: CloakEngine) -> None:

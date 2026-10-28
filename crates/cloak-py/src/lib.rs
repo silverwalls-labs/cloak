@@ -32,7 +32,7 @@
 
 #![allow(unsafe_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
@@ -87,16 +87,28 @@ struct SessionInner {
 }
 
 /// Compiled cloak engine. Shareable across threads; sessions created
-/// from it keep it alive (dispose refuses while any are live).
+/// from it keep it alive (dispose refuses while any are live, and while
+/// any scan is in flight).
 #[pyclass(name = "Engine", module = "cloak_py._native")]
 struct PyEngine {
-    /// `None` after `dispose()`.
-    engine: Option<Arc<Engine>>,
+    /// `None` after `dispose()`. Interior mutability instead of a
+    /// `&mut self` `dispose`: a `&mut` method conflicts with any in-flight
+    /// `&self` scan at pyo3's borrow-check level and surfaces as
+    /// `RuntimeError: Already borrowed` — with the lock, an overlapping
+    /// dispose instead raises a coherent `CloakError` (or waits for the
+    /// clone and takes the Arc count check below).
+    engine: Mutex<Option<Arc<Engine>>>,
 }
 
 impl PyEngine {
-    fn live(&self) -> PyResult<&Arc<Engine>> {
-        self.engine.as_ref().ok_or_else(disposed_err)
+    /// Clone the live engine `Arc`. The lock is held only for the clone,
+    /// never across a scan.
+    fn live(&self) -> PyResult<Arc<Engine>> {
+        self.engine
+            .lock()
+            .map_err(|_| CloakError::new_err("engine state lock poisoned"))?
+            .clone()
+            .ok_or_else(disposed_err)
     }
 }
 
@@ -113,7 +125,7 @@ impl PyEngine {
         let engine = Engine::new(&config)
             .map_err(|e| CloakError::new_err(format!("engine build failed: {e}")))?;
         Ok(Self {
-            engine: Some(Arc::new(engine)),
+            engine: Mutex::new(Some(Arc::new(engine))),
         })
     }
 
@@ -123,7 +135,7 @@ impl PyEngine {
         py: Python<'py>,
         data: &[u8],
     ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyDict>)> {
-        let engine = Arc::clone(self.live()?);
+        let engine = self.live()?;
         let mut out = Vec::with_capacity(data.len().min(OUTPUT_CAPACITY_CAP));
         // GIL released for the whole scan. `data` borrows an immutable
         // Python `bytes` kept alive by the caller's argument reference.
@@ -139,7 +151,7 @@ impl PyEngine {
 
     /// Create a streaming session. The session holds the engine alive.
     fn session(&self) -> PyResult<PySession> {
-        let engine = Arc::clone(self.live()?);
+        let engine = self.live()?;
         // SAFETY: `Session` only borrows `&Engine`. The Arc clone stored
         // alongside it in `SessionInner` pins the Engine at a stable heap
         // address for the session's whole lifetime, and the field order
@@ -156,15 +168,26 @@ impl PyEngine {
     }
 
     /// Release the engine. Idempotent; refuses while sessions are live
-    /// (mirrors cloakwasm_engine_free).
-    fn dispose(&mut self) -> PyResult<()> {
-        match self.engine.take() {
+    /// or a scan is in flight (mirrors cloakwasm_engine_free). Refusal
+    /// raises `CloakError`, never pyo3's borrow-check `RuntimeError`.
+    fn dispose(&self) -> PyResult<()> {
+        let mut guard = self
+            .engine
+            .lock()
+            .map_err(|_| CloakError::new_err("engine state lock poisoned"))?;
+        match guard.take() {
             None => Ok(()), // already disposed
             Some(engine) => {
+                // Count > 1: live sessions (their `SessionInner` holds a
+                // clone) or an in-flight `redact`/`push`/`finish` holding
+                // a transient clone. Safety never depends on this check —
+                // the sessions' own clones keep the Engine alive — it
+                // only surfaces leaks, mirroring cloak-wasm.
                 if Arc::strong_count(&engine) > 1 {
-                    self.engine = Some(engine);
+                    *guard = Some(engine);
                     return Err(CloakError::new_err(
-                        "cannot dispose engine with live sessions: finish or abort them first",
+                        "cannot dispose engine while in use: finish or abort live sessions, \
+                         and let in-flight scans complete first",
                     ));
                 }
                 Ok(())

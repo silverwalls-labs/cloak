@@ -41,7 +41,7 @@ session = engine.session()
 out = session.push(chunk)  # may withhold carry-over bytes
 tail, stats = session.finish()  # flush + per-rule counts
 
-engine.dispose()  # refuses while sessions are live
+engine.dispose()  # refuses while sessions are live or scans are in flight
 ```
 
 ### stdout/stderr hook (file-like wrapper)
@@ -87,6 +87,19 @@ misuse) raise `cloak_py.CloakError`. A Rust panic is a bug: it crosses
 the boundary as `pyo3.PanicException` (a `BaseException`), deliberately
 not remapped so it escapes `except Exception` handlers such as the
 logging hot path.
+
+`dispose()` refuses with `CloakError` while sessions are live or a scan
+is in flight (an overlapping dispose never surfaces as a pyo3 borrow
+error); the engine stays usable after a refusal. It is idempotent once
+released.
+
+One stderr notice exists by design: when the config references a digest
+key env var (the default references `CLOAK_DIGEST_KEY`) and that var is
+not set, core prints
+`cloak: <VAR> not set; using ephemeral digest key (correlation limited to this process)`
+once at engine construction — a redaction-guarantee warning, not a
+Python warning. Set the env var (or pass `env=` to `create_engine`) to
+silence it.
 
 ## Development
 

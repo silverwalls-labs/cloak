@@ -18,7 +18,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from cloak_py import CloakEngine
+from cloak_py import CloakEngine, CloakError, create_engine
+
+from .conftest import CONFIG, KEY_MATERIAL
 
 DIRTY = (
     b"INFO user=alice@example.com did a thing\n"
@@ -101,3 +103,33 @@ def test_concurrent_push_on_one_session_fails_cleanly(
         ), f"background push must fail cleanly if at all: {errors!r}"
     elif not overlapped:
         pytest.skip("pushes did not overlap on this run; borrow path not exercised")
+
+
+def test_dispose_during_inflight_scan_is_a_coherent_cloak_error() -> None:
+    # A dispose landing mid-scan must raise CloakError ("while in use"),
+    # never pyo3's borrow-check RuntimeError("Already borrowed") — that
+    # is why dispose is `&self` with an internal lock, not `&mut self`.
+    # The session created up front pins the engine Arc, so the refusal
+    # is deterministic whether or not the scan is still running when
+    # dispose lands.
+    engine = create_engine(CONFIG, {"CLOAK_DIGEST_KEY": KEY_MATERIAL})
+    session = engine.session()
+    big = b"clean log line with no secrets at all\n" * (16 * 1024 * 1024 // 38)
+
+    def scanner() -> None:
+        engine.redact(big)
+
+    thread = threading.Thread(target=scanner)
+    thread.start()
+    time.sleep(0.05)  # dispose lands mid-scan (~16 MB, far from done)
+    with pytest.raises(CloakError, match="in use"):
+        engine.dispose()
+    thread.join()
+
+    # A refused dispose leaves the engine usable; it succeeds once the
+    # session is released and the scan has completed.
+    assert engine.redact(b"clean").output == b"clean"
+    session.abort()
+    engine.dispose()
+    with pytest.raises(CloakError, match="engine disposed"):
+        engine.redact(b"x")

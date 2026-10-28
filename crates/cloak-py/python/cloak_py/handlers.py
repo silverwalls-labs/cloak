@@ -36,8 +36,9 @@ class CloakHandler(logging.Handler):
     """Redact formatted log records through a cloak engine.
 
     Safe to share across logging threads (the base handler lock guards
-    ``emit``) **only if** the engine is not used elsewhere concurrently —
-    the engine itself is not thread-safe.
+    ``emit``), and safe to share the engine with other concurrent users:
+    ``redact`` scans through a fresh per-call session, and the engine is
+    shareable across threads by contract (``test_threading.py``).
 
     :param engine: Engine used for one-shot redaction. Caller owns it —
                    ``close()`` does not dispose it.
@@ -55,8 +56,11 @@ class CloakHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Format, redact, and write one record.
 
-        Errors go through :meth:`logging.Handler.handleError` — no
-        exception escapes the logging hot path.
+        Ordinary errors go through :meth:`logging.Handler.handleError` —
+        no exception escapes the logging hot path. A Rust panic is the
+        deliberate exception: ``PanicException`` is a ``BaseException``,
+        so it must not be swallowed (a panic means redaction stopped —
+        failing silent is worse than crashing loudly).
         """
         try:
             line = self.format(record).encode("utf-8")

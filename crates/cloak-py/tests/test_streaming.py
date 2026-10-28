@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from cloak_py import CloakEngine, CloakError
+from cloak_py import CloakEngine, CloakError, create_engine
 
 from .conftest import VECTORS
 
@@ -124,3 +124,31 @@ def test_dispose_with_live_session_raises(engine: CloakEngine) -> None:
     with pytest.raises(CloakError, match="live sessions"):
         engine.dispose()
     session.abort()  # release so the module-scoped engine can dispose cleanly
+
+
+def test_dispose_is_idempotent() -> None:
+    engine = create_engine()
+    engine.dispose()
+    engine.dispose()  # second call is a no-op
+
+
+def test_engine_methods_after_dispose_raise() -> None:
+    engine = create_engine()
+    engine.dispose()
+    with pytest.raises(CloakError, match="engine disposed"):
+        engine.redact(b"x")
+    with pytest.raises(CloakError, match="engine disposed"):
+        engine.session()
+
+
+def test_engine_usable_after_refused_dispose() -> None:
+    # A refused dispose (live session) must leave the engine untouched:
+    # the native Arc was put back, not dropped.
+    engine = create_engine()
+    session = engine.session()
+    with pytest.raises(CloakError, match="in use"):
+        engine.dispose()
+    out = engine.redact("token=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").output
+    assert b"[CLOAK:github-token:" in out
+    session.abort()
+    engine.dispose()  # succeeds now

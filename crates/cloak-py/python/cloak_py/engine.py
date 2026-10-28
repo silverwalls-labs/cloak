@@ -13,7 +13,8 @@ runtime borrow checking) — one stream, one caller at a time.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import threading
+from collections.abc import Buffer, Mapping
 from typing import NamedTuple, TypedDict
 
 from . import _native
@@ -32,6 +33,11 @@ __all__ = [
 
 Bytes = str | bytes | bytearray | memoryview
 """Accepted input types — ``str`` is encoded as UTF-8 at the boundary."""
+
+# Serializes the process-wide os.environ swap in create_engine(env=...)
+# between concurrent calls from this module: two overlapping swaps would
+# restore into each other's swap and corrupt the restored environment.
+_ENV_SWAP_LOCK = threading.Lock()
 
 
 class CloakStats(TypedDict):
@@ -52,11 +58,26 @@ class RedactResult(NamedTuple):
     """Per-stream statistics."""
 
 
-def _to_bytes(data: Bytes) -> bytes:
-    """Coerce accepted input types to ``bytes`` (``str`` → UTF-8)."""
+def _to_bytes(data: object) -> bytes:
+    """Coerce accepted input types to ``bytes`` (``str`` → UTF-8).
+
+    Rejects everything else with ``TypeError`` — deliberately so: the
+    obvious ``bytes(data)`` fallback would silently accept ``int``
+    (``bytes(1000000)`` is a megabyte of zeros, not an error), lists,
+    and any iterable, scanning garbage the caller never intended and
+    letting a large ``int`` allocate gigabytes. The Node adapter rejects
+    numbers at its boundary too — this keeps error parity.
+    """
     if isinstance(data, str):
         return data.encode("utf-8")
-    return bytes(data)
+    if isinstance(data, Buffer):
+        # bytes, bytearray, memoryview, array, mmap, … — but NOT int,
+        # str, or list (none implement the buffer protocol).
+        return bytes(data)
+    raise TypeError(
+        f"cloak input must be str or a bytes-like object "
+        f"(bytes, bytearray, memoryview, …), not {type(data).__name__}"
+    )
 
 
 class CloakSession:
@@ -128,8 +149,10 @@ class CloakEngine:
     def dispose(self) -> None:
         """Release the engine.
 
-        Fails if any sessions created from this engine are still live —
-        finish or abort them first. Idempotent once released.
+        Fails with :class:`CloakError` while sessions created from this
+        engine are still live or a scan is in flight — finish or abort
+        the sessions, let scans complete, then retry. The engine stays
+        usable after a refused dispose. Idempotent once released.
         """
         self._native.dispose()
 
@@ -158,10 +181,16 @@ def create_engine(
                    for the mapping *during construction only* (the native
                    engine reads the process environment exactly once, in
                    its constructor) — mirroring the WASM adapter, where
-                   an explicit mapping is the module's entire
-                   environment. The swap is process-wide: do not call
-                   with ``env`` concurrently with code that reads
-                   ``os.environ``.
+                   an explicit mapping is the module's entire environment.
+                   The swap is process-wide: code reading ``os.environ``
+                   concurrently (other threads, signal handlers, ``atexit``)
+                   briefly sees only the mapping. Concurrent
+                   ``create_engine(env=...)`` calls are serialized by a
+                   module lock; other environment readers are not — do not
+                   call with ``env`` while unrelated code reads the
+                   environment. Core deliberately rejects inline digest
+                   keys (``config.rs``), so this swap is the only way to
+                   inject a key programmatically.
 
     Example::
 
@@ -181,12 +210,16 @@ def create_engine(
     if env is None:
         return CloakEngine(_native.Engine(toml))
 
-    saved = dict(os.environ)
-    os.environ.clear()
-    os.environ.update(env)
-    try:
-        native = _native.Engine(toml)
-    finally:
+    # Serialized only between create_engine calls (see
+    # _ENV_SWAP_LOCK): two concurrent env-swapped builds would
+    # otherwise restore into each other's swap.
+    with _ENV_SWAP_LOCK:
+        saved = dict(os.environ)
         os.environ.clear()
-        os.environ.update(saved)
+        os.environ.update(env)
+        try:
+            native = _native.Engine(toml)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
     return CloakEngine(native)
