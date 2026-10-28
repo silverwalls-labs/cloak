@@ -566,9 +566,11 @@ fn is_base64url_char(b: u8) -> bool {
 /// base64url, so the greedy signature scan eats `-----END` / `-----BEGIN`
 /// and stops only at the space before the key type. Rolls back the
 /// ENTIRE trailing dash run (not just the marker's five dashes) so the
-/// `-----END <type>` trailer and `dashes_before` counts read by the #44
-/// guards (engine/pem.rs: `dashes_before`, `preceded_by_private_key_end`)
-/// are byte-identical before and after redaction. `at_cap` loosens the
+/// `-----END <type>` trailer is byte-identical before and after
+/// redaction: the trailer's trailing dashes may be the leading dashes
+/// of a fused `-----BEGIN ` anchor (#46), and eating any part of the
+/// run would change the junction geometry between passes. `at_cap`
+/// loosens the
 /// word to any prefix of END/BEGIN (including empty) and the run to >= 1:
 /// the 2048-byte scan cap can cut the junction anywhere. A tripwire test
 /// (`pem_marker_literals_match_engine_pem`) pins the END/BEGIN marker
@@ -843,7 +845,8 @@ pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<Conf
     }
     // Must end on a digit (not a trailing separator). #53: trim ALL
     // trailing separators — a single `if` left 4 of 5 PEM-junction
-    // dashes in the match, breaking the shared-dash guard on pass 2.
+    // dashes in the match, destroying the `-----END ` trailer and
+    // changing the junction geometry between passes.
     while end > 0 && !rest[end - 1].is_ascii_digit() {
         end -= 1;
     }
@@ -1989,7 +1992,8 @@ mod tests {
     #[test]
     fn jwt_pem_rollback_strips_entire_dash_run() {
         // 7-dash junction: the whole run is rolled back, not just 5 dashes,
-        // so `dashes_before` counts are pass-stable.
+        // so the trailer stays intact and the junction geometry is
+        // pass-stable (#46 accepts fused junctions 5–9).
         let h = jwt_with_tail(b"-------END PRIVATE KEY-----");
         assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
     }
@@ -2172,9 +2176,9 @@ mod tests {
 
     #[test]
     fn gcp_pem_begin_many_dashes_accepted() {
-        // 5+ body dashes: the following marker is already valid on pass
-        // 1 (the shared-dash guard passes), so accepting the token keeps
-        // redaction idempotent.
+        // 5+ body dashes: the following marker is already valid on
+        // pass 1 (junction ≥ 5 — fused or independent, #46 confirms
+        // both), so accepting the token keeps redaction idempotent.
         for dashes in 5..=12usize {
             let mut input = b"AIza".to_vec();
             input.extend(std::iter::repeat_n(b'a', 35 - dashes));

@@ -566,8 +566,10 @@ fn is_b64url_oracle(b: u8) -> bool {
 /// Mirrors the engine's #50 rollback (`rules::validators::rollback_pem_marker`):
 /// length of `sig` to keep when its tail is the consumed head of an adjacent
 /// PEM marker junction. Rolls back the entire trailing dash run so the
-/// trailer/dash-run bytes the shared-dash guard (#44) reads survive
-/// redaction; `at_cap` loosens the word to any prefix of END/BEGIN and the
+/// trailer/dash-run bytes survive redaction — the trailer's trailing
+/// dashes may be the leading dashes of a fused `-----BEGIN ` anchor
+/// (#46), and the junction geometry must be identical on every pass;
+/// `at_cap` loosens the word to any prefix of END/BEGIN and the
 /// run to >= 1 (the 2048-byte cap can cut the junction anywhere).
 fn rollback_pem_marker_oracle(sig: &[u8], at_cap: bool) -> Option<usize> {
     const END_WORD: &[u8] = b"END";
@@ -1173,14 +1175,13 @@ const PEM_KEY_TYPES: [&[u8]; 6] = [
 /// dashes are fused with a new `-----BEGIN ` anchor (junction 5–9, #46).
 /// Oracle-independent mirror of `engine::pem::fused_begin_backup`.
 fn fused_begin_backup(input: &[u8], end_line_end: usize) -> usize {
-    for back in 1..=5usize {
-        if let Some(candidate) = end_line_end.checked_sub(back) {
-            if input
+    for back in 1..=PEM_DASHES.len() {
+        if let Some(candidate) = end_line_end.checked_sub(back)
+            && input
                 .get(candidate..candidate + PEM_BEGIN.len())
                 .is_some_and(|s| s == PEM_BEGIN)
-            {
-                return back;
-            }
+        {
+            return back;
         }
     }
     0

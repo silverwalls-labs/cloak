@@ -121,13 +121,17 @@ impl Engine {
         // otherwise carry-over drops to 0 when all regular rules are
         // disabled, and a PEM BEGIN anchor split across chunks is flushed
         // before the scanner can match it. The extra PEM_BACK_WINDOW
-        // guarantees a PEM anchor's first resolvable evaluation always has
-        // its full backward guard context (#49): an unresolved candidate
-        // satisfies `cand.start > combined_len - pem_confirm_window()`, so
-        // with `max_window >= pem_confirm_window() + PEM_BACK_WINDOW` the
-        // pre-adjustment boundary `combined_len - max_window` sits below
-        // `cand.start - PEM_BACK_WINDOW`, and every later adjustment only
-        // lowers it.
+        // keeps a PEM anchor's first resolvable evaluation at a fixed
+        // distance from the carry start (#49 heritage; since #46 the
+        // confirm step itself reads no backward bytes): an unresolved
+        // candidate satisfies `cand.start > combined_len -
+        // pem_confirm_window()`, so with `max_window >=
+        // pem_confirm_window() + PEM_BACK_WINDOW` the pre-adjustment
+        // boundary `combined_len - max_window` sits below `cand.start -
+        // PEM_BACK_WINDOW`, and every later adjustment only lowers it.
+        // The confirm-decision memo below therefore records every
+        // anchor's outcome under the same carry geometry at any chunk
+        // size, and the `authoritative` debug_assert holds.
         if pem_enabled {
             max_window = max_window.max(pem::pem_confirm_window() + pem::PEM_BACK_WINDOW);
         }
@@ -497,29 +501,32 @@ impl Session<'_> {
                 }
                 // Context-prefix bytes were consumed by the PEM layer —
                 // like the whole-buffer path's PEM-body regions, they are
-                // not re-confirmed (#27). The threshold is relaxed by 5
-                // to allow fused junctions (#46): the END marker's
-                // trailing dashes (last 5 bytes of ctx) may be the
-                // leading dashes of a new -----BEGIN anchor. Emission
-                // still starts at ctx_len (those dashes were already
-                // written by process_pem_body), so the gap emits only
-                // the BEGIN line text past the shared dashes.
-                if cand.start < self.ctx_len.saturating_sub(5) {
+                // not re-confirmed (#27). The threshold is relaxed by
+                // `PEM_DASHES.len()` to allow fused junctions (#46): the
+                // END marker's trailing dashes (the last bytes of ctx)
+                // may be the leading dashes of a new -----BEGIN anchor.
+                // Emission still starts at ctx_len (those dashes were
+                // already written by process_pem_body), so the gap emits
+                // only the BEGIN line text past the shared dashes.
+                if cand.start < self.ctx_len.saturating_sub(pem::PEM_DASHES.len()) {
                     continue;
                 }
                 let resolvable = is_final || cand.start + pem_window <= combined_len;
                 if !resolvable {
                     continue;
                 }
-                // Confirm each anchor ONCE (#49): the first resolvable
-                // evaluation sees the full backward guard context (the
-                // `max_window` floor in `Engine::new`), and its outcome is
-                // memoized by absolute offset. Re-scans after a flush reuse
-                // the decision instead of re-deciding against a carry whose
-                // backward context a neighboring candidate's shared-dash
-                // pin may have bisected — `confirm_pem_begin`'s guards fail
-                // open on missing backward bytes, so a truncated re-check
-                // could flip a full-context rejection into a confirm.
+                // Confirm each anchor ONCE (#49): its outcome is memoized
+                // by absolute offset and reused on every re-scan after a
+                // flush. Since #46 removed the shared-dash guard,
+                // `confirm_pem_begin` is a pure forward-looking function
+                // of the stream bytes, so a re-derivation would return
+                // the same result — the memo is now a decision cache and
+                // uniform-first-evaluation aid rather than a correctness
+                // requirement. The first resolvable evaluation happens at
+                // a fixed distance from the carry start (the
+                // `max_window` floor in `Engine::new`), and the
+                // `authoritative` check below records only those
+                // full-geometry evaluations.
                 let abs = self.carry_abs + cand.start as u64;
                 let decision = match self.pem_decisions.binary_search_by_key(&abs, |e| e.0) {
                     Ok(i) => self.pem_decisions[i].1,
@@ -591,8 +598,7 @@ impl Session<'_> {
                         }
                         // Fused junction (#46): the END marker's
                         // trailing dashes may start a new -----BEGIN.
-                        let back =
-                            pem::fused_begin_backup(&self.carry_over, end_line_end);
+                        let back = pem::fused_begin_backup(&self.carry_over, end_line_end);
                         pem_scan_pos = end_line_end - back;
                     } else if is_final {
                         // No END in buffer and this is the final flush —
@@ -740,12 +746,13 @@ impl Session<'_> {
             }
         }
 
-        // Shared-dash pin (#44): keep PEM_BACK_WINDOW bytes of backward
-        // context before every retained PEM candidate. Since #49 this is a
-        // retention aid only — it is a single forward pass, so a later
-        // candidate's pin can still land inside an earlier candidate's
-        // guard window — and decision stability across re-scans is owned
-        // by the confirm-decision memo above.
+        // PEM retention pin (#44/#49 heritage): keep PEM_BACK_WINDOW
+        // bytes of backward context before every retained PEM
+        // candidate. Since #49 it is a retention aid only, and since
+        // #46 removed the backward shared-dash guard there is no guard
+        // window to protect — it only holds candidates in the carry
+        // until their confirm window resolves; decision stability
+        // across re-scans is owned by the confirm-decision memo above.
         if !is_final {
             for cand in &self.candidates {
                 if cand.rule != self.engine.pem_rule_idx {

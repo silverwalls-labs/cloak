@@ -142,17 +142,22 @@ pub(crate) struct PemBeginMatch {
 const CLOAK_TAG_PREFIX: &[u8] = b"[CLOAK:";
 
 /// `-----END ` — the fixed prefix of every private-key END trailer.
-/// `pub(crate)` only for the #50 tripwire test in `rules::validators`.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `pub(crate)` + `#[cfg(test)]` only for the #50 tripwire test in
+/// `rules::validators`.
+#[cfg(test)]
 pub(crate) const PEM_END_PREFIX: &[u8] = b"-----END ";
 
-/// Longest backward read of the shared-dash guard (#44): the capped
-/// dash run plus the longest `-----END <key type>` trailer. The engine
-/// pins the emission boundary this far behind every retained PEM
-/// candidate as a retention aid, and floors `max_window` by this much
-/// past [`pem_confirm_window`] so an anchor's FIRST resolvable
-/// evaluation always sees its full guard context — decision stability
-/// across re-scans is owned by the confirm-decision memo (#49).
+/// Backward retention distance for PEM candidates (#44/#46/#49).
+/// Since #46 removed the shared-dash guard, [`confirm_pem_begin`]
+/// reads no backward bytes — this constant no longer sizes a guard
+/// window. It remains the engine's retention aid: the emission
+/// boundary is pinned this far behind every retained PEM candidate,
+/// and `max_window` is floored by this much past [`pem_confirm_window`],
+/// so an anchor's FIRST resolvable evaluation always happens at a
+/// fixed distance from the carry start. That keeps the conditions
+/// under which the confirm-decision memo (#49) records its outcome
+/// uniform across chunk sizes (and keeps the `authoritative`
+/// debug_assert in `scan_and_emit` holding).
 pub(crate) const PEM_BACK_WINDOW: usize = 30;
 
 /// Check whether the anchor at `begin_pos` is a private-key BEGIN line.
@@ -539,14 +544,13 @@ pub(crate) fn finish_pem(state: &mut PemState, out: &mut impl io::Write) -> io::
 /// Used by the reference oracle (`find_pem_blocks`) and the engine
 /// (whole-buffer `pem_scan_pos` and streaming `ctx_len` adjustments).
 pub(crate) fn fused_begin_backup(buf: &[u8], end_line_end: usize) -> usize {
-    for back in 1..=5usize {
-        if let Some(candidate) = end_line_end.checked_sub(back) {
-            if buf
+    for back in 1..=PEM_DASHES.len() {
+        if let Some(candidate) = end_line_end.checked_sub(back)
+            && buf
                 .get(candidate..candidate + PEM_ANCHOR.len())
                 .is_some_and(|s| s == PEM_ANCHOR)
-            {
-                return back;
-            }
+        {
+            return back;
         }
     }
     0

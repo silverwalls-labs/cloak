@@ -38,8 +38,9 @@ each pinned by a regression test and exercised by strict fuzz:
   consume adjacent structure rolls back to the longest match that leaves that
   structure intact — phone-intl falls back to its last valid separator, and the
   jwt signature scan returns a trailing dash run plus `END`/`BEGIN` marker word
-  (the entire run, so the #44 guards' `dashes_before` counts are pass-stable) —
-  so a pass-1 redaction never erases bytes a pass-2 guard reads.
+  (the entire run, so the marker-junction geometry is pass-stable — the trailer's
+  trailing dashes may be a fused `-----BEGIN ` anchor's leading dashes, #46) —
+  so a pass-1 redaction never erases bytes a pass-2 confirm sees.
 - **PEM close-context synthesis (#27).** When a PEM block closes mid-stream, the
   engine rebuilds the emitted-stream context (pre-block tail + BEGIN + tag + END,
   capped at 94 bytes) in front of the unread remainder, so candidates after the
@@ -224,7 +225,10 @@ are pinned by `tests/differential.rs`. Two later PEM streaming bugs went through
 the same cycle — #44 (shared-dash fused markers, fixed by the preceding-dash
 guard) and #49 (a neighboring candidate's boundary pin bisecting a rejected
 anchor's guard window, fixed by the confirm-decision memo) — both found by the
-smoke in CI (2026-10-11 and 2026-10-24). With all four closed, **strict is
+smoke in CI (2026-10-11 and 2026-10-24). #46 later reversed the #44 policy —
+fused junctions (5–9 dashes) now redact on pass 1, with idempotence held by the
+`[CLOAK:` prefix guard, and the backward guard machinery was left in place as a
+stability aid only. With all four closed, **strict is
 asserted unconditionally** (`CLOAK_FUZZ_STRICT=1`, `fuzz/src/common.rs`) in the
 PR-gate corpus replay, the generative smoke, and the nightly extended run.
 

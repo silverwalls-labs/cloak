@@ -3,13 +3,14 @@
 //!
 //! Dashes and `B/D/E/G/I/N` are all base64url, so the greedy third-segment
 //! scan used to eat `-----END` / `-----BEGIN` from an abutting marker,
-//! erasing the bytes the #44 shared-dash guard reads — pass 2 then
-//! confirmed a fused BEGIN that pass 1 had rejected. The rollback
+//! changing the junction geometry between passes. The rollback
 //! (`rules::validators::rollback_pem_marker`, mirrored in the oracle)
-//! returns the entire trailing dash run so trailer bytes and
-//! `dashes_before` counts are pass-stable. These tests sweep junction
-//! widths on both marker sides, plus the 2048-byte window-cap cuts, and
-//! pin the three correctness equivalences.
+//! returns the entire trailing dash run so the trailer bytes stay
+//! pass-stable — the trailer's trailing dashes may be the leading dashes
+//! of a fused `-----BEGIN ` anchor (#46), which pass 1 confirms and the
+//! `[CLOAK:` guard rejects on pass 2. These tests sweep junction widths
+//! on both marker sides, plus the 2048-byte window-cap cuts, and pin the
+//! three correctness equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;

@@ -4,11 +4,12 @@
 //! When a card number like `4539578763621486` abuts a PEM trailer
 //! (`-----END PRIVATE KEY-----`), the scan loop consumes all 5 dashes as
 //! separators. A single-step `if` trim removed only 1, leaving 4 dashes
-//! in the match — destroying the PEM trailer the shared-dash guard
-//! (engine/pem.rs: `dashes_before`) needs. The `while`-loop fix trims
-//! all trailing non-digit bytes, preserving the trailer for pass-stable
-//! PEM decisions. These tests sweep junction widths and pin the three
-//! correctness equivalences.
+//! in the match — destroying the `-----END ` trailer, whose trailing
+//! dashes may double as a fused `-----BEGIN ` anchor's leading dashes
+//! (#46). The `while`-loop fix trims all trailing non-digit bytes,
+//! preserving the trailer so the junction geometry is pass-stable.
+//! These tests sweep junction widths and pin the three correctness
+//! equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;

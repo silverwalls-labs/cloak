@@ -3,11 +3,14 @@
 //!
 //! The body charset `[0-9A-Za-z_-]` includes dashes and the letters
 //! B/D/E/G/I/N — all of which appear in PEM markers. The DFA pattern
-//! ate `-----END` / `-----BEGIN` from abutting trailers, erasing the
-//! bytes the #44 shared-dash guard reads. The Custom confirm +
-//! `rollback_pem_marker` returns the entire trailing dash run so trailer
-//! bytes and `dashes_before` counts are pass-stable. These tests sweep
-//! junction widths and pin the three correctness equivalences.
+//! ate `-----END` / `-----BEGIN` from abutting trailers, changing the
+//! junction geometry between passes. The Custom confirm +
+//! `rollback_pem_marker` returns the entire trailing dash run so the
+//! trailer bytes stay pass-stable — the trailer's trailing dashes may
+//! be the leading dashes of a fused `-----BEGIN ` anchor (#46), which
+//! pass 1 confirms and the `[CLOAK:` guard rejects on pass 2. These
+//! tests sweep junction widths and pin the three correctness
+//! equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;
