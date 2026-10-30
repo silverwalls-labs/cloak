@@ -215,6 +215,12 @@ def create_engine(
     # otherwise restore into each other's swap.
     with _ENV_SWAP_LOCK:
         saved = dict(os.environ)
+        # Snapshot before the clear: `env` may alias os.environ itself
+        # (create_engine(config, env=os.environ) is a natural call), and
+        # clear() would empty the same object we update from — silently
+        # leaving the engine an ephemeral digest key. A plain mapping
+        # (the documented shape) behaves identically under a copy.
+        env_snapshot = dict(env)
         try:
             # The mutation itself is inside the try: a bad mapping
             # (non-str value, "=" in a key) raises mid-update, and the
@@ -222,7 +228,7 @@ def create_engine(
             # left with an empty or half-filled environment and later
             # PATH/HOME/subprocess use breaks in confusing ways.
             os.environ.clear()
-            os.environ.update(env)
+            os.environ.update(env_snapshot)
             native = _native.Engine(toml)
         finally:
             os.environ.clear()

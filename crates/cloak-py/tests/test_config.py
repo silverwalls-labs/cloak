@@ -193,3 +193,30 @@ def test_env_restored_after_malformed_env_mapping(bad_env: dict[str, object]) ->
             cast("Mapping[str, str]", bad_env),
         )
     assert dict(os.environ) == before
+
+
+def test_env_os_environ_aliasing_gets_the_real_key() -> None:
+    # Passing os.environ itself must not self-destruct: clear() empties
+    # the same object the update reads from, and without a defensive
+    # copy the engine would silently fall back to an ephemeral digest
+    # key. The digest tags prove it: same key material -> same output.
+    token = "token=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"
+    try:
+        os.environ["CLOAK_DIGEST_KEY"] = "alias-test-key"
+        aliased = create_engine(
+            {"redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"}}, os.environ
+        )
+        explicit = create_engine(
+            {"redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"}},
+            {"CLOAK_DIGEST_KEY": "alias-test-key"},
+        )
+        assert aliased.redact(token).output == explicit.redact(token).output
+        # The swap must not have left the caller's environment cleared:
+        # the key we set is still there, and the pre-existing process
+        # environment survived.
+        assert os.environ.get("CLOAK_DIGEST_KEY") == "alias-test-key"
+        assert os.environ.get("PATH")
+        aliased.dispose()
+        explicit.dispose()
+    finally:
+        os.environ.pop("CLOAK_DIGEST_KEY", None)
