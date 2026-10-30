@@ -1,12 +1,10 @@
-//! Regression tests for #44 and #49: PEM shared-dash idempotence and
-//! confirm-decision stability across flush boundaries.
+//! Regression tests for #44, #46, and #49: PEM fused-marker redaction,
+//! idempotence, and confirm-decision stability across flush boundaries.
 //!
-//! The guard in `confirm_pem_begin` / `confirm_pem_begin_ref` counts the
-//! dash run before a BEGIN anchor: 1–4 (junction 6–9) or 0-after-a-
-//! private-key-END-trailer (junction exactly 5) are fused markers and
-//! reject on every pass; ≥5 (junction ≥10) are two independent markers
-//! and both redact. These tests sweep every junction width in two
-//! fusion shapes and pin the three correctness equivalences.
+//! Fused markers (junction 5–9 dashes, #46) are accepted on pass 1.
+//! Idempotence holds because the `[CLOAK:` prefix guard rejects the
+//! fused BEGIN on subsequent passes. These tests sweep every junction
+//! width in two fusion shapes and pin the three correctness equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;
@@ -144,7 +142,7 @@ fn check_shape(
 
 /// Junction sweep after a redacted private-key block: 0–4 leaves no
 /// complete END (EOF bail-out suppresses the rest), 5–9 is fused
-/// (rejected, body visible), ≥10 redacts both.
+/// (both redact, #46), ≥10 redacts both (independent markers).
 #[test]
 fn junction_sweep_after_private_key_block() {
     let (engine, key) = engine_and_key();
@@ -152,7 +150,6 @@ fn junction_sweep_after_private_key_block() {
         let input = fused_after_private_key(dashes);
         let (matches, visible) = match dashes {
             0..=4 => (1u64, false),
-            5..=9 => (1, true),
             _ => (2, false),
         };
         check_shape(
@@ -167,8 +164,8 @@ fn junction_sweep_after_private_key_block() {
 }
 
 /// Junction sweep after an unrelated CERTIFICATE block: 0–4 no valid
-/// marker, 5 redacts (no private-key END fused), 6–9 malformed header
-/// (rejected), ≥10 redacts.
+/// `-----BEGIN` marker, 5–9 fused markers accepted (#46), ≥10 redacts
+/// (independent markers).
 #[test]
 fn junction_sweep_after_certificate_block() {
     let (engine, key) = engine_and_key();
@@ -176,8 +173,6 @@ fn junction_sweep_after_certificate_block() {
         let input = fused_after_certificate(dashes);
         let (matches, visible) = match dashes {
             0..=4 => (0u64, true),
-            5 => (1, false),
-            6..=9 => (0, true),
             _ => (1, false),
         };
         check_shape(
@@ -205,9 +200,9 @@ fn newline_separated_blocks_redact_both() {
 fn junction_across_carry_boundary() {
     let (engine, key) = engine_and_key();
     for (dashes, matches, visible) in [
-        (5usize, 1u64, true), // boundary fusion — rejected, body visible
-        (6, 1, true),         // fused — rejected, body visible
-        (10, 2, false),       // independent markers — both redact
+        (5usize, 2u64, false), // boundary fusion — both redact (#46)
+        (6, 2, false),         // fused — both redact (#46)
+        (10, 2, false),        // independent markers — both redact
     ] {
         for pad in [2000, 2048, 2100, 4096, 8000] {
             let mut data = vec![b'X'; pad];
@@ -235,12 +230,10 @@ fn junction_across_carry_boundary() {
     }
 }
 
-/// Truncated-context regression (fuzz_pem_state CI crash): with more
-/// than `max_window` bytes after a rejected 6-dash junction, the drain
-/// boundary sweeps past the anchor — the shared-dash pin must keep
-/// its backward context so streaming agrees with whole-buffer.
+/// Fused 6-dash junction after CERTIFICATE with a long body: the
+/// fused anchor is accepted (#46) and both equivalences hold.
 #[test]
-fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
+fn fused_anchor_across_drain_boundary() {
     let (engine, key) = engine_and_key();
     let mut data = Vec::new();
     data.extend_from_slice(
@@ -249,136 +242,66 @@ fn rejected_anchor_is_not_reconfirmed_across_drain_boundary() {
     data.extend_from_slice(&vec![b'X'; 2100]);
     data.extend_from_slice(b"\n-----END EC PRIVATE KEY-----\n");
 
-    let (pass1, stats1) = whole(&engine, &data);
-    assert_eq!(stats1.total_matches(), 0, "fused junction must not confirm");
-    assert!(pass1.windows(4).any(|w| w == b"BBBB"));
-    let (ref_out, ref_stats) = cloak_core::reference::redact(&data, &key);
-    assert_eq!(pass1, ref_out.as_slice(), "engine ≢ reference");
-    assert_eq!(
-        stats1.matches, ref_stats.matches,
-        "stats diverge from reference"
+    check_shape(
+        &engine,
+        &key,
+        "fused-6-after-certificate-drain",
+        &data,
+        1,     // EC block redacts
+        false, // BBBB hidden
     );
-
-    for cs in [1usize, 3, 7, 64, 1024] {
-        let mut session = engine.session();
-        let mut out = Vec::new();
-        for chunk in data.chunks(cs) {
-            session.push(chunk, &mut out).unwrap();
-        }
-        let stats = session.finish(&mut out).unwrap();
-        assert_eq!(
-            out, pass1,
-            "cs={cs}: streaming ≢ whole-buffer across the drain boundary"
-        );
-        assert_eq!(stats.matches, stats1.matches, "cs={cs}: stats diverge");
-    }
 }
 
-/// Two garbled anchors 29 bytes apart (#49): c1 fused to a private-key
-/// END trailer (exactly-5 junction), c2 with a dash run of 3 and an
-/// invalid label. Whole-buffer rejects both. In streaming, when the
-/// emission boundary lands between them, c2's shared-dash pin
-/// (`c2 - PEM_BACK_WINDOW`) used to flush to the trailer's final byte —
-/// bisecting c1's backward guard window — and the next scan confirmed
-/// c1 against the truncated context. The confirm-decision memo keeps
-/// c1's full-context rejection authoritative.
+/// Shape with a fused exactly-5 junction after a PKCS#8 END trailer
+/// and a second garbled anchor (#46/#49). After removing the shared-dash
+/// guard, c1 (the fused RSA BEGIN) IS confirmed; c2 (invalid label)
+/// is still rejected.
 fn pin_bisection_shape(pad: usize) -> Vec<u8> {
     let mut d = vec![b'X'; pad];
     d.extend_from_slice(b"-----END PRIVATE KEY"); // trailer [p, p+20)
     d.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY"); // c1 = p+20, exactly-5 fusion
     d.extend_from_slice(b"--------"); // closes c1's line AND hosts c2
-    d.extend_from_slice(b"BEGIN Y-----\n"); // c2 = p+49: dash run 3, label invalid
-    d.resize(d.len() + 2200, b'A'); // boundary sweeps (c1, c2]
+    d.extend_from_slice(b"BEGIN Y-----\n"); // c2 = p+49: label invalid
+    d.resize(d.len() + 2200, b'A'); // body
     d
 }
 
-/// Assert all strict equivalences for a shape with zero matches: the
-/// whole pass leaves the input untouched, engine ≡ reference, and
-/// streaming ≡ whole-buffer at every chunk size. The small sizes (1/3/7)
-/// and 41 step the emission boundary through the (c1, c2] window where
-/// the pre-#49 pin bisected c1's backward guard (cs=1 trips first).
-fn check_zero_match_shape(engine: &Engine, key: &[u8; 32], name: &str, input: &[u8]) {
-    let (pass1, stats1) = whole(engine, input);
-    assert_eq!(
-        stats1.total_matches(),
-        0,
-        "{name}: garbled markers must not confirm\n  pass1: {:?}",
-        String::from_utf8_lossy(&pass1),
-    );
-    assert_eq!(pass1, input, "{name}: zero-match output must echo input");
-
-    let (ref_out, ref_stats) = cloak_core::reference::redact(input, key);
-    assert_eq!(pass1, ref_out.as_slice(), "{name}: engine ≢ reference");
-    assert_eq!(
-        stats1.matches, ref_stats.matches,
-        "{name}: stats diverge from reference"
-    );
-
-    for cs in [1usize, 3, 7, 41, 64, 1024] {
-        let mut session = engine.session();
-        let mut out = Vec::new();
-        for chunk in input.chunks(cs) {
-            session.push(chunk, &mut out).unwrap();
-        }
-        let stats = session.finish(&mut out).unwrap();
-        assert_eq!(
-            out,
-            pass1,
-            "{name} cs={cs}: streaming ≢ whole-buffer\n  whole:    {:?}\n  streamed: {:?}",
-            String::from_utf8_lossy(&pass1),
-            String::from_utf8_lossy(&out),
-        );
-        assert_eq!(
-            stats.matches, stats1.matches,
-            "{name} cs={cs}: stats diverge"
-        );
-    }
-}
-
-/// Pin-bisection regression (#49, fuzz_pem_state CI crash): a rejected
-/// anchor must stay rejected when a neighboring candidate's shared-dash
-/// pin flushes the emission boundary into its backward guard window.
+/// The fused RSA anchor is accepted (#46), producing 1 match
+/// (unterminated, body to EOF). All strict equivalences hold.
 #[test]
-fn pin_bisected_guard_window_is_not_reconfirmed() {
+fn fused_anchor_accepted_across_boundary() {
     let (engine, key) = engine_and_key();
     for pad in [0usize, 100, 2048] {
         let input = pin_bisection_shape(pad);
-        check_zero_match_shape(&engine, &key, &format!("pin-bisection pad={pad}"), &input);
+        check_shape(
+            &engine,
+            &key,
+            &format!("fused-accept pad={pad}"),
+            &input,
+            1,     // the fused RSA block matches (unterminated)
+            false, // no BBBB in this shape
+        );
     }
 }
 
-/// The memo is keyed by absolute offset; a PEM close rebuilds the carry
-/// (emitted context + remainder) and steps `carry_abs` backward — the
-/// junction decisions recorded after the rebuild must still hold (#49).
+/// EC block + fused RSA block after a PKCS#8 END trailer (#46/#49).
+/// Both blocks redact. The memo survives the carry rebuild after the
+/// EC block close.
 #[test]
-fn rejection_memory_survives_pem_close_rebuild() {
+fn fused_anchor_after_pem_close_rebuild() {
     let (engine, key) = engine_and_key();
     let mut data = Vec::new();
     data.extend_from_slice(b"-----BEGIN EC PRIVATE KEY-----\nCCCC\n-----END EC PRIVATE KEY-----\n");
     data.extend_from_slice(&pin_bisection_shape(0));
 
-    let (pass1, stats1) = whole(&engine, &data);
-    assert_eq!(stats1.total_matches(), 1, "only the EC block redacts");
-    let (ref_out, ref_stats) = cloak_core::reference::redact(&data, &key);
-    assert_eq!(pass1, ref_out.as_slice(), "engine ≢ reference");
-    assert_eq!(
-        stats1.matches, ref_stats.matches,
-        "stats diverge from reference"
+    check_shape(
+        &engine,
+        &key,
+        "fused-after-close-rebuild",
+        &data,
+        2,     // EC block + fused RSA block
+        false, // no BBBB in this shape
     );
-
-    for cs in [1usize, 3, 7, 41, 64, 1024] {
-        let mut session = engine.session();
-        let mut out = Vec::new();
-        for chunk in data.chunks(cs) {
-            session.push(chunk, &mut out).unwrap();
-        }
-        let stats = session.finish(&mut out).unwrap();
-        assert_eq!(
-            out, pass1,
-            "cs={cs}: streaming ≢ whole-buffer across the close rebuild"
-        );
-        assert_eq!(stats.matches, stats1.matches, "cs={cs}: stats diverge");
-    }
 }
 
 /// Bail-out digest regression (fuzz_pem_state): an unterminated body

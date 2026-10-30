@@ -43,17 +43,22 @@ pub static POSITIVE: &[Vector] = &[
     Vector {
         name: "jwt-pem-trailer-fused",
         // #50 repro: the signature scan must roll back the eaten `-----END`
-        // so the trailer keeps rejecting the fused BEGIN (#44 guard) on
-        // every pass. jwt=[0,108); the BEGIN anchor at 128 (the trailer's
-        // closing dashes double as its leading dashes — exactly-5 junction)
-        // is rejected; `AAAA` at 160 stays visible per the #44 junction
-        // policy.
+        // so the trailer stays intact. The fused BEGIN at 128 (the
+        // trailer's closing dashes double as its leading dashes — exactly-5
+        // junction) is accepted (#46); the PEM body [159,165) is redacted.
         input: b"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n",
-        spans: &[ExpectedSpan {
-            start: 0,
-            end: 108,
-            rule: "jwt",
-        }],
+        spans: &[
+            ExpectedSpan {
+                start: 0,
+                end: 108,
+                rule: "jwt",
+            },
+            ExpectedSpan {
+                start: 159,
+                end: 165,
+                rule: "pem-private-key",
+            },
+        ],
     },
     Vector {
         name: "jwt-pem-begin-fused",
@@ -103,8 +108,12 @@ pub static NEGATIVE: &[Vector] = &[
         name: "jwt-pem-trailer-empty-signature",
         // #50: the "signature" was nothing but the eaten `-----END` — the
         // rollback empties it and the jwt is rejected; the fused BEGIN is
-        // rejected by the #44 guard (intact trailer). Nothing matches.
+        // accepted (#46). PEM body [83,89) redacted.
         input: b"eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n",
-        spans: &[],
+        spans: &[ExpectedSpan {
+            start: 83,
+            end: 89,
+            rule: "pem-private-key",
+        }],
     },
 ];

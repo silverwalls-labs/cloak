@@ -11,6 +11,25 @@ a breaking change).
 
 ### Fixed
 
+- **#46** — PEM fused markers are now redacted. When a private-key END
+  trailer and the next BEGIN header are fused without a newline,
+  sharing 5–9 dashes at the junction, the second block's body was
+  left in cleartext: the #44 shared-dash guard
+  (`dashes_before` + `preceded_by_private_key_end`) rejected the
+  fused BEGIN on every pass. The guard is removed from both
+  `confirm_pem_begin` and the reference oracle — a fused anchor now
+  confirms on pass 1 and its body redacts like any other block.
+  Idempotence is preserved by the existing `[CLOAK:` prefix guard:
+  pass 1 always places the tag immediately after the BEGIN line
+  (normal close, F05 bail-out, or EOF), so pass 2 sees the tag where
+  the body was and skips the block. The whole-buffer scan backs up to
+  the fused anchor at each block close (`fused_begin_backup`, mirrored
+  in the oracle) and the streaming post-close context threshold is
+  relaxed by the marker dash width so a fused anchor straddling the
+  carry is confirmed without re-emitting the shared dashes. The #44-era
+  backward-context machinery (confirm-decision memo, `PEM_BACK_WINDOW`
+  retention pin) is retained as a stability aid only —
+  `confirm_pem_begin` no longer reads backward bytes.
 - **#50** — jwt idempotence vs PEM markers (post-#44 variant): the
   greedy third-segment (signature) scan consumed the head of an
   adjacent `-----END <type>` / `-----BEGIN ` marker — dashes and
@@ -42,7 +61,8 @@ a breaking change).
   pass. Junctions of ≥10 dashes are independent markers and redact
   normally. Fused blocks (junction 5–9) stay unredacted: a strict
   RFC 7468 reader cannot extract them; extraction-resistance for
-  malformed headers is a separate decision (#46). Strict fuzz
+  malformed headers is a separate decision (#46 — since resolved
+  above: fused markers now redact). Strict fuzz
   equivalences are unconditional in CI. Also fixed in this PR (both
   found by the strict gates): PEM candidates re-derived at the
   emission boundary confirmed against truncated backward context —

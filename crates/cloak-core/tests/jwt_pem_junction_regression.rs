@@ -3,13 +3,14 @@
 //!
 //! Dashes and `B/D/E/G/I/N` are all base64url, so the greedy third-segment
 //! scan used to eat `-----END` / `-----BEGIN` from an abutting marker,
-//! erasing the bytes the #44 shared-dash guard reads — pass 2 then
-//! confirmed a fused BEGIN that pass 1 had rejected. The rollback
+//! changing the junction geometry between passes. The rollback
 //! (`rules::validators::rollback_pem_marker`, mirrored in the oracle)
-//! returns the entire trailing dash run so trailer bytes and
-//! `dashes_before` counts are pass-stable. These tests sweep junction
-//! widths on both marker sides, plus the 2048-byte window-cap cuts, and
-//! pin the three correctness equivalences.
+//! returns the entire trailing dash run so the trailer bytes stay
+//! pass-stable — the trailer's trailing dashes may be the leading dashes
+//! of a fused `-----BEGIN ` anchor (#46), which pass 1 confirms and the
+//! `[CLOAK:` guard rejects on pass 2. These tests sweep junction widths
+//! on both marker sides, plus the 2048-byte window-cap cuts, and pin the
+//! three correctness equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;
@@ -123,21 +124,20 @@ fn check_shape(
 }
 
 /// The exact 165-byte input from issue #50: jwt redacts, the trailer
-/// survives, the fused BEGIN stays rejected on every pass.
+/// survives, the fused BEGIN is accepted (#46).
 #[test]
 fn repro_165_bytes() {
     let (engine, key) = engine_and_key();
     let mut input = JWT108.to_vec();
     input.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
     assert_eq!(input.len(), 165);
-    check_shape(&engine, &key, "issue-50-repro", &input, 1, true);
+    check_shape(&engine, &key, "issue-50-repro", &input, 2, false);
 }
 
 /// jwt + N dashes + `END PRIVATE KEY` + fused BEGIN block. Below 5
 /// dashes there is no `-----END ` literal, so the BEGIN confirms and the
-/// EOF bail-out hides the body (already idempotent today, pinned here);
-/// at ≥5 the rollback keeps the trailer intact and the #44 guard keeps
-/// rejecting the exactly-5 junction — jwt only, body visible.
+/// EOF bail-out hides the body; at ≥5 the rollback keeps the trailer
+/// intact and the fused BEGIN is accepted (#46) — both redact.
 #[test]
 fn jwt_trailer_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -145,10 +145,7 @@ fn jwt_trailer_junction_sweep() {
         let mut input = JWT108.to_vec();
         input.resize(input.len() + dashes, b'-');
         input.extend_from_slice(b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-        let (matches, visible) = match dashes {
-            0..=4 => (2u64, false),
-            _ => (1, true),
-        };
+        let (matches, visible) = (2u64, false);
         check_shape(
             &engine,
             &key,
@@ -162,9 +159,8 @@ fn jwt_trailer_junction_sweep() {
 
 /// jwt + N dashes + `BEGIN RSA PRIVATE KEY-----` + complete block.
 /// 0–4: no `-----BEGIN ` anchor exists, jwt eats the fragment (inert).
-/// 5: independent marker, rollback keeps it intact, block redacts.
-/// 6–9: fused junction, rejected by `dashes_before` — pass-stable only
-/// because the rollback returns the ENTIRE dash run. ≥10: independent.
+/// ≥5: rollback keeps the dash run intact, fused markers accepted
+/// (#46) — both jwt and PEM block redact.
 #[test]
 fn jwt_begin_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -176,8 +172,6 @@ fn jwt_begin_junction_sweep() {
         );
         let (matches, visible) = match dashes {
             0..=4 => (1u64, true),
-            5 => (2, false),
-            6..=9 => (1, true),
             _ => (2, false),
         };
         check_shape(
@@ -202,6 +196,6 @@ fn jwt_trailer_junction_at_window_cap() {
         let mut input = b"eyJhbGciOiJIUzI1NiJ9.A.".to_vec();
         input.extend(std::iter::repeat_n(b'S', 2048 - cut - input.len()));
         input.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-        check_shape(&engine, &key, &format!("cap cut={cut}"), &input, 1, true);
+        check_shape(&engine, &key, &format!("cap cut={cut}"), &input, 2, false);
     }
 }

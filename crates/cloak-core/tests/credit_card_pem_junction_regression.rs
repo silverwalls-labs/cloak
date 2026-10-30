@@ -4,11 +4,12 @@
 //! When a card number like `4539578763621486` abuts a PEM trailer
 //! (`-----END PRIVATE KEY-----`), the scan loop consumes all 5 dashes as
 //! separators. A single-step `if` trim removed only 1, leaving 4 dashes
-//! in the match — destroying the PEM trailer the shared-dash guard
-//! (engine/pem.rs: `dashes_before`) needs. The `while`-loop fix trims
-//! all trailing non-digit bytes, preserving the trailer for pass-stable
-//! PEM decisions. These tests sweep junction widths and pin the three
-//! correctness equivalences.
+//! in the match — destroying the `-----END ` trailer, whose trailing
+//! dashes may double as a fused `-----BEGIN ` anchor's leading dashes
+//! (#46). The `while`-loop fix trims all trailing non-digit bytes,
+//! preserving the trailer so the junction geometry is pass-stable.
+//! These tests sweep junction widths and pin the three correctness
+//! equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;
@@ -129,14 +130,13 @@ fn repro_cc_pem_trailer() {
     let (engine, key) = engine_and_key();
     let mut input = CC16.to_vec();
     input.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-    check_shape(&engine, &key, "issue-53-cc-repro", &input, 1, true);
+    check_shape(&engine, &key, "issue-53-cc-repro", &input, 2, false);
 }
 
 /// cc + N dashes + `END PRIVATE KEY` + fused BEGIN block. Below 5
 /// dashes there is no `-----END ` literal, so the BEGIN confirms and the
 /// EOF bail-out hides the body; at ≥5 the trim keeps the trailer intact
-/// and the #44 guard rejects the exactly-5 junction — cc only, body
-/// visible.
+/// and the fused BEGIN is accepted (#46) — both redact.
 #[test]
 fn cc_trailer_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -144,10 +144,7 @@ fn cc_trailer_junction_sweep() {
         let mut input = CC16.to_vec();
         input.resize(input.len() + dashes, b'-');
         input.extend_from_slice(b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-        let (matches, visible) = match dashes {
-            0..=4 => (2u64, false),
-            _ => (1, true),
-        };
+        let (matches, visible) = (2u64, false);
         check_shape(
             &engine,
             &key,
@@ -161,9 +158,7 @@ fn cc_trailer_junction_sweep() {
 
 /// cc + N dashes + `BEGIN RSA PRIVATE KEY-----` + complete block.
 /// 0–4: no `-----BEGIN ` anchor exists, cc is the only match.
-/// 5: independent marker, block redacts — cc + pem.
-/// 6–9: fused junction rejected by `dashes_before` — cc only.
-/// ≥10: independent — cc + pem.
+/// ≥5: fused markers accepted (#46) — cc + pem.
 #[test]
 fn cc_begin_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -175,8 +170,6 @@ fn cc_begin_junction_sweep() {
         );
         let (matches, visible) = match dashes {
             0..=4 => (1u64, true),
-            5 => (2, false),
-            6..=9 => (1, true),
             _ => (2, false),
         };
         check_shape(

@@ -3,11 +3,14 @@
 //!
 //! The body charset `[0-9A-Za-z_-]` includes dashes and the letters
 //! B/D/E/G/I/N — all of which appear in PEM markers. The DFA pattern
-//! ate `-----END` / `-----BEGIN` from abutting trailers, erasing the
-//! bytes the #44 shared-dash guard reads. The Custom confirm +
-//! `rollback_pem_marker` returns the entire trailing dash run so trailer
-//! bytes and `dashes_before` counts are pass-stable. These tests sweep
-//! junction widths and pin the three correctness equivalences.
+//! ate `-----END` / `-----BEGIN` from abutting trailers, changing the
+//! junction geometry between passes. The Custom confirm +
+//! `rollback_pem_marker` returns the entire trailing dash run so the
+//! trailer bytes stay pass-stable — the trailer's trailing dashes may
+//! be the leading dashes of a fused `-----BEGIN ` anchor (#46), which
+//! pass 1 confirms and the `[CLOAK:` guard rejects on pass 2. These
+//! tests sweep junction widths and pin the three correctness
+//! equivalences.
 
 use cloak_core::{Config, Engine, RedactionConfig};
 use std::sync::LazyLock;
@@ -118,20 +121,19 @@ fn check_shape(
 }
 
 /// The exact reproducer from issue #53: gitlab + `-----END PRIVATE
-/// KEY-----` + fused BEGIN block.
+/// KEY-----` + fused BEGIN block — fused BEGIN accepted (#46).
 #[test]
 fn repro_gitlab_pem_trailer() {
     let (engine, key) = engine_and_key();
     let mut input = GITLAB26.to_vec();
     input.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-    check_shape(&engine, &key, "issue-53-gitlab-repro", &input, 1, true);
+    check_shape(&engine, &key, "issue-53-gitlab-repro", &input, 2, false);
 }
 
 /// gitlab + N dashes + `END PRIVATE KEY` + fused BEGIN block. Below 5
 /// dashes there is no `-----END ` literal, so the BEGIN confirms and the
 /// EOF bail-out hides the body; at ≥5 the rollback keeps the trailer
-/// intact and the #44 guard rejects the exactly-5 junction — gitlab
-/// only, body visible.
+/// intact and the fused BEGIN is accepted (#46) — both redact.
 #[test]
 fn gitlab_trailer_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -139,10 +141,7 @@ fn gitlab_trailer_junction_sweep() {
         let mut input = GITLAB26.to_vec();
         input.resize(input.len() + dashes, b'-');
         input.extend_from_slice(b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
-        let (matches, visible) = match dashes {
-            0..=4 => (2u64, false),
-            _ => (1, true),
-        };
+        let (matches, visible) = (2u64, false);
         check_shape(
             &engine,
             &key,
@@ -156,9 +155,7 @@ fn gitlab_trailer_junction_sweep() {
 
 /// gitlab + N dashes + `BEGIN RSA PRIVATE KEY-----` + complete block.
 /// 0–4: no `-----BEGIN ` anchor exists, gitlab is the only match.
-/// 5: independent marker, block redacts — gitlab + pem.
-/// 6–9: fused junction rejected by `dashes_before` — gitlab only.
-/// ≥10: independent — gitlab + pem.
+/// ≥5: fused markers accepted (#46) — gitlab + pem.
 #[test]
 fn gitlab_begin_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -170,8 +167,6 @@ fn gitlab_begin_junction_sweep() {
         );
         let (matches, visible) = match dashes {
             0..=4 => (1u64, true),
-            5 => (2, false),
-            6..=9 => (1, true),
             _ => (2, false),
         };
         check_shape(

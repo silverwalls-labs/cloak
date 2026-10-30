@@ -113,16 +113,16 @@ fn check_shape(
 
 /// The exact reproducer from issue #53: gcp + `-----END PRIVATE
 /// KEY-----` + fused BEGIN block. The overlap check rejects the gcp
-/// match, preserving the full PEM trailer.
+/// match, preserving the full PEM trailer. The fused BEGIN is accepted
+/// (#46).
 #[test]
 fn repro_gcp_pem_trailer() {
     let (engine, key) = engine_and_key();
     let mut input = b"AIzaSyA0123456789abcdefghijklmnop".to_vec();
     input.extend_from_slice(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
     // gcp rejected (overlap), PEM trailer intact → the fused BEGIN is
-    // rejected by the shared-dash guard → only the text passes through.
-    // No matches at all.
-    check_shape(&engine, &key, "issue-53-gcp-repro", &input, 0, true);
+    // accepted (#46) → PEM block redacts.
+    check_shape(&engine, &key, "issue-53-gcp-repro", &input, 1, false);
 }
 
 /// gcp + N dashes + `END PRIVATE KEY` + fused BEGIN block.
@@ -146,33 +146,18 @@ fn gcp_trailer_junction_sweep() {
         input.extend_from_slice(b"END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
 
         let (matches, visible) = if dashes >= 1 {
-            // Overlap detected → gcp rejected. The END trailer may or
-            // may not form a valid `-----END ` depending on total dash
-            // count:
             match dashes {
                 1..=4 => {
-                    // 1-4 body dashes + "END " after → combined has < 5
-                    // dashes before END, but the overlap check still
-                    // tries offset 0: tail_part = dashes + after. Let's
-                    // trace: with 1 dash, tail="-", after="END ...",
-                    // combined at o=0 = "-END ..." → doesn't start with
-                    // "-----END ". So overlap check returns false → gcp
-                    // accepted. No valid `-----END ` exists either.
+                    // 1-4 body dashes + "END " after → overlap check
+                    // returns false → gcp accepted. PEM BEGIN confirms
+                    // too — both redact.
                     (2u64, false)
                 }
-                5..=8 => {
-                    // Body has 5+ dashes. Overlap check finds a valid
-                    // PEM marker → gcp rejected. The `-----END ` prefix
-                    // is preserved → PEM trailer is detected → shared-
-                    // dash guard rejects the fused BEGIN. 0 matches.
-                    (0, true)
-                }
                 _ => {
-                    // 9+ dashes: the body consumed > 8 chars of
-                    // junction. The "END" word may or may not be in the
-                    // body depending on alignment. But overlap check
-                    // should fire. 0 matches.
-                    (0, true)
+                    // 5+ dashes: overlap detected → gcp rejected. The
+                    // `-----END ` prefix is preserved → PEM trailer
+                    // intact → fused BEGIN accepted (#46). PEM only.
+                    (1, false)
                 }
             }
         } else {
@@ -206,17 +191,10 @@ fn gcp_clean_before_pem_block() {
 
 /// gcp + N body dashes + a complete `-----BEGIN ` marker after the body.
 ///
-/// With 1–4 body dashes the marker's dash run lives entirely in `after`,
-/// so the overlap helper's alignment loop cannot reconstruct it (it
-/// compares `after` against `BEGIN[k..]`, never the full marker). The
-/// token was accepted and tagged while the fused marker stayed rejected
-/// by the shared-dash guard; pass 2 then saw a clean marker and redacted
-/// the block — not idempotent. The bare-dash BEGIN guard rejects the
-/// token instead, leaving the junction pass-stable.
-///
-/// dash counts 0 and 5..=12: the marker is already valid on pass 1
-/// (0 or ≥5 preceding dashes pass the shared-dash guard), so token and
-/// block are both redacted and the output is stable.
+/// With 1–4 body dashes the bare-dash BEGIN guard rejects the gcp token
+/// (to prevent pass-1-only idempotence breaks), but the fused BEGIN is
+/// now accepted (#46) — PEM only. 0 and ≥5 body dashes: both gcp and
+/// PEM redact.
 #[test]
 fn gcp_begin_junction_sweep() {
     let (engine, key) = engine_and_key();
@@ -230,7 +208,7 @@ fn gcp_begin_junction_sweep() {
             b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n",
         );
         let (matches, visible) = match dashes {
-            1..=4 => (0u64, true),
+            1..=4 => (1u64, false),
             _ => (2, false),
         };
         check_shape(
