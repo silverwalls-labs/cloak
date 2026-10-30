@@ -591,7 +591,7 @@ fn rollback_pem_marker_oracle(sig: &[u8], at_cap: bool) -> Option<usize> {
     while i > 0 && sig[i - 1] == b'-' {
         i -= 1;
     }
-    let min_dashes = if at_cap { 1 } else { 5 };
+    let min_dashes = if at_cap { 1 } else { PEM_DASHES.len() };
     (word_start - i >= min_dashes).then_some(i)
 }
 
@@ -1520,6 +1520,7 @@ mod tests {
         assert_eq!(vec![PYPI_PREFIX], CATALOG[PYPI].anchors);
         // PEM constants cross-check.
         assert_eq!(PEM_BEGIN, crate::engine::pem::PEM_ANCHOR);
+        assert_eq!(PEM_DASHES, crate::engine::pem::PEM_DASHES);
         assert_eq!(PEM_BAIL_OUT, crate::engine::pem::PEM_BAIL_OUT);
         assert_eq!(PEM_KEY_TYPES.len(), crate::engine::pem::PEM_KEY_TYPES.len());
         for (oracle, engine) in PEM_KEY_TYPES.iter().zip(crate::engine::pem::PEM_KEY_TYPES) {

@@ -569,9 +569,8 @@ fn is_base64url_char(b: u8) -> bool {
 /// `-----END <type>` trailer is byte-identical before and after
 /// redaction: the trailer's trailing dashes may be the leading dashes
 /// of a fused `-----BEGIN ` anchor (#46), and eating any part of the
-/// run would change the junction geometry between passes. `at_cap`
-/// loosens the
-/// word to any prefix of END/BEGIN (including empty) and the run to >= 1:
+/// run would change the junction geometry between passes. `at_cap` loosens
+/// the word to any prefix of END/BEGIN (including empty) and the run to >= 1:
 /// the 2048-byte scan cap can cut the junction anywhere. A tripwire test
 /// (`pem_marker_literals_match_engine_pem`) pins the END/BEGIN marker
 /// vocabulary against `engine::pem` constants; this helper's own word
