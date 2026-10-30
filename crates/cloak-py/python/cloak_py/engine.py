@@ -215,9 +215,14 @@ def create_engine(
     # otherwise restore into each other's swap.
     with _ENV_SWAP_LOCK:
         saved = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(env)
         try:
+            # The mutation itself is inside the try: a bad mapping
+            # (non-str value, "=" in a key) raises mid-update, and the
+            # restore below must still run — otherwise the process is
+            # left with an empty or half-filled environment and later
+            # PATH/HOME/subprocess use breaks in confusing ways.
+            os.environ.clear()
+            os.environ.update(env)
             native = _native.Engine(toml)
         finally:
             os.environ.clear()

@@ -6,6 +6,7 @@ Mirrors ``adapters/node/test/config.test.ts``.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from typing import cast
 
 import pytest
@@ -171,3 +172,24 @@ def test_env_restored_after_successful_build() -> None:
     assert dict(os.environ) == before
     assert engine.redact(b"clean").output == b"clean"
     engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "bad_env",
+    [
+        {"CLOAK_DIGEST_KEY": 123},  # non-str value -> TypeError mid-update
+        {"K=V": "x"},  # "=" in key -> ValueError mid-update
+        {"CLOAK_DIGEST_KEY": "ok", "BAD=NAME": "x"},  # part-way through
+    ],
+)
+def test_env_restored_after_malformed_env_mapping(bad_env: dict[str, object]) -> None:
+    # The environment mutation itself must sit inside the try/finally:
+    # update() can raise after clear(), and the restore must still run —
+    # otherwise the process is left with an empty environment.
+    before = dict(os.environ)
+    with pytest.raises((TypeError, ValueError)):
+        create_engine(
+            {"redaction": {"digest_key": "env:CLOAK_DIGEST_KEY"}},
+            cast("Mapping[str, str]", bad_env),
+        )
+    assert dict(os.environ) == before

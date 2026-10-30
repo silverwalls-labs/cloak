@@ -43,23 +43,45 @@ MiB/s — within ~5%; treat deltas smaller than that as noise.
 The native one-shot sits at 25–26 µs/op against criterion's 25.1 µs
 for raw `cloak-core` on the identical workload — **the pyo3 boundary
 costs ≈ 0–1 µs per call** (one borrowed `&[u8]` in, one `bytes` + one
-stats dict out, GIL detached for the scan). This is the ctypes floor
-removal E5 existed for: the E3 bridge pays ~26 µs of FFI per one-shot
-(69.7 µs vs the 43.6 µs Rust-wasmtime row), the native module pays
-effectively nothing.
+stats dict out, GIL detached for the scan). This is the ctypes-floor removal E5 existed for: the E3 bridge pays
+~26 µs of total host-path overhead per one-shot — ctypes marshalling
+plus linear-memory copies *on top of* the WASM runtime itself (69.7 µs
+Python-WASM vs the 43.6 µs Rust-wasmtime row, which already contains
+the same runtime) — while the native module pays effectively nothing
+beyond the µs-scale pyo3 boundary.
 
 Small chunks still magnify per-call cost — at 256 B the Python-layer
 wrapper plus boundary work (~1.6 µs × 16 pushes) and the carry-over
 rescans dominate — but the slope is far flatter than ctypes: cloak-py
 loses 4.2× from one-shot to 256 B chunks, the WASM path loses 7.9×.
 
-The GIL is released for every scan (`Python::detach`), so these
-figures hold per-thread: 4 threads sharing one engine redact ~4× the
-bytes/s on performance cores (exercised functionally, not benchmarked,
-in `tests/test_threading.py`).
+The GIL is released for every scan (`Python::detach`), so these figures
+are per-thread and scans from multiple threads run in parallel rather
+than serializing at the boundary. What is verified is concurrent
+*correctness*, not throughput (`tests/test_threading.py`: byte-identical
+output across a shared engine, session hand-off across threads, clean
+borrow-check refusal of concurrent same-session pushes) — no
+multi-threaded speedup figure is claimed here.
 
 ## Methodology
 
+- **Source revision**: benches ran on the tree of `99c2073` (the commit
+  introducing this receipt) — single-threaded, CPU-state sensitive,
+  see the battery warning below.
+- **Build commands**: `cd crates/cloak-py && uv sync --locked` (maturin
+  release build of `cloak_py._native`, per `[tool.maturin]
+  profile = "release"`), then `uv run python bench/throughput.py` for
+  the native rows; `cargo build -p cloak-wasm --target wasm32-wasip1
+  --release` then `adapters/python/bench/throughput.py` for the
+  same-day Python-WASM rows (wasmtime-py 50.0.1); `cargo bench -p
+  wasm-parity` for the criterion rows.
+- **Parity status**: the 247-vector parity fixture matches
+  `cargo run --example export-vectors -p cloak-core` (freshness-gated
+  by diff in CI), and the pytest suite redacts every vector
+  byte-identically both one-shot and streaming (`crates/cloak-py/
+  tests/test_parity.py`, `test_streaming.py`); the perf numbers above
+  are therefore measured on the same matching engine the parity suite
+  exercises.
 - **Bench**: `crates/cloak-py/bench/throughput.py` — line-for-line
   port of `adapters/python/bench/throughput.py` (same corpus
   construction, same warmup and iteration counts: 100/50 warmup,

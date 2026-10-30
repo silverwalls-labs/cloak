@@ -50,6 +50,14 @@ cache-keys = [
   # whose import-time churn forces a rebuild on every `uv run`.
   { file = "python/**/*.py" },
   { file = "python/**/*.pyi" },
+  # The binding statically links cloak-core: without these, a core-only
+  # edit (no cloak-py file touched) reuses the stale native build and
+  # the pytest suite silently exercises old redaction code. Paths are
+  # relative to this pyproject.toml; uv adds no default keys once the
+  # list is set, so the workspace lockfile must be listed too.
+  { file = "../../crates/cloak-core/src/**/*.rs" },
+  { file = "../../crates/cloak-core/Cargo.toml" },
+  { file = "../../Cargo.lock" },
 ]
 
 [tool.ruff]
