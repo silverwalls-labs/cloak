@@ -7,7 +7,6 @@ pub mod scanner;
 
 use std::collections::BTreeMap;
 use std::io;
-use std::marker::PhantomData;
 
 use crate::config::{self, Config};
 use crate::rules;
@@ -158,18 +157,16 @@ impl Engine {
             candidates: Vec::new(),
             raw: Vec::new(),
             merged: Vec::new(),
-            _not_send: PhantomData,
         }
     }
 }
 
 /// Per-stream scanning state.
 ///
-/// `Session` is **not** [`Send`] or [`Sync`] — it is bound to the thread
-/// that created it. The carry-over buffer's correctness depends on push/finish
-/// being called from the same thread that created the session. Revisit for
-/// v0.2 bindings if cross-thread move semantics are needed
-/// (`docs/06-embedding.md`).
+/// `Session` is [`Send`] — it may move across threads (the v0.2 bindings
+/// hand sessions to host-language threads, `docs/06-embedding.md`). All of
+/// its state is owned; exclusivity of push/finish is enforced by the `&mut`
+/// receivers, so a session can never be scanned from two threads at once.
 pub struct Session<'e> {
     engine: &'e Engine,
     bytes_processed: u64,
@@ -222,17 +219,18 @@ pub struct Session<'e> {
     candidates: Vec<Candidate>,
     raw: Vec<RawMatch>,
     merged: Vec<MergedMatch>,
-    /// Opt out of auto-Send/Sync.
-    _not_send: PhantomData<*const ()>,
 }
 
-/// Compile-time assertion: `Engine` must be `Send + Sync`.
+/// Compile-time assertion: `Engine` must be `Send + Sync`, and `Session`
+/// must be `Send` (the v0.2 bindings move sessions across host threads).
 /// Lives outside `#[cfg(test)]` so regressions are caught by `cargo check`.
 #[allow(dead_code)]
 const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}
+    fn assert_send<T: Send>() {}
     fn _assert() {
         assert_send_sync::<Engine>();
+        assert_send::<Session<'static>>();
     }
 };
 

@@ -9,6 +9,9 @@ version = 2
 allow = [
     "MIT",
     "Apache-2.0",
+    # target-lexicon (via pyo3-build-config); the LLVM exception only
+    # relaxes Apache-2.0's attribution terms for binary redistribution.
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "ISC",

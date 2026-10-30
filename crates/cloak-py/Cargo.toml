@@ -1,0 +1,38 @@
+# E5 (docs/06-embedding.md): native Python binding over cloak-core.
+# Built by maturin (see pyproject.toml) into one abi3 wheel per platform.
+[package]
+name = "cloak-py"
+description = "Native Python binding over cloak-core — pyo3 + maturin, abi3 wheels"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "cloak_py"
+crate-type = ["cdylib"]
+# No Rust-side tests: all behavior is covered by the pytest suite
+# (parity vectors, streaming, hooks, threading) against the built
+# module — and a test binary would need to link libpython.
+test = false
+doctest = false
+
+[features]
+# extension-module leaves Python symbols unresolved (provided by the
+# interpreter at import time), so plain workspace builds — clippy, doc,
+# `cargo build --workspace` on CI — never need a libpython to link.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+cloak-core = { path = "../cloak-core" }
+# abi3-py313: one cp313-abi3 wheel per platform, not per Python version
+# (docs/06-embedding.md §E5); 3.13 matches the repo-wide Python floor.
+pyo3 = { workspace = true, features = ["abi3-py313"] }
+
+[build-dependencies]
+# Emits the macOS `-undefined dynamic_lookup` link args so plain cargo
+# builds (CI clippy/build jobs) link without a libpython — see build.rs.
+pyo3-build-config = { workspace = true }
