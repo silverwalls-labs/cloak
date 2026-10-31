@@ -3,8 +3,10 @@
 //!
 //! Used as [`ConfirmSpec::Custom`](super::ConfirmSpec::Custom) callbacks.
 //! Each function receives the full haystack and the anchor start position,
-//! returning `None` to reject or `Some(ConfirmMatch)` with the redaction
-//! span.
+//! returning [`ConfirmOutcome::Match`] with the redaction span,
+//! [`ConfirmOutcome::NearMiss`] for shape-valid but checksum-rejected
+//! candidates (F13: CRC32, Luhn), or [`ConfirmOutcome::Reject`] for
+//! non-matches.
 //!
 //! Validators fall into three categories:
 //! - **Value extractors** (context-keyed rules): match key+value context,
@@ -14,7 +16,7 @@
 //! - **Backward-looking**: anchor is interior (email `@`, IPv4 `.`),
 //!   must scan backward to find the match start.
 
-use crate::engine::confirm::ConfirmMatch;
+use crate::engine::confirm::{ConfirmMatch, ConfirmOutcome};
 
 // ── Redaction-tag tail guard (#34) ───────────────────────────────────
 
@@ -141,12 +143,12 @@ fn is_base62(b: u8) -> bool {
 ///
 /// Classic prefixes (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`):
 ///   Exact prefix + 36 base62 chars (30 entropy + 6 CRC32). CRC mismatch
-///   ⇒ reject (pass through) — this is the FP-reduction mechanism.
+///   ⇒ `NearMiss` (F13) — shape matched but checksum failed.
 ///
 /// Fine-grained (`github_pat_`):
 ///   Shape-only, greedy `[0-9A-Za-z_]{36,255}`. No CRC validation (format
 ///   not publicly pinned).
-pub(crate) fn confirm_github_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_github_token(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     let rest = &haystack[anchor..];
 
     if rest.starts_with(b"github_pat_") {
@@ -158,34 +160,42 @@ pub(crate) fn confirm_github_token(haystack: &[u8], anchor: usize) -> Option<Con
             pos += 1;
         }
         let body_len = pos - body_start;
-        return (body_len >= 36).then(|| ConfirmMatch::full(anchor, pos));
+        return if body_len >= 36 {
+            ConfirmOutcome::Match(ConfirmMatch::full(anchor, pos))
+        } else {
+            ConfirmOutcome::Reject
+        };
     }
 
     // Classic prefix: exactly 4 bytes.
-    let prefix = rest.get(..4)?;
+    let Some(prefix) = rest.get(..4) else {
+        return ConfirmOutcome::Reject;
+    };
     if !matches!(prefix, b"ghp_" | b"gho_" | b"ghs_" | b"ghu_" | b"ghr_") {
-        return None;
+        return ConfirmOutcome::Reject;
     }
 
     // Exactly 36 body chars, base62 alphabet (no underscore).
     let body_start = anchor + 4;
     let body_end = body_start + 36;
     if body_end > haystack.len() {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let body = &haystack[body_start..body_end];
     if !body.iter().all(|&b| is_base62(b)) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
 
     // CRC32 validation: first 30 = entropy, last 6 = checksum.
+    // F13: shape matched (correct prefix + 36 base62 body); a CRC fail
+    // is a NearMiss, not a Reject — upstream format drift detection.
     let entropy = &body[..30];
     let checksum = &body[30..];
     if !validate_crc32_base62(entropy, checksum) {
-        return None;
+        return ConfirmOutcome::NearMiss;
     }
 
-    Some(ConfirmMatch::full(anchor, body_end))
+    ConfirmOutcome::Match(ConfirmMatch::full(anchor, body_end))
 }
 
 fn is_github_body(b: u8) -> bool {
@@ -197,30 +207,32 @@ fn is_github_body(b: u8) -> bool {
 /// Custom confirm for `npm-token`.
 ///
 /// Exact prefix + 36 alnum chars (30 entropy + 6 CRC32). Body alphabet
-/// is `[0-9A-Za-z]` (no underscore). CRC mismatch ⇒ reject.
-pub(crate) fn confirm_npm_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+/// is `[0-9A-Za-z]` (no underscore). CRC mismatch ⇒ `NearMiss` (F13).
+pub(crate) fn confirm_npm_token(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     let rest = &haystack[anchor..];
     if !rest.starts_with(b"npm_") {
-        return None;
+        return ConfirmOutcome::Reject;
     }
 
     let body_start = anchor + 4;
     let body_end = body_start + 36;
     if body_end > haystack.len() {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let body = &haystack[body_start..body_end];
     if !body.iter().all(|&b| is_base62(b)) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
 
+    // F13: shape matched (correct prefix + 36 base62 body); a CRC fail
+    // is a NearMiss — upstream format drift detection.
     let entropy = &body[..30];
     let checksum = &body[30..];
     if !validate_crc32_base62(entropy, checksum) {
-        return None;
+        return ConfirmOutcome::NearMiss;
     }
 
-    Some(ConfirmMatch::full(anchor, body_end))
+    ConfirmOutcome::Match(ConfirmMatch::full(anchor, body_end))
 }
 
 // ── aws-secret-key (context-keyed) ──────────────────────────────────
@@ -234,7 +246,7 @@ pub(crate) fn confirm_npm_token(haystack: &[u8], anchor: usize) -> Option<Confir
 ///
 /// F04: whitespace/quote scanning is bounded to 15 bytes per gap to
 /// prevent arbitrarily long whitespace from exceeding the rule's window.
-pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     /// Max bytes of quotes/whitespace allowed between key name and
     /// separator, and between separator and value. Keeps the total scan
     /// well within the rule's 70-byte window.
@@ -247,7 +259,7 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
     } else if rest.starts_with(b"SecretAccessKey") {
         anchor + 15 // "SecretAccessKey" = 15 chars
     } else {
-        return None;
+        return ConfirmOutcome::Reject;
     };
     // Non-alnum boundary before the key name (not mid-word). A redaction
     // tag tail counts as a word byte (#34): the tag stands in for the
@@ -255,7 +267,7 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
     if anchor > 0
         && (haystack[anchor - 1].is_ascii_alphanumeric() || ends_with_cloak_tag(haystack, anchor))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Scan for separator: skip optional quotes, whitespace, then `=`, `:`.
     let mut pos = key_end;
@@ -271,13 +283,13 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
         pos += 1;
     }
     if pos >= haystack.len() {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Accept `=` or `:`
     if haystack[pos] == b'=' || haystack[pos] == b':' {
         pos += 1;
     } else {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Skip whitespace and optional quotes after separator.
     let gap2_start = pos;
@@ -298,9 +310,9 @@ pub(crate) fn confirm_aws_secret(haystack: &[u8], anchor: usize) -> Option<Confi
         taken += 1;
     }
     if taken != 40 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch {
+    ConfirmOutcome::Match(ConfirmMatch {
         match_start: anchor,
         match_end: pos,
         redact_start: value_start,
@@ -320,7 +332,7 @@ fn is_base64_char(b: u8) -> bool {
 /// The anchor already includes the `=` separator. Scan forward for a
 /// base64 or URL-encoded value (min 20 chars, cap 255). Returns the
 /// value sub-span only.
-pub(crate) fn confirm_azure_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_azure_token(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     let rest = &haystack[anchor..];
     // Determine anchor length — anchor includes the `=`.
     let key_len = if rest.len() >= 11 && rest[..11].eq_ignore_ascii_case(b"accountkey=") {
@@ -328,7 +340,7 @@ pub(crate) fn confirm_azure_token(haystack: &[u8], anchor: usize) -> Option<Conf
     } else if rest.len() >= 4 && rest[..4].eq_ignore_ascii_case(b"sig=") {
         4
     } else {
-        return None;
+        return ConfirmOutcome::Reject;
     };
     let value_start = anchor + key_len;
     let mut pos = value_start;
@@ -339,9 +351,9 @@ pub(crate) fn confirm_azure_token(haystack: &[u8], anchor: usize) -> Option<Conf
         taken += 1;
     }
     if taken < 20 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch {
+    ConfirmOutcome::Match(ConfirmMatch {
         match_start: anchor,
         match_end: pos,
         redact_start: value_start,
@@ -382,7 +394,7 @@ const CONN_SCHEMES: &[&[u8]] = &[
 /// so unrelated `@` signs in later text cannot cause false redaction.
 /// F09: the 300-byte limit is applied BEFORE the search, not after, to
 /// prevent quadratic CPU on repeated `://` anchors.
-pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     // Anchor is `://` at `anchor`. Look backward for a scheme — bounded
     // at 12 bytes (the longest scheme, `mongodb+srv`, is 11). The bound
     // keeps the confirm independent of the carry buffer start (#27); it
@@ -396,13 +408,13 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     }
     let scheme = &haystack[scheme_start..scheme_end];
     if !CONN_SCHEMES.iter().any(|s| scheme.eq_ignore_ascii_case(s)) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // A redaction tag tail before the scheme counts as a word byte
     // (#34): `…<tag>https://…` must not confirm where the longer
     // pre-redaction scheme run did not.
     if ends_with_cloak_tag(haystack, scheme_start) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // After `://`, find the authority segment `user[:password]@host`.
     let after_scheme = anchor + 3; // skip `://`
@@ -422,7 +434,7 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     let mut seg_end = after_scheme;
     while seg_end < search_end && is_authority_char(haystack[seg_end]) {
         if starts_with_cloak_tag(haystack, seg_end) {
-            return None;
+            return ConfirmOutcome::Reject;
         }
         seg_end += 1;
     }
@@ -431,30 +443,34 @@ pub(crate) fn confirm_connection_string(haystack: &[u8], anchor: usize) -> Optio
     // segment — passwords may themselves contain `@` (e.g.
     // `postgres://admin:p@ss@db`): masking must cover the complete
     // password, so the split is at the final `@`, not the first.
-    let rel_at = segment.iter().rposition(|&b| b == b'@')?;
+    let Some(rel_at) = segment.iter().rposition(|&b| b == b'@') else {
+        return ConfirmOutcome::Reject;
+    };
     let at_pos = after_scheme + rel_at;
     // Require a host after the `@` (#41 review): `user:pass@` with
     // nothing after it is not a credential-bearing URL, and redacting
     // `pass` there is a false positive (F08).
     if at_pos + 1 >= seg_end {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Find the `:` that separates user from password (first `:` after `://`).
     let userinfo = &haystack[after_scheme..at_pos];
-    let colon_pos = userinfo.iter().position(|&b| b == b':')?;
+    let Some(colon_pos) = userinfo.iter().position(|&b| b == b':') else {
+        return ConfirmOutcome::Reject;
+    };
     let password_start = after_scheme + colon_pos + 1;
     let password_end = at_pos;
     // Password must not be empty.
     if password_start >= password_end {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Idempotence (docs/03): a password that is already a redaction tag
     // must not re-match — otherwise redact(redact(S)) re-digests the tag.
     // Same guard as the PEM body check in engine/pem.rs.
     if haystack[password_start..password_end].starts_with(b"[CLOAK:") {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch {
+    ConfirmOutcome::Match(ConfirmMatch {
         match_start: scheme_start,
         match_end: at_pos + 1, // include the `@`
         redact_start: password_start,
@@ -504,24 +520,29 @@ fn is_userinfo_char(b: u8) -> bool {
 /// Anchor: `eyJ`. Scans for three dot-separated base64url segments.
 /// Decodes the first segment (header) and checks it starts with `{"` —
 /// a minimal JSON object check.
-pub(crate) fn confirm_jwt(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_jwt(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     let rest = &haystack[anchor..];
     // Cap scan at 2048 bytes.
     let limit = rest.len().min(2048);
     let rest = &rest[..limit];
 
     // Find three dot-separated base64url segments.
-    let dot1 = rest.iter().position(|&b| b == b'.')?;
+    let Some(dot1) = rest.iter().position(|&b| b == b'.') else {
+        return ConfirmOutcome::Reject;
+    };
     if dot1 == 0 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let after_dot1 = dot1 + 1;
-    let dot2 = rest[after_dot1..]
+    let Some(dot2) = rest[after_dot1..]
         .iter()
         .position(|&b| b == b'.')
-        .map(|p| after_dot1 + p)?;
+        .map(|p| after_dot1 + p)
+    else {
+        return ConfirmOutcome::Reject;
+    };
     if dot2 == after_dot1 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Third segment: scan base64url chars.
     let after_dot2 = dot2 + 1;
@@ -536,7 +557,7 @@ pub(crate) fn confirm_jwt(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch
         sig_end = after_dot2 + keep;
     }
     if sig_end == after_dot2 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Validate all three segments are pure base64url.
     let header = &rest[..dot1];
@@ -546,15 +567,17 @@ pub(crate) fn confirm_jwt(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch
         || !payload.iter().all(|&b| is_base64url_char(b))
         || !signature.iter().all(|&b| is_base64url_char(b))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Decode header and check it looks like JSON.
-    let decoded = base64url_decode(header)?;
+    let Some(decoded) = base64url_decode(header) else {
+        return ConfirmOutcome::Reject;
+    };
     if decoded.len() < 2 || decoded[0] != b'{' || decoded[1] != b'"' {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let match_end = anchor + sig_end;
-    Some(ConfirmMatch::full(anchor, match_end))
+    ConfirmOutcome::Match(ConfirmMatch::full(anchor, match_end))
 }
 
 fn is_base64url_char(b: u8) -> bool {
@@ -637,13 +660,15 @@ fn base64url_decode(input: &[u8]) -> Option<Vec<u8>> {
 /// Replaces the DFA Pattern that could not perform PEM-marker rollback
 /// (#53): the greedy body charset includes `-` and `B/D/E/G/I/N`, so it
 /// consumed `-----END` / `-----BEGIN` from abutting PEM trailers.
-pub(crate) fn confirm_gitlab_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_gitlab_token(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     const PREFIXES: [&[u8]; 3] = [b"glpat-", b"glrt-", b"gldt-"];
     const BODY_MIN: usize = 20;
     const BODY_CAP: usize = 255;
 
     let rest = &haystack[anchor..];
-    let prefix = PREFIXES.iter().find(|p| rest.starts_with(p))?;
+    let Some(prefix) = PREFIXES.iter().find(|p| rest.starts_with(p)) else {
+        return ConfirmOutcome::Reject;
+    };
     let body_start = anchor + prefix.len();
     let cap = (body_start + BODY_CAP).min(haystack.len());
     let mut pos = body_start;
@@ -656,7 +681,11 @@ pub(crate) fn confirm_gitlab_token(haystack: &[u8], anchor: usize) -> Option<Con
     if let Some(keep) = rollback_pem_marker(&haystack[body_start..pos], at_cap) {
         body_len = keep;
     }
-    (body_len >= BODY_MIN).then(|| ConfirmMatch::full(anchor, body_start + body_len))
+    if body_len >= BODY_MIN {
+        ConfirmOutcome::Match(ConfirmMatch::full(anchor, body_start + body_len))
+    } else {
+        ConfirmOutcome::Reject
+    }
 }
 
 fn is_gitlab_body(b: u8) -> bool {
@@ -673,29 +702,29 @@ fn is_gitlab_body(b: u8) -> bool {
 /// abutting PEM marker's dash run (and possibly its word), but cannot
 /// be shortened (must remain exactly 35). When an overlap is detected
 /// the match is rejected entirely.
-pub(crate) fn confirm_gcp_api_key(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_gcp_api_key(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     const PREFIX: &[u8] = b"AIza";
     const BODY_LEN: usize = 35;
 
     let rest = &haystack[anchor..];
     if !rest.starts_with(PREFIX) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let body_start = anchor + PREFIX.len();
     let body_end = body_start + BODY_LEN;
     if body_end > haystack.len() {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let body = &haystack[body_start..body_end];
     if !body.iter().all(|&b| is_gcp_body(b)) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // #53: reject if the fixed-length body consumed bytes from an
     // adjacent PEM marker junction.
     if pem_marker_overlaps_fixed(body, haystack.get(body_end..).unwrap_or(&[])) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch::full(anchor, body_end))
+    ConfirmOutcome::Match(ConfirmMatch::full(anchor, body_end))
 }
 
 fn is_gcp_body(b: u8) -> bool {
@@ -767,14 +796,14 @@ fn pem_marker_overlaps_fixed(body: &[u8], after: &[u8]) -> bool {
 /// Anchor: `pypi-`. Body: `[A-Za-z0-9_-]{50,255}`.
 /// Replaces the DFA Pattern that could not perform PEM-marker rollback
 /// (#53): same charset vulnerability as gitlab-token.
-pub(crate) fn confirm_pypi_token(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_pypi_token(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     const PREFIX: &[u8] = b"pypi-";
     const BODY_MIN: usize = 50;
     const BODY_CAP: usize = 255;
 
     let rest = &haystack[anchor..];
     if !rest.starts_with(PREFIX) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let body_start = anchor + PREFIX.len();
     let cap = (body_start + BODY_CAP).min(haystack.len());
@@ -788,7 +817,11 @@ pub(crate) fn confirm_pypi_token(haystack: &[u8], anchor: usize) -> Option<Confi
     if let Some(keep) = rollback_pem_marker(&haystack[body_start..pos], at_cap) {
         body_len = keep;
     }
-    (body_len >= BODY_MIN).then(|| ConfirmMatch::full(anchor, body_start + body_len))
+    if body_len >= BODY_MIN {
+        ConfirmOutcome::Match(ConfirmMatch::full(anchor, body_start + body_len))
+    } else {
+        ConfirmOutcome::Reject
+    }
 }
 
 fn is_pypi_body(b: u8) -> bool {
@@ -805,13 +838,13 @@ fn is_pypi_body(b: u8) -> bool {
 /// 2. Non-digit boundaries
 /// 3. IIN range (Big Four)
 /// 4. Luhn checksum
-pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     // Non-digit boundary before the anchor. A redaction tag tail
     // counts as a digit-context byte (#34).
     if anchor > 0
         && (haystack[anchor - 1].is_ascii_digit() || ends_with_cloak_tag(haystack, anchor))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let rest = &haystack[anchor..];
     let limit = rest.len().min(25); // 19 digits + 6 separators max
@@ -840,7 +873,7 @@ pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<Conf
     if abs_end < haystack.len()
         && (haystack[abs_end].is_ascii_digit() || starts_with_cloak_tag(haystack, abs_end))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Must end on a digit (not a trailing separator). #53: trim ALL
     // trailing separators — a single `if` left 4 of 5 PEM-junction
@@ -851,17 +884,19 @@ pub(crate) fn confirm_credit_card(haystack: &[u8], anchor: usize) -> Option<Conf
     }
     let digit_count = digits.len();
     if !(13..=19).contains(&digit_count) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // IIN check (Big Four).
     if !iin_check(&digits) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Luhn checksum.
+    // F13: shape matched (valid IIN + 13–19 digits); a Luhn fail is a
+    // NearMiss — upstream format drift detection.
     if !luhn_check(&digits) {
-        return None;
+        return ConfirmOutcome::NearMiss;
     }
-    Some(ConfirmMatch::full(anchor, anchor + end))
+    ConfirmOutcome::Match(ConfirmMatch::full(anchor, anchor + end))
 }
 
 /// Luhn mod-10 checksum validation.
@@ -935,7 +970,7 @@ fn iin_prefix_4(digits: &[u8]) -> u16 {
 ///
 /// Anchor: `@`. Backward-looking: scans left for the local part and
 /// right for the domain. RFC-5322-practical subset.
-pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     // Backward: local part — capped at 64 bytes (RFC 5321, #41 review).
     // The cap is load-bearing for streaming parity: an unbounded scan
     // makes the span depend on where the carry buffer starts, so the
@@ -949,11 +984,11 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
         local_start -= 1;
     }
     if local_start == anchor {
-        return None; // empty local part
+        return ConfirmOutcome::Reject; // empty local part
     }
     // Local part must not start or end with a dot.
     if haystack[local_start] == b'.' || haystack[anchor - 1] == b'.' {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Reject URL credential context: local preceded by `:` or `/`, or
     // fused directly to a redaction tag tail (#34) — the tag stands in
@@ -963,7 +998,7 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
             || haystack[local_start - 1] == b'/'
             || ends_with_cloak_tag(haystack, local_start))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Forward: domain (capped at 253 bytes per RFC 5321 — F03).
     let domain_start = anchor + 1;
@@ -980,22 +1015,24 @@ pub(crate) fn confirm_email(haystack: &[u8], anchor: usize) -> Option<ConfirmMat
     // a longer domain (invalid TLD/labels) where pass 2 would see a
     // short, valid one.
     if starts_with_cloak_tag(haystack, domain_end) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let domain = &haystack[domain_start..domain_end];
     // Domain must have at least one dot and a TLD of ≥ 2 alpha chars.
-    let last_dot = domain.iter().rposition(|&b| b == b'.')?;
+    let Some(last_dot) = domain.iter().rposition(|&b| b == b'.') else {
+        return ConfirmOutcome::Reject;
+    };
     let tld = &domain[last_dot + 1..];
     if tld.len() < 2 || !tld.iter().all(|b| b.is_ascii_alphabetic()) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Domain labels must not be empty or start/end with hyphens.
     for label in domain.split(|&b| b == b'.') {
         if label.is_empty() || label[0] == b'-' || label[label.len() - 1] == b'-' {
-            return None;
+            return ConfirmOutcome::Reject;
         }
     }
-    Some(ConfirmMatch::full(local_start, domain_end))
+    ConfirmOutcome::Match(ConfirmMatch::full(local_start, domain_end))
 }
 
 fn is_email_local_char(b: u8) -> bool {
@@ -1014,7 +1051,7 @@ fn is_email_domain_char(b: u8) -> bool {
 /// Backward-looking: the anchor may land on the second or third octet's
 /// dot. Scans backward to find the start of the first octet, then
 /// parses four dot-separated octets (0-255) with non-digit boundaries.
-pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     // The anchor is a `<digit>.` pair. The digit might be in the middle
     // of an octet, so back up to find the start of the first octet.
     // We'll try parsing a valid IPv4 starting from each candidate start.
@@ -1029,7 +1066,7 @@ pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     // Non-digit boundary before the IP. A redaction tag tail counts as
     // a digit-context byte (#34).
     if start > 0 && (haystack[start - 1].is_ascii_digit() || ends_with_cloak_tag(haystack, start)) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Try parsing four octets from `start`.
     let mut pos = start;
@@ -1041,39 +1078,39 @@ pub(crate) fn confirm_ipv4(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
         }
         let octet_len = pos - octet_start;
         if octet_len == 0 || octet_len > 3 {
-            return None;
+            return ConfirmOutcome::Reject;
         }
         // No leading zeros (except "0" itself).
         if octet_len > 1 && haystack[octet_start] == b'0' {
-            return None;
+            return ConfirmOutcome::Reject;
         }
         let val = parse_u8_unchecked(&haystack[octet_start..pos]);
         if val > 255 {
-            return None;
+            return ConfirmOutcome::Reject;
         }
         octets += 1;
         if octets < 4 {
             if pos >= haystack.len() || haystack[pos] != b'.' {
-                return None;
+                return ConfirmOutcome::Reject;
             }
             pos += 1; // skip dot
         }
     }
     if octets != 4 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Non-digit boundary after. A redaction tag head counts as a
     // digit-context byte (#34 forward face).
     if pos < haystack.len()
         && (haystack[pos].is_ascii_digit() || starts_with_cloak_tag(haystack, pos))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Also reject if a 5th dot follows (e.g., `1.2.3.4.5`).
     if pos < haystack.len() && haystack[pos] == b'.' {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch::full(start, pos))
+    ConfirmOutcome::Match(ConfirmMatch::full(start, pos))
 }
 
 fn parse_u8_unchecked(bytes: &[u8]) -> u16 {
@@ -1096,7 +1133,7 @@ fn parse_u8_unchecked(bytes: &[u8]) -> u16 {
 /// F01: prefix-based anchors detect fully expanded 8-group addresses
 /// that contain no `::`. The confirm function scans bidirectionally from
 /// the anchor to collect the full address.
-pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     // Both scans are capped at 45 bytes from the anchor (the max IPv6
     // text length). The caps are load-bearing for streaming parity
     // (#27/#41): with a generic `:` anchor the confirm fires on every
@@ -1121,7 +1158,7 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     if start > 0
         && (haystack[start - 1].is_ascii_alphanumeric() || ends_with_cloak_tag(haystack, start))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Mid-run truncation: the backward scan hit the cap but the run
     // continues — the full run exceeds 45 bytes, so no slice of it is a
@@ -1129,7 +1166,7 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     // confirms a candidate whose 45-byte backward window is truncated by
     // the carry buffer start, and at the stream start 0 IS the run start.)
     if earliest > 0 && start == earliest && is_ipv6_char(haystack[start - 1]) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Find the end: scan forward through hex chars, colons, dots
     // (v4-mapped), at most `cap` bytes from the start.
@@ -1141,26 +1178,26 @@ pub(crate) fn confirm_ipv6(haystack: &[u8], anchor: usize) -> Option<ConfirmMatc
     }
     // Mid-run truncation on the forward side, same reasoning.
     if end - start == cap && end < haystack.len() && is_ipv6_ext_char(haystack[end]) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Non-hex boundary after. A redaction tag head counts as a word
     // byte (#34 forward face — the `::f`-before-a-redacted-token case).
     if end < haystack.len()
         && (haystack[end].is_ascii_alphanumeric() || starts_with_cloak_tag(haystack, end))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // The span must contain at least 2 colons to be a valid IPv6
     // address (cheap reject for the bulk of colon-anchor noise).
     if (colons_before + colons_after) < 2 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let addr = &haystack[start..end];
     // Parse and validate the address.
     if !validate_ipv6(addr) {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch::full(start, end))
+    ConfirmOutcome::Match(ConfirmMatch::full(start, end))
 }
 
 fn is_ipv6_char(b: u8) -> bool {
@@ -1256,17 +1293,17 @@ fn is_valid_v4_suffix(bytes: &[u8]) -> bool {
 ///
 /// Anchor: `+`. Strictly `+`-anchored international format (E.164-ish).
 /// MUST NEVER match bare 10-digit strings — the `+` anchor is mandatory.
-pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<ConfirmMatch> {
+pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> ConfirmOutcome {
     // Non-digit boundary before `+`. A redaction tag tail counts as a
     // word byte (#34) — the original #34 reproducer: a jwt redacted in
     // pass 1 leaves `]` before `+`, which the guard alone would accept.
     if anchor > 0
         && (haystack[anchor - 1].is_ascii_alphanumeric() || ends_with_cloak_tag(haystack, anchor))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     if haystack[anchor] != b'+' {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     let mut pos = anchor + 1;
     let mut digit_count = 0;
@@ -1287,7 +1324,7 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
         pos += 1;
     }
     if digit_count == 0 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Scan remaining digits with optional separators (space, dash, dot).
     while pos < limit {
@@ -1313,18 +1350,21 @@ pub(crate) fn confirm_phone_intl(haystack: &[u8], anchor: usize) -> Option<Confi
     // #34: if the greedy scan overshot, fall back to the last separator
     // crossing where the digit count was still within range.
     if digit_count > 15 {
-        pos = last_valid_sep?;
+        let Some(sep) = last_valid_sep else {
+            return ConfirmOutcome::Reject;
+        };
+        pos = sep;
     } else if digit_count < 7 {
-        return None;
+        return ConfirmOutcome::Reject;
     }
     // Non-digit boundary after. A redaction tag head counts as a
     // digit-context byte (#34 forward face).
     if pos < haystack.len()
         && (haystack[pos].is_ascii_digit() || starts_with_cloak_tag(haystack, pos))
     {
-        return None;
+        return ConfirmOutcome::Reject;
     }
-    Some(ConfirmMatch::full(anchor, pos))
+    ConfirmOutcome::Match(ConfirmMatch::full(anchor, pos))
 }
 
 // ── Unit tests ──────────────────────────────────────────────────────
@@ -1432,19 +1472,19 @@ mod tests {
     #[test]
     fn email_basic() {
         let h = b"user@example.com";
-        let m = confirm_email(h, 4).unwrap();
+        let m = confirm_email(h, 4).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 16);
     }
 
     #[test]
     fn email_no_tld() {
-        assert!(confirm_email(b"user@localhost", 4).is_none());
+        assert!(confirm_email(b"user@localhost", 4).is_reject());
     }
 
     #[test]
     fn email_short_tld() {
-        assert!(confirm_email(b"user@example.c", 4).is_none());
+        assert!(confirm_email(b"user@example.c", 4).is_reject());
     }
 
     // --- ipv4 ---
@@ -1453,19 +1493,19 @@ mod tests {
     fn ipv4_basic() {
         let h = b"192.168.1.1";
         // anchor at `2.` (position 2)
-        let m = confirm_ipv4(h, 2).unwrap();
+        let m = confirm_ipv4(h, 2).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 11);
     }
 
     #[test]
     fn ipv4_rejects_octet_overflow() {
-        assert!(confirm_ipv4(b"999.168.1.1", 2).is_none());
+        assert!(confirm_ipv4(b"999.168.1.1", 2).is_reject());
     }
 
     #[test]
     fn ipv4_rejects_leading_zeros() {
-        assert!(confirm_ipv4(b"01.02.03.04", 1).is_none());
+        assert!(confirm_ipv4(b"01.02.03.04", 1).is_reject());
     }
 
     // --- ipv6 ---
@@ -1473,7 +1513,7 @@ mod tests {
     #[test]
     fn ipv6_loopback() {
         let h = b"::1";
-        let m = confirm_ipv6(h, 0).unwrap();
+        let m = confirm_ipv6(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 3);
     }
@@ -1494,7 +1534,7 @@ mod tests {
             if h[i] == b':' && i + 1 < h.len() && h[i + 1] == b':' {
                 // Only test positions where `::` actually occurs.
                 assert!(
-                    confirm_ipv6(h, i).is_none(),
+                    confirm_ipv6(h, i).is_reject(),
                     "unexpected match at offset {i}"
                 );
             }
@@ -1504,7 +1544,7 @@ mod tests {
     #[test]
     fn ipv6_compressed() {
         let h = b"fe80::1";
-        let m = confirm_ipv6(h, 4).unwrap();
+        let m = confirm_ipv6(h, 4).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 7);
     }
@@ -1512,7 +1552,7 @@ mod tests {
     #[test]
     fn ipv6_v4_mapped() {
         let h = b"::ffff:192.168.1.1";
-        let m = confirm_ipv6(h, 0).unwrap();
+        let m = confirm_ipv6(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 18);
     }
@@ -1522,7 +1562,7 @@ mod tests {
     #[test]
     fn phone_us() {
         let h = b"+14155551234";
-        let m = confirm_phone_intl(h, 0).unwrap();
+        let m = confirm_phone_intl(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 12);
     }
@@ -1530,7 +1570,7 @@ mod tests {
     #[test]
     fn phone_with_separators() {
         let h = b"+1-415-555-1234";
-        let m = confirm_phone_intl(h, 0).unwrap();
+        let m = confirm_phone_intl(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 15);
     }
@@ -1538,19 +1578,19 @@ mod tests {
     #[test]
     fn phone_rejects_bare_digits() {
         // No `+` prefix — must not match.
-        assert!(confirm_phone_intl(b"4155551234", 0).is_none());
+        assert!(confirm_phone_intl(b"4155551234", 0).is_reject());
     }
 
     #[test]
     fn phone_rejects_too_short() {
         // +123456 = only 6 digits, need 7.
-        assert!(confirm_phone_intl(b"+123456", 0).is_none());
+        assert!(confirm_phone_intl(b"+123456", 0).is_reject());
     }
 
     #[test]
     fn phone_rejects_preceded_by_alnum() {
         // Preceded by a letter — not a boundary.
-        assert!(confirm_phone_intl(b"x+14155551234", 1).is_none());
+        assert!(confirm_phone_intl(b"x+14155551234", 1).is_reject());
     }
 
     // --- base62 ---
@@ -1630,7 +1670,7 @@ mod tests {
     fn github_classic_valid_crc() {
         // ghp_ + 30 entropy + 6 valid CRC = 40 bytes
         let h = b"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";
-        let m = confirm_github_token(h, 0).unwrap();
+        let m = confirm_github_token(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 40);
     }
@@ -1638,28 +1678,28 @@ mod tests {
     #[test]
     fn github_classic_wrong_crc_rejects() {
         let h = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
-        assert!(confirm_github_token(h, 0).is_none());
+        assert!(confirm_github_token(h, 0).is_near_miss());
     }
 
     #[test]
     fn github_classic_exact_36_body() {
         // With extra chars after — match is still exactly prefix+36.
         let h = b"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ExtraChars";
-        let m = confirm_github_token(h, 0).unwrap();
+        let m = confirm_github_token(h, 0).into_match().unwrap();
         assert_eq!(m.redact_end, 40); // NOT greedy
     }
 
     #[test]
     fn github_classic_body_too_short() {
         let h = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456"; // 35 body chars
-        assert!(confirm_github_token(h, 0).is_none());
+        assert!(confirm_github_token(h, 0).is_reject());
     }
 
     #[test]
     fn github_classic_underscore_in_body_rejects() {
         // Classic body must be base62 (no underscore).
         let h = b"ghp_AbCdEfGhIjKlMnOp_rStUvWxYz01232piBxe";
-        assert!(confirm_github_token(h, 0).is_none());
+        assert!(confirm_github_token(h, 0).is_reject());
     }
 
     #[test]
@@ -1667,7 +1707,7 @@ mod tests {
         // Fine-grained: shape-only, underscore allowed, greedy.
         let mut h = b"github_pat_".to_vec();
         h.extend(std::iter::repeat_n(b'x', 82));
-        let m = confirm_github_token(&h, 0).unwrap();
+        let m = confirm_github_token(&h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 93);
     }
@@ -1676,7 +1716,7 @@ mod tests {
     fn github_pat_underscore_in_body() {
         let mut h = b"github_pat_abc_def_".to_vec();
         h.extend(std::iter::repeat_n(b'x', 30)); // total body = 19 + 30 = 49 >= 36
-        let m = confirm_github_token(&h, 0).unwrap();
+        let m = confirm_github_token(&h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, h.len());
     }
@@ -1685,7 +1725,7 @@ mod tests {
     fn github_pat_greedy_capped() {
         let mut h = b"github_pat_".to_vec();
         h.extend(std::iter::repeat_n(b'a', 300));
-        let m = confirm_github_token(&h, 0).unwrap();
+        let m = confirm_github_token(&h, 0).into_match().unwrap();
         // Cap at 255 body chars.
         assert_eq!(m.redact_end, 11 + 255);
     }
@@ -1700,7 +1740,7 @@ mod tests {
             h.extend_from_slice(entropy);
             h.extend_from_slice(checksum);
             assert!(
-                confirm_github_token(&h, 0).is_some(),
+                confirm_github_token(&h, 0).is_match(),
                 "failed for prefix {:?}",
                 std::str::from_utf8(prefix).unwrap()
             );
@@ -1711,7 +1751,7 @@ mod tests {
     fn github_classic_at_nonzero_offset() {
         // Token embedded mid-haystack.
         let h = b"xx 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 yy";
-        let m = confirm_github_token(h, 3).unwrap();
+        let m = confirm_github_token(h, 3).into_match().unwrap();
         assert_eq!(m.redact_start, 3);
         assert_eq!(m.redact_end, 43);
     }
@@ -1720,15 +1760,15 @@ mod tests {
     fn github_classic_unknown_prefix_rejects() {
         // "ghx_" is not a known prefix — confirm must return None.
         let h = b"ghx_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxe";
-        assert!(confirm_github_token(h, 0).is_none());
+        assert!(confirm_github_token(h, 0).is_reject());
     }
 
     #[test]
     fn github_classic_anchor_near_eof() {
         // Fewer than 4 bytes remaining → rest.get(..4) returns None.
-        assert!(confirm_github_token(b"ghp", 0).is_none());
-        assert!(confirm_github_token(b"gh", 0).is_none());
-        assert!(confirm_github_token(b"g", 0).is_none());
+        assert!(confirm_github_token(b"ghp", 0).is_reject());
+        assert!(confirm_github_token(b"gh", 0).is_reject());
+        assert!(confirm_github_token(b"g", 0).is_reject());
     }
 
     #[test]
@@ -1737,7 +1777,7 @@ mod tests {
         let mut h = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz".to_vec();
         h.push(0xFF); // binary byte
         h.extend_from_slice(b"01232piBxe");
-        assert!(confirm_github_token(&h, 0).is_none());
+        assert!(confirm_github_token(&h, 0).is_reject());
     }
 
     #[test]
@@ -1745,7 +1785,7 @@ mod tests {
         // github_pat_ + 35 body chars → below minimum 36.
         let mut h = b"github_pat_".to_vec();
         h.extend(std::iter::repeat_n(b'x', 35));
-        assert!(confirm_github_token(&h, 0).is_none());
+        assert!(confirm_github_token(&h, 0).is_reject());
     }
 
     #[test]
@@ -1753,7 +1793,7 @@ mod tests {
         // Exactly 36 body chars — minimum, must match.
         let mut h = b"github_pat_".to_vec();
         h.extend(std::iter::repeat_n(b'x', 36));
-        let m = confirm_github_token(&h, 0).unwrap();
+        let m = confirm_github_token(&h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 47); // 11 + 36
     }
@@ -1763,7 +1803,7 @@ mod tests {
         let mut h = b"log ".to_vec();
         h.extend_from_slice(b"github_pat_");
         h.extend(std::iter::repeat_n(b'a', 40));
-        let m = confirm_github_token(&h, 4).unwrap();
+        let m = confirm_github_token(&h, 4).into_match().unwrap();
         assert_eq!(m.redact_start, 4);
         assert_eq!(m.redact_end, 55); // 4 + 11 + 40
     }
@@ -1773,7 +1813,7 @@ mod tests {
     #[test]
     fn npm_valid_crc() {
         let h = b"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";
-        let m = confirm_npm_token(h, 0).unwrap();
+        let m = confirm_npm_token(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 0);
         assert_eq!(m.redact_end, 40);
     }
@@ -1781,34 +1821,34 @@ mod tests {
     #[test]
     fn npm_wrong_crc_rejects() {
         let h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
-        assert!(confirm_npm_token(h, 0).is_none());
+        assert!(confirm_npm_token(h, 0).is_near_miss());
     }
 
     #[test]
     fn npm_exact_36_body() {
         // Extra alnum chars after — match is exactly prefix+36.
         let h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxeXYZ";
-        let m = confirm_npm_token(h, 0).unwrap();
+        let m = confirm_npm_token(h, 0).into_match().unwrap();
         assert_eq!(m.redact_end, 40); // NOT greedy
     }
 
     #[test]
     fn npm_body_too_short() {
         let h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz0123456"; // 35 body
-        assert!(confirm_npm_token(h, 0).is_none());
+        assert!(confirm_npm_token(h, 0).is_reject());
     }
 
     #[test]
     fn npm_underscore_in_body_rejects() {
         // npm body is alnum only — underscore rejected.
         let h = b"npm_AbCdEfGhIjKlMnOp_rStUvWxYz01232piBxe";
-        assert!(confirm_npm_token(h, 0).is_none());
+        assert!(confirm_npm_token(h, 0).is_reject());
     }
 
     #[test]
     fn npm_at_nonzero_offset() {
         let h = b"xx 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 yy";
-        let m = confirm_npm_token(h, 3).unwrap();
+        let m = confirm_npm_token(h, 3).into_match().unwrap();
         assert_eq!(m.redact_start, 3);
         assert_eq!(m.redact_end, 43);
     }
@@ -1817,14 +1857,14 @@ mod tests {
     fn npm_wrong_prefix_rejects() {
         // "xpm_" — not "npm_".
         let h = b"xpm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxe";
-        assert!(confirm_npm_token(h, 0).is_none());
+        assert!(confirm_npm_token(h, 0).is_reject());
     }
 
     #[test]
     fn npm_body_truncated_at_eof() {
         // Prefix present but body truncated by end of haystack.
-        assert!(confirm_npm_token(b"npm_abc", 0).is_none());
-        assert!(confirm_npm_token(b"npm_", 0).is_none());
+        assert!(confirm_npm_token(b"npm_abc", 0).is_reject());
+        assert!(confirm_npm_token(b"npm_", 0).is_reject());
     }
 
     #[test]
@@ -1832,17 +1872,17 @@ mod tests {
         let mut h = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz".to_vec();
         h.push(0x00); // null byte
         h.extend_from_slice(b"01232piBxe");
-        assert!(confirm_npm_token(&h, 0).is_none());
+        assert!(confirm_npm_token(&h, 0).is_reject());
     }
 
     #[test]
     fn npm_empty_haystack() {
-        assert!(confirm_npm_token(b"", 0).is_none());
+        assert!(confirm_npm_token(b"", 0).is_reject());
     }
 
     #[test]
     fn github_empty_haystack() {
-        assert!(confirm_github_token(b"", 0).is_none());
+        assert!(confirm_github_token(b"", 0).is_reject());
     }
 
     // --- aws-secret-key ---
@@ -1850,7 +1890,7 @@ mod tests {
     #[test]
     fn aws_secret_basic() {
         let h = b"aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
-        let m = confirm_aws_secret(h, 0).unwrap();
+        let m = confirm_aws_secret(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 24);
         assert_eq!(m.redact_end, 64);
     }
@@ -1858,7 +1898,7 @@ mod tests {
     #[test]
     fn aws_secret_json() {
         let h = b"\"SecretAccessKey\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\"";
-        let m = confirm_aws_secret(h, 1).unwrap();
+        let m = confirm_aws_secret(h, 1).into_match().unwrap();
         // Value starts after `": "` (with quotes).
         assert_eq!(m.redact_end - m.redact_start, 40);
     }
@@ -1869,20 +1909,20 @@ mod tests {
     fn connstring_postgres() {
         let h = b"postgres://admin:s3cret@db.example.com:5432/mydb";
         // Anchor `://` is at position 8.
-        let m = confirm_connection_string(h, 8).unwrap();
+        let m = confirm_connection_string(h, 8).into_match().unwrap();
         assert_eq!(&h[m.redact_start..m.redact_end], b"s3cret");
     }
 
     #[test]
     fn connstring_no_password() {
         let h = b"postgres://nopass@host";
-        assert!(confirm_connection_string(h, 8).is_none());
+        assert!(confirm_connection_string(h, 8).is_reject());
     }
 
     #[test]
     fn connstring_https_rejected() {
         let h = b"https://example.com";
-        assert!(confirm_connection_string(h, 5).is_none());
+        assert!(confirm_connection_string(h, 5).is_reject());
     }
 
     #[test]
@@ -1890,7 +1930,7 @@ mod tests {
         // Idempotence guard: a password that is already a redaction tag
         // must not re-match (found by fuzz_engine_stream).
         let h = b"redis://default:[CLOAK:connection-string:aea0]@redis:6379";
-        assert!(confirm_connection_string(h, 5).is_none());
+        assert!(confirm_connection_string(h, 5).is_reject());
     }
 
     // --- azure ---
@@ -1898,7 +1938,7 @@ mod tests {
     #[test]
     fn azure_account_key() {
         let h = b"AccountKey=dGhpcyBpcyBhIHRlc3QgdmFsdWUgd2l0aCBiYXNlNjQgZW5jb2Rpbmc=";
-        let m = confirm_azure_token(h, 0).unwrap();
+        let m = confirm_azure_token(h, 0).into_match().unwrap();
         assert_eq!(m.redact_start, 11); // after `AccountKey=`
         assert!(m.redact_end > m.redact_start + 20);
     }
@@ -1906,7 +1946,7 @@ mod tests {
     #[test]
     fn azure_sig_too_short() {
         let h = b"sig=abc";
-        assert!(confirm_azure_token(h, 0).is_none());
+        assert!(confirm_azure_token(h, 0).is_reject());
     }
 
     // --- negative-path arms (S6 coverage fill: every reject branch of
@@ -1915,26 +1955,26 @@ mod tests {
     #[test]
     fn aws_secret_negative_arms() {
         // Anchor bytes not an accepted key name.
-        assert!(confirm_aws_secret(b"aws_secretX=0123", 0).is_none());
+        assert!(confirm_aws_secret(b"aws_secretX=0123", 0).is_reject());
         // Preceded by an alphanumeric (mid-word).
         let h = b"Xaws_secret_access_key=0123456789012345678901234567890123456789";
-        assert!(confirm_aws_secret(h, 1).is_none());
+        assert!(confirm_aws_secret(h, 1).is_reject());
         // Key name runs to EOF while skipping quotes/whitespace.
-        assert!(confirm_aws_secret(b"aws_secret_access_key \t", 0).is_none());
+        assert!(confirm_aws_secret(b"aws_secret_access_key \t", 0).is_reject());
         // Separator is neither `=` nor `:`.
         assert!(
             confirm_aws_secret(
                 b"aws_secret_access_key*0123456789012345678901234567890123456789",
                 0
             )
-            .is_none()
+            .is_reject()
         );
     }
 
     #[test]
     fn azure_anchor_mismatch_rejected() {
         // Called at bytes that are not an accepted anchor.
-        assert!(confirm_azure_token(b"NotAKey=abcdefghijklmnopqrstuv", 0).is_none());
+        assert!(confirm_azure_token(b"NotAKey=abcdefghijklmnopqrstuv", 0).is_reject());
     }
 
     #[test]
@@ -1944,21 +1984,21 @@ mod tests {
         h.extend_from_slice(&vec![b'p'; 300]);
         h.push(b'@');
         h.extend_from_slice(b"host");
-        assert!(confirm_connection_string(&h, 8).is_none());
+        assert!(confirm_connection_string(&h, 8).is_reject());
         // Empty password: colon immediately before `@`.
-        assert!(confirm_connection_string(b"postgres://user:@host", 8).is_none());
+        assert!(confirm_connection_string(b"postgres://user:@host", 8).is_reject());
     }
 
     #[test]
     fn jwt_negative_arms() {
         // Dot at position 0 (direct call — anchored calls can't produce it).
-        assert!(confirm_jwt(b".ab.cd", 0).is_none());
+        assert!(confirm_jwt(b".ab.cd", 0).is_reject());
         // Empty payload: two consecutive dots.
-        assert!(confirm_jwt(b"eyJhbGci..signature", 0).is_none());
+        assert!(confirm_jwt(b"eyJhbGci..signature", 0).is_reject());
         // Invalid byte inside the header segment.
-        assert!(confirm_jwt(b"eyJ\xffab.cd.ef", 0).is_none());
+        assert!(confirm_jwt(b"eyJ\xffab.cd.ef", 0).is_reject());
         // Header decodes but is not a JSON object.
-        assert!(confirm_jwt(b"QUJD.abcd.efgh", 0).is_none());
+        assert!(confirm_jwt(b"QUJD.abcd.efgh", 0).is_reject());
         // `-`/`_` decode arms of base64url.
         assert!(base64url_decode(b"eyJ-_w").is_some());
     }
@@ -1978,14 +2018,20 @@ mod tests {
     fn jwt_pem_trailer_rollback() {
         // The #50 repro junction: the greedy scan would eat `-----END`.
         let h = jwt_with_tail(b"-----END PRIVATE KEY-----BEGIN RSA PRIVATE KEY-----");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len()
+        );
     }
 
     #[test]
     fn jwt_pem_begin_rollback() {
         // A directly abutting BEGIN marker is rolled back too.
         let h = jwt_with_tail(b"-----BEGIN RSA PRIVATE KEY-----");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len()
+        );
     }
 
     #[test]
@@ -1994,7 +2040,10 @@ mod tests {
         // so the trailer stays intact and the junction geometry is
         // pass-stable (#46 accepts fused junctions 5–9).
         let h = jwt_with_tail(b"-------END PRIVATE KEY-----");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len());
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len()
+        );
     }
 
     #[test]
@@ -2002,22 +2051,34 @@ mod tests {
         // 4 dashes: below the guard-relevant run, greedy span unchanged
         // (`----END` stays consumed; already idempotent today).
         let h = jwt_with_tail(b"----END PRIVATE KEY-----");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 7);
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len() + 7
+        );
     }
 
     #[test]
     fn jwt_pem_rollback_requires_complete_word() {
         // Off-cap, a truncated word is not a marker.
         let h = jwt_with_tail(b"-----EN(");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 7);
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len() + 7
+        );
     }
 
     #[test]
     fn jwt_pem_rollback_ignores_lookalike_words() {
         let h = jwt_with_tail(b"-----BEND ");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 9);
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len() + 9
+        );
         let h = jwt_with_tail(b"-----ENDEND ");
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, JWT108.len() + 11);
+        assert_eq!(
+            confirm_jwt(&h, 0).into_match().unwrap().match_end,
+            JWT108.len() + 11
+        );
     }
 
     #[test]
@@ -2028,7 +2089,7 @@ mod tests {
                 b"eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.-----END PRIVATE KEY-----",
                 0
             )
-            .is_none()
+            .is_reject()
         );
     }
 
@@ -2048,7 +2109,10 @@ mod tests {
             let junction_start = h.len();
             assert_eq!(junction_start, 2048 - cut);
             h.extend_from_slice(junction);
-            assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, junction_start);
+            assert_eq!(
+                confirm_jwt(&h, 0).into_match().unwrap().match_end,
+                junction_start
+            );
         }
         // Control: scan stops one byte short of the cap on a non-base64url
         // byte with a partial word — the loose arm must NOT fire.
@@ -2058,7 +2122,7 @@ mod tests {
         h.extend(std::iter::repeat_n(b'S', 2047 - 21 - 2 - 7));
         h.extend_from_slice(b"-----EN!"); // scan stops at `!` = offset 2047
         h.extend(std::iter::repeat_n(b'!', 64)); // keep rest.len() >= 2048
-        assert_eq!(confirm_jwt(&h, 0).unwrap().match_end, 2047);
+        assert_eq!(confirm_jwt(&h, 0).into_match().unwrap().match_end, 2047);
     }
 
     #[test]
@@ -2073,15 +2137,17 @@ mod tests {
     #[test]
     fn credit_card_negative_arms() {
         // More than 19 digits — cap branch, then length reject.
-        assert!(confirm_credit_card(b"41111111111111111111111", 0).is_none());
+        assert!(confirm_credit_card(b"41111111111111111111111", 0).is_reject());
         // Separator at the anchor position (no digits yet).
-        assert!(confirm_credit_card(b" 4111111111111111", 0).is_none());
-        // Digit immediately after the match window.
-        assert!(confirm_credit_card(b"45395787636214860", 0).is_none());
+        assert!(confirm_credit_card(b" 4111111111111111", 0).is_reject());
+        // 17 digits — valid IIN (Visa) but Luhn fails → NearMiss.
+        assert!(confirm_credit_card(b"45395787636214860", 0).is_near_miss());
         // Luhn-valid but unknown IIN.
-        assert!(confirm_credit_card(b"9111111111111111", 0).is_none());
+        assert!(confirm_credit_card(b"9111111111111111", 0).is_reject());
         // Discover 6011 positive arm.
-        let m = confirm_credit_card(b"6011000990139424", 0).unwrap();
+        let m = confirm_credit_card(b"6011000990139424", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_end, 16);
         // iin_check arms directly.
         assert!(!iin_check(&[]));
@@ -2095,41 +2161,41 @@ mod tests {
     fn gcp_pem_trailer_5_dashes_rejected() {
         // Body's last 5 chars are PEM dashes, after starts with `END `.
         let input = b"AIzaSyA0123456789abcdefghijklmnop-----END PRIVATE KEY-----";
-        assert!(confirm_gcp_api_key(input, 0).is_none());
+        assert!(confirm_gcp_api_key(input, 0).is_reject());
     }
 
     #[test]
     fn gcp_pem_trailer_body_ends_with_end_rejected() {
         // Body consumed `-----END`, after starts with ` PRIVATE KEY-----`.
         let input = b"AIzaSyA0123456789abcdefghijklm-----END PRIVATE KEY-----";
-        assert!(confirm_gcp_api_key(input, 0).is_none());
+        assert!(confirm_gcp_api_key(input, 0).is_reject());
     }
 
     #[test]
     fn gcp_pem_trailer_1_dash_rejected() {
         // Body consumed 1 dash, remaining 4 dashes + END in after.
         let input = b"AIzaSyA0123456789abcdefghijklmnopqr-----END PRIVATE KEY-----";
-        assert!(confirm_gcp_api_key(input, 0).is_none());
+        assert!(confirm_gcp_api_key(input, 0).is_reject());
     }
 
     #[test]
     fn gcp_pem_begin_rejected() {
         let input = b"AIzaSyA0123456789abcdefghijklmnop-----BEGIN RSA PRIVATE KEY-----\nAAAA\n";
-        assert!(confirm_gcp_api_key(input, 0).is_none());
+        assert!(confirm_gcp_api_key(input, 0).is_reject());
     }
 
     #[test]
     fn gcp_pem_6_dashes_rejected() {
         // 6 dashes + END — the marker's 5-dash prefix starts at offset 1.
         let input = b"AIzaSyA0123456789abcdefghijklmno------END PRIVATE KEY-----";
-        assert!(confirm_gcp_api_key(input, 0).is_none());
+        assert!(confirm_gcp_api_key(input, 0).is_reject());
     }
 
     #[test]
     fn gcp_legitimate_trailing_dash_accepted() {
         // Body ends in `-`, after = `xyz` — not a PEM junction.
         let input = b"AIzaSyA0123456789abcdefghijklmnopqr-xyz";
-        let m = confirm_gcp_api_key(input, 0).unwrap();
+        let m = confirm_gcp_api_key(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 39);
     }
 
@@ -2137,14 +2203,14 @@ mod tests {
     fn gcp_legitimate_trailing_five_dashes_accepted() {
         // Body ends in `-----`, after = `foo bar` — no PEM context.
         let input = b"AIzaSyA0123456789abcdefghijklmnop-----foo bar";
-        let m = confirm_gcp_api_key(input, 0).unwrap();
+        let m = confirm_gcp_api_key(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 39);
     }
 
     #[test]
     fn gcp_no_dashes_accepted() {
         let input = b"AIzaSyC0123456789abcdefghijklmnopqrstuv";
-        let m = confirm_gcp_api_key(input, 0).unwrap();
+        let m = confirm_gcp_api_key(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 39);
     }
 
@@ -2153,7 +2219,7 @@ mod tests {
         // Body consumed `-----EN`, after starts with `D PRIVATE KEY-----`.
         // Combined at offset 0: `-----END PRIVATE KEY-----` → reject.
         let input = b"AIzaSyA0123456789abcdefghijklmno-----END PRIVATE KEY-----";
-        assert!(confirm_gcp_api_key(input, 0).is_none());
+        assert!(confirm_gcp_api_key(input, 0).is_reject());
     }
 
     #[test]
@@ -2167,7 +2233,7 @@ mod tests {
             input.resize(input.len() + dashes, b'-');
             input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
             assert!(
-                confirm_gcp_api_key(&input, 0).is_none(),
+                confirm_gcp_api_key(&input, 0).is_reject(),
                 "dashes={dashes} must be rejected"
             );
         }
@@ -2184,6 +2250,7 @@ mod tests {
             input.resize(input.len() + dashes, b'-');
             input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n");
             let m = confirm_gcp_api_key(&input, 0)
+                .into_match()
                 .unwrap_or_else(|| panic!("dashes={dashes} must be accepted"));
             assert_eq!(m.match_end, 39);
         }
@@ -2197,7 +2264,7 @@ mod tests {
         let mut input = b"pypi-".to_vec();
         input.extend(std::iter::repeat_n(b'A', 50));
         input.extend_from_slice(b"-----END PRIVATE KEY-----");
-        let m = confirm_pypi_token(&input, 0).unwrap();
+        let m = confirm_pypi_token(&input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 55); // 5 prefix + 50 body
     }
 
@@ -2206,7 +2273,7 @@ mod tests {
         let mut input = b"pypi-".to_vec();
         input.extend(std::iter::repeat_n(b'A', 50));
         input.extend_from_slice(b"-----BEGIN RSA PRIVATE KEY-----");
-        let m = confirm_pypi_token(&input, 0).unwrap();
+        let m = confirm_pypi_token(&input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 55);
     }
 
@@ -2217,7 +2284,7 @@ mod tests {
         let mut input = b"pypi-".to_vec();
         input.extend(std::iter::repeat_n(b'A', 45));
         input.extend_from_slice(b"-----END PRIVATE KEY-----");
-        assert!(confirm_pypi_token(&input, 0).is_none());
+        assert!(confirm_pypi_token(&input, 0).is_reject());
     }
 
     #[test]
@@ -2226,7 +2293,7 @@ mod tests {
         let mut input = b"pypi-".to_vec();
         input.extend(std::iter::repeat_n(b'A', 250));
         input.extend_from_slice(b"-----END PRIVATE KEY-----");
-        let m = confirm_pypi_token(&input, 0).unwrap();
+        let m = confirm_pypi_token(&input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 255); // 5 prefix + 250 body
     }
 
@@ -2235,7 +2302,7 @@ mod tests {
         let mut input = b"pypi-".to_vec();
         input.extend(std::iter::repeat_n(b'A', 50));
         input.extend_from_slice(b"-----BEND ");
-        let m = confirm_pypi_token(&input, 0).unwrap();
+        let m = confirm_pypi_token(&input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 64); // includes dashes + BEND
     }
 
@@ -2246,14 +2313,14 @@ mod tests {
         // glpat + 20 alnum + `-----END PRIVATE KEY-----` — rollback
         // strips the dash run + word, match ends after the 20 alnum chars.
         let input = b"glpat-abcdefghij0123456789-----END PRIVATE KEY-----";
-        let m = confirm_gitlab_token(input, 0).unwrap();
+        let m = confirm_gitlab_token(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 26);
     }
 
     #[test]
     fn gitlab_pem_begin_rollback() {
         let input = b"glpat-abcdefghij0123456789-----BEGIN RSA PRIVATE KEY-----";
-        let m = confirm_gitlab_token(input, 0).unwrap();
+        let m = confirm_gitlab_token(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 26);
     }
 
@@ -2261,7 +2328,7 @@ mod tests {
     fn gitlab_pem_rollback_strips_entire_dash_run() {
         // 7-dash junction — entire run rolled back (not just 5).
         let input = b"glpat-abcdefghij0123456789-------END PRIVATE KEY-----";
-        let m = confirm_gitlab_token(input, 0).unwrap();
+        let m = confirm_gitlab_token(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 26);
     }
 
@@ -2270,7 +2337,7 @@ mod tests {
         // 4-dash junction — below the guard threshold, no rollback.
         // Body ends at the space: 20 alnum + 4 dashes + END = 27 body chars.
         let input = b"glpat-abcdefghij0123456789----END PRIVATE KEY-----";
-        let m = confirm_gitlab_token(input, 0).unwrap();
+        let m = confirm_gitlab_token(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 33); // 6 prefix + 20 alnum + 4 dashes + END
     }
 
@@ -2279,7 +2346,7 @@ mod tests {
         // Body = 15 alnum + `-----END` = 23 chars. After rollback body is
         // 15 — below the 20-char minimum — rejected.
         let input = b"glpat-abcdefghij01234-----END PRIVATE KEY-----";
-        assert!(confirm_gitlab_token(input, 0).is_none());
+        assert!(confirm_gitlab_token(input, 0).is_reject());
     }
 
     #[test]
@@ -2290,7 +2357,7 @@ mod tests {
         input.extend(std::iter::repeat_n(b'a', 250));
         input.extend_from_slice(b"-----END PRIVATE KEY-----");
         // 250 alnum + 5 dashes = 255 = cap → at_cap = true, rollback fires.
-        let m = confirm_gitlab_token(&input, 0).unwrap();
+        let m = confirm_gitlab_token(&input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 256); // 6 prefix + 250 alnum
     }
 
@@ -2298,7 +2365,7 @@ mod tests {
     fn gitlab_no_rollback_on_lookalike() {
         // `-----BEND` is not a PEM marker word — no rollback.
         let input = b"glpat-abcdefghij0123456789-----BEND ";
-        let m = confirm_gitlab_token(input, 0).unwrap();
+        let m = confirm_gitlab_token(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 35); // includes dashes + BEND
     }
 
@@ -2309,44 +2376,52 @@ mod tests {
         // Five trailing dashes from an abutting PEM `-----END` — the while
         // loop must trim all of them, leaving the match on the last digit.
         let input = b"4539578763621486-----END PRIVATE KEY-----";
-        let m = confirm_credit_card(input, 0).unwrap();
+        let m = confirm_credit_card(input, 0).into_match().unwrap();
         assert_eq!(m.match_end, 16);
     }
 
     #[test]
     fn credit_card_single_trailing_dash_trimmed() {
-        let m = confirm_credit_card(b"4539578763621486-", 0).unwrap();
+        let m = confirm_credit_card(b"4539578763621486-", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_end, 16);
     }
 
     #[test]
     fn credit_card_multiple_trailing_mixed_seps() {
         // Trailing dash-space-dash — all three trimmed.
-        let m = confirm_credit_card(b"4539578763621486- -", 0).unwrap();
+        let m = confirm_credit_card(b"4539578763621486- -", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_end, 16);
     }
 
     #[test]
     fn credit_card_trailing_spaces_trimmed() {
-        let m = confirm_credit_card(b"4539578763621486   ", 0).unwrap();
+        let m = confirm_credit_card(b"4539578763621486   ", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_end, 16);
     }
 
     #[test]
     fn credit_card_dashes_between_groups_preserved() {
         // Internal dashes are part of the match — only trailing ones trim.
-        let m = confirm_credit_card(b"4539-5787-6362-1486", 0).unwrap();
+        let m = confirm_credit_card(b"4539-5787-6362-1486", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_end, 19);
     }
 
     #[test]
     fn email_negative_arms() {
         // Local part ends with a dot.
-        assert!(confirm_email(b"a.@example.com", 2).is_none());
+        assert!(confirm_email(b"a.@example.com", 2).is_reject());
         // Domain label starts with a hyphen.
-        assert!(confirm_email(b"user@-bad.com", 4).is_none());
+        assert!(confirm_email(b"user@-bad.com", 4).is_reject());
         // Domain label ends with a hyphen.
-        assert!(confirm_email(b"user@bad-.com", 4).is_none());
+        assert!(confirm_email(b"user@bad-.com", 4).is_reject());
     }
 
     #[test]
@@ -2354,18 +2429,18 @@ mod tests {
         // Backward scan hits the 11-byte cap with a digit still before it
         // (a number too long to be an octet run).
         let h = b"1111111111111.2.3.4";
-        assert!(confirm_ipv4(h, 12).is_none());
+        assert!(confirm_ipv4(h, 12).is_reject());
         // Octet over 255.
-        assert!(confirm_ipv4(b"1.2.3.456", 0).is_none());
+        assert!(confirm_ipv4(b"1.2.3.456", 0).is_reject());
     }
 
     #[test]
     fn ipv6_negative_arms() {
         // Longer than 45 bytes of ipv6 charset.
         let h = b"1111:2222:3333:4444:5555:6666:7777:8888:9999::aaaa";
-        assert!(confirm_ipv6(h, 45).is_none());
+        assert!(confirm_ipv6(h, 45).is_reject());
         // Followed by an alphanumeric.
-        assert!(confirm_ipv6(b"::1z", 0).is_none());
+        assert!(confirm_ipv6(b"::1z", 0).is_reject());
         // validate arms: full form (no `::`), multiple `::`.
         assert!(validate_ipv6(b"1:2:3:4:5:6:7:8"));
         assert!(!validate_ipv6(b"1:2:3:4:5:6:7"));
@@ -2375,7 +2450,7 @@ mod tests {
     #[test]
     fn phone_boundary_after_digit() {
         // 13th digit right after the 12-digit cap window.
-        assert!(confirm_phone_intl(b"+1234567890123456789", 0).is_none());
+        assert!(confirm_phone_intl(b"+1234567890123456789", 0).is_reject());
     }
 
     /// #34 (greedy-consumption variant): the greedy separator scan
@@ -2386,7 +2461,9 @@ mod tests {
         // Phone (11 digits) + space + IPv4 digits → greedy scan gives
         // 19 digits, exceeds 15 → fallback to last separator (dot after
         // 192) gives a 14-digit match.
-        let m = confirm_phone_intl(b"+14155551234 192.168.0.1", 0).unwrap();
+        let m = confirm_phone_intl(b"+14155551234 192.168.0.1", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_start, 0);
         // Match ends at the dot between `192` and `168` (position 16) —
         // the last separator where digit_count (14) was still in [7, 15].
@@ -2396,13 +2473,15 @@ mod tests {
     #[test]
     fn phone_greedy_overshoot_no_valid_sep_rejects() {
         // All 18 consecutive digits, no separator to fall back to.
-        assert!(confirm_phone_intl(b"+123456789012345678", 0).is_none());
+        assert!(confirm_phone_intl(b"+123456789012345678", 0).is_reject());
     }
 
     #[test]
     fn phone_greedy_overshoot_preserves_valid_match() {
         // 15 digits (E.164 max) — no overshoot, match is valid as-is.
-        let m = confirm_phone_intl(b"+1 234567 89012345 end", 0).unwrap();
+        let m = confirm_phone_intl(b"+1 234567 89012345 end", 0)
+            .into_match()
+            .unwrap();
         assert_eq!(m.match_start, 0);
         // "+1 234567 89012345" = 15 digits, stops at space before "end"
         assert_eq!(m.match_end, 18);

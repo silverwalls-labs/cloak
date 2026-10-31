@@ -9,7 +9,7 @@
 pub mod validators;
 pub mod vectors;
 
-use crate::engine::confirm::ConfirmMatch;
+use crate::engine::confirm::ConfirmOutcome;
 
 /// How a rule's confirm step works.
 ///
@@ -26,10 +26,10 @@ pub enum ConfirmSpec {
     /// see `engine/confirm.rs`).
     Pattern(&'static str),
     /// Custom confirm function. Receives the full haystack and the
-    /// anchor start position. Returns `None` to reject, or
-    /// `Some(ConfirmMatch)` with the redaction span — which may differ
-    /// from the DFA match span for context-keyed rules.
-    Custom(fn(&[u8], usize) -> Option<ConfirmMatch>),
+    /// anchor start position. Returns `Match` with the redaction span,
+    /// `NearMiss` for shape-valid but checksum-rejected candidates (F13),
+    /// or `Reject` for non-matches.
+    Custom(fn(&[u8], usize) -> ConfirmOutcome),
 }
 
 /// Static specification of one detection rule.
