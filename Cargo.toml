@@ -34,19 +34,19 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 getrandom = "0.4"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"
 serde_json = "1"
 crc32fast = "1"
-criterion = "0.5"
+criterion = "0.8"
 insta = { version = "1", features = ["json"] }
-rand = "0.9"
+rand = "0.10"
 tempfile = "3"
 proptest = "1"
 # Default features minus `cache`: module-cache compression pulls in a
 # zstd tree with unpatched advisories (RUSTSEC-2026-0391/0398/0403 — no
-# fixed zstd 0.13.x exists, and even wasmtime 50 still pins ^0.13), and
+# fixed zstd 0.13.x exists, and wasmtime still pins ^0.13), and
 # nothing here caches compiled modules (wasm-parity compiles per run).
-wasmtime = { version = "49", default-features = false, features = [
+wasmtime = { version = "50", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc",
     "gc-null", "wat", "profiling", "parallel-compilation", "cranelift",
     "pooling-allocator", "demangle", "addr2line", "coredump",
@@ -54,7 +54,7 @@ wasmtime = { version = "49", default-features = false, features = [
     "component-model-async", "threads", "stack-switching", "std",
     "debug", "compile-time-builtins", "wit-parser",
 ] }
-wasmtime-wasi = { version = "49", features = ["p1"] }
+wasmtime-wasi = { version = "50", features = ["p1"] }
 pyo3 = "0.30"
 pyo3-build-config = "0.30"
 
