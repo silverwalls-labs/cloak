@@ -1,0 +1,12 @@
+{
+  "name": "cloak-node-native-linux-x64-gnu",
+  "version": "0.1.0",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "main": "cloak-node-native.linux-x64-gnu.node",
+  "files": ["cloak-node-native.linux-x64-gnu.node"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,33 @@
+# E6 (docs/06-embedding.md): native Node.js binding over cloak-core.
+# Built by napi-rs into prebuilt .node binaries per platform.
+[package]
+name = "cloak-node"
+description = "Native Node.js binding over cloak-core — napi-rs, prebuilt .node binaries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+# No Rust-side tests: all behavior is covered by the node:test suite
+# (parity vectors, streaming, config, transforms) against the built
+# module — and a test binary would need to link Node.js internals.
+test = false
+doctest = false
+
+[features]
+# default builds the native extension; cargo clippy / cargo build
+# --workspace work without a Node.js installation because napi-rs
+# leaves N-API symbols unresolved (the host supplies them at load time).
+default = []
+
+[dependencies]
+cloak-core = { path = "../cloak-core" }
+napi = { workspace = true }
+napi-derive = { workspace = true }
+
+[build-dependencies]
+napi-build = { workspace = true }
