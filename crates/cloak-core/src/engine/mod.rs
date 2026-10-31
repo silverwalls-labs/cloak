@@ -12,7 +12,7 @@ use crate::config::{self, Config};
 use crate::rules;
 use crate::rules::validators::CLOAK_TAG_MAX;
 use crate::types::Stats;
-use confirm::CompiledRule;
+use confirm::{CompiledRule, ConfirmOutcome};
 use overlap::{MergedMatch, RawMatch};
 use scanner::{AhoCorasickScanner, Candidate, Scanner};
 
@@ -151,6 +151,7 @@ impl Engine {
             engine: self,
             bytes_processed: 0,
             matches: BTreeMap::new(),
+            near_misses: BTreeMap::new(),
             carry_over: Vec::new(),
             carry_abs: 0,
             ctx_len: 0,
@@ -176,6 +177,9 @@ pub struct Session<'e> {
     bytes_processed: u64,
     /// Per-rule match counts, accumulated across pushes.
     matches: BTreeMap<crate::types::RuleId, u64>,
+    /// Per-rule near-miss counts (F13): candidates that matched a rule's
+    /// shape but failed checksum/structural validation (CRC32, Luhn).
+    near_misses: BTreeMap<crate::types::RuleId, u64>,
     /// Trailing bytes from the previous push that could not yet be flushed.
     carry_over: Vec<u8>,
     /// Absolute stream offset of `carry_over[0]` (bytes flushed so far).
@@ -386,6 +390,7 @@ impl Session<'_> {
         Ok(Stats {
             bytes_processed: self.bytes_processed,
             matches: self.matches,
+            near_misses: self.near_misses,
         })
     }
 
@@ -670,17 +675,44 @@ impl Session<'_> {
             // CLOAK_TAG_MAX, so they always pass the precise check.
             let truncated = self.carry_abs > 0 && cand.start < rule.back;
             let resolvable = is_final || cand.start + rule.window <= combined_len;
-            if resolvable && let Some(cm) = confirm::confirm(rule, &self.carry_over, cand.start) {
-                if truncated && cm.match_start < CLOAK_TAG_MAX {
-                    continue;
+            if resolvable {
+                match confirm::confirm(rule, &self.carry_over, cand.start) {
+                    ConfirmOutcome::Match(cm) => {
+                        if truncated && cm.match_start < CLOAK_TAG_MAX {
+                            continue;
+                        }
+                        self.raw.push(RawMatch {
+                            start: cm.match_start,
+                            end: cm.match_end,
+                            redact_start: cm.redact_start,
+                            redact_end: cm.redact_end,
+                            rule: cand.rule,
+                        });
+                    }
+                    ConfirmOutcome::NearMiss => {
+                        // F13: count shape-matched but checksum-rejected
+                        // candidates. Only counted in the final flush to
+                        // avoid double-counting: non-final scans may
+                        // re-confirm the same candidate across pushes
+                        // (it stays in the carry until finish drains it).
+                        // Matches avoid this because they are counted at
+                        // EMIT time (step 7), not confirm time — near-misses
+                        // have no span to emit, so the final-only gate is
+                        // the simplest correct approach. The `truncated`
+                        // guard used for matches is NOT applied here:
+                        // matches have the `retained` list as a fallback
+                        // for truncated candidates, but near-misses have
+                        // no retention mechanism — dropping a truncated
+                        // near-miss at finish loses the count permanently.
+                        // At finish, every candidate is confirmed with
+                        // whatever backward context the carry holds, which
+                        // is sufficient for the operational counter.
+                        if is_final {
+                            *self.near_misses.entry(rule.id.clone()).or_insert(0) += 1;
+                        }
+                    }
+                    ConfirmOutcome::Reject => {}
                 }
-                self.raw.push(RawMatch {
-                    start: cm.match_start,
-                    end: cm.match_end,
-                    redact_start: cm.redact_start,
-                    redact_end: cm.redact_end,
-                    rule: cand.rule,
-                });
             }
         }
 
@@ -1801,6 +1833,158 @@ mod tests {
             Some(&1),
             "fully expanded IPv6 must be detected: {}",
             String::from_utf8_lossy(&out)
+        );
+    }
+
+    // ── F13: near-miss observability ────────────────────────────────
+
+    #[test]
+    fn f13_crc_invalid_github_token_is_near_miss() {
+        // ghp_ + 30 base62 entropy + 6 WRONG CRC: shape matches but CRC
+        // fails → near-miss, not a match.
+        let engine = test_engine();
+        let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+        let (output, stats) = push_all(&engine, input);
+        assert_eq!(
+            output,
+            input.as_slice(),
+            "CRC-invalid token must pass through"
+        );
+        assert!(
+            !stats.matches.contains_key(&RuleId::new("github-token")),
+            "CRC-invalid token must NOT be a match"
+        );
+        assert_eq!(
+            stats.near_misses.get(&RuleId::new("github-token")),
+            Some(&1),
+            "CRC-invalid token must be a near-miss"
+        );
+    }
+
+    #[test]
+    fn f13_crc_valid_github_token_is_match_not_near_miss() {
+        // Valid CRC: match only, no near-miss.
+        let engine = test_engine();
+        let input = b"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";
+        let (_, stats) = push_all(&engine, input);
+        assert_eq!(stats.matches[&RuleId::new("github-token")], 1);
+        assert!(
+            !stats.near_misses.contains_key(&RuleId::new("github-token")),
+            "valid token must NOT be a near-miss"
+        );
+    }
+
+    #[test]
+    fn f13_crc_invalid_npm_token_is_near_miss() {
+        let engine = test_engine();
+        let input = b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+        let (output, stats) = push_all(&engine, input);
+        assert_eq!(
+            output,
+            input.as_slice(),
+            "CRC-invalid npm token must pass through"
+        );
+        assert_eq!(
+            stats.near_misses.get(&RuleId::new("npm-token")),
+            Some(&1),
+            "CRC-invalid npm token must be a near-miss"
+        );
+    }
+
+    #[test]
+    fn f13_luhn_invalid_credit_card_is_near_miss() {
+        // 16-digit Visa-prefixed number with valid IIN but invalid Luhn.
+        // 4539578763621487: IIN=Visa, Luhn fails (last digit wrong).
+        let engine = test_engine();
+        let input = b"cc=4539578763621487 ok";
+        let (output, stats) = push_all(&engine, input);
+        assert_eq!(
+            output,
+            input.as_slice(),
+            "Luhn-invalid card must pass through"
+        );
+        assert_eq!(
+            stats.near_misses.get(&RuleId::new("credit-card")),
+            Some(&1),
+            "Luhn-invalid card must be a near-miss"
+        );
+    }
+
+    #[test]
+    fn f13_no_near_misses_when_no_anchors() {
+        let engine = test_engine();
+        let (_, stats) = push_all(&engine, b"hello world no secrets");
+        assert!(stats.near_misses.is_empty());
+        assert_eq!(stats.total_near_misses(), 0);
+    }
+
+    #[test]
+    fn f13_near_miss_streaming_parity() {
+        // A CRC-invalid token split across pushes must produce the same
+        // near-miss count as a whole-buffer push — no double-counting.
+        let engine = test_engine();
+        let input = b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+        let (_, whole_stats) = push_all(&engine, input);
+        assert_eq!(whole_stats.near_misses[&RuleId::new("github-token")], 1);
+
+        for cs in [1usize, 7, 20, 40] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(cs) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert_eq!(
+                stats.near_misses.get(&RuleId::new("github-token")),
+                Some(&1),
+                "chunk size {cs}: near-miss count must equal whole-buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn f13_near_miss_credit_card_streaming_parity() {
+        // Credit-card has back=30 (CLOAK_TAG_MAX), so a Luhn-invalid card
+        // near the start of the carry buffer at finish time exercises the
+        // truncation path. The near-miss must still be counted — unlike
+        // matches, near-misses have no retention fallback.
+        let engine = test_engine();
+        // 4539578763621487: Visa IIN, 16 digits, Luhn-INVALID (last digit wrong).
+        // Pad with enough clean text to push the card into carry territory.
+        let mut input = vec![b'x'; 3000];
+        input.extend_from_slice(b" 4539578763621487 ");
+        let (_, whole_stats) = push_all(&engine, &input);
+        assert_eq!(
+            whole_stats.near_misses.get(&RuleId::new("credit-card")),
+            Some(&1),
+            "whole-buffer: Luhn-invalid card must be a near-miss"
+        );
+
+        for cs in [1usize, 7, 64, 1024, 2048] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(cs) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert_eq!(
+                stats.near_misses.get(&RuleId::new("credit-card")),
+                Some(&1),
+                "chunk size {cs}: credit-card near-miss count must equal whole-buffer"
+            );
+        }
+    }
+
+    #[test]
+    fn f13_stats_json_omits_empty_near_misses() {
+        // When no near-misses occur, the JSON output must not include the
+        // field — byte-identical to pre-F13 output.
+        let engine = test_engine();
+        let (_, stats) = push_all(&engine, b"hello world");
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(
+            !json.contains("near_misses"),
+            "empty near_misses must be absent from JSON: {json}"
         );
     }
 }

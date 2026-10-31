@@ -1481,6 +1481,7 @@ pub fn redact(input: &[u8], digest_key: &[u8; 32]) -> (Vec<u8>, Stats) {
         Stats {
             bytes_processed: input.len() as u64,
             matches: match_counts,
+            near_misses: std::collections::BTreeMap::new(),
         },
     )
 }
@@ -1598,7 +1599,9 @@ mod tests {
         for input in &fixtures {
             assert_eq!(
                 confirm_jwt_oracle(input, 0),
-                crate::rules::validators::confirm_jwt(input, 0).map(|m| m.match_end),
+                crate::rules::validators::confirm_jwt(input, 0)
+                    .into_match()
+                    .map(|m| m.match_end),
                 "oracle/engine jwt rollback divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
@@ -1639,7 +1642,9 @@ mod tests {
         for input in &fixtures {
             assert_eq!(
                 confirm_gcp_api(input, 0),
-                crate::rules::validators::confirm_gcp_api_key(input, 0).map(|m| m.match_end),
+                crate::rules::validators::confirm_gcp_api_key(input, 0)
+                    .into_match()
+                    .map(|m| m.match_end),
                 "oracle/engine gcp overlap divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
@@ -1686,7 +1691,9 @@ mod tests {
         for input in &fixtures {
             assert_eq!(
                 confirm_pypi(input, 0),
-                crate::rules::validators::confirm_pypi_token(input, 0).map(|m| m.match_end),
+                crate::rules::validators::confirm_pypi_token(input, 0)
+                    .into_match()
+                    .map(|m| m.match_end),
                 "oracle/engine pypi rollback divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
@@ -1733,7 +1740,9 @@ mod tests {
         for input in &fixtures {
             assert_eq!(
                 confirm_gitlab(input, 0),
-                crate::rules::validators::confirm_gitlab_token(input, 0).map(|m| m.match_end),
+                crate::rules::validators::confirm_gitlab_token(input, 0)
+                    .into_match()
+                    .map(|m| m.match_end),
                 "oracle/engine gitlab rollback divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
@@ -1767,7 +1776,9 @@ mod tests {
         for input in fixtures {
             assert_eq!(
                 confirm_credit_card_oracle(input, 0),
-                crate::rules::validators::confirm_credit_card(input, 0).map(|m| m.match_end),
+                crate::rules::validators::confirm_credit_card(input, 0)
+                    .into_match()
+                    .map(|m| m.match_end),
                 "oracle/engine cc trim divergence on {:?}",
                 String::from_utf8_lossy(input)
             );
