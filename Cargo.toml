@@ -65,6 +65,8 @@ napi-build = "2"
 # unwinding — under panic=abort they would be dead code and any panic
 # would trap the whole instance. cloak-py relies on it too: pyo3 catches
 # unwinds at every #[pymethods] boundary and raises PanicException.
+# cloak-node as well: every #[napi] export there carries catch_unwind
+# and converts panics to JS exceptions.
 # Explicit (the current default on every workspace target) so a future
 # toolchain or profile change cannot silently flip the strategy.
 [profile.release]

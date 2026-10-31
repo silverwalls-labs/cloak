@@ -775,6 +775,14 @@ jobs:
         working-directory: crates/cloak-node
         run: npm run build-native
 
+      # Mirrors node-parity's F17 step: the test runner type-strips
+      # without checking, so only tsc guards js/, test/, bench/ and
+      # examples/. Requires the napi-generated index.d.ts from the
+      # build step above (js/engine.ts imports ../index.js for types).
+      - name: TypeScript type check
+        working-directory: crates/cloak-node
+        run: npm run typecheck
+
       - name: Parity + streaming + config + transform tests
         working-directory: crates/cloak-node
         run: |
@@ -844,8 +852,12 @@ jobs:
         working-directory: crates/cloak-node
         run: npx napi build --release --platform --esm --target ${{ matrix.target }}
 
+      # Runs on every matrix leg: each job builds for its host platform,
+      # so the artifact can always be loaded in-place. If a cross-compile
+      # target is ever added to the matrix, this smoke needs a real
+      # target-vs-runner.arch gate (the previous `if:` was always true
+      # and gated nothing).
       - name: Prebuild install smoke
-        if: ${{ matrix.target != 'x86_64-unknown-linux-gnu' || runner.arch == 'X64' }}
         working-directory: crates/cloak-node
         run: |
           node --experimental-strip-types --no-warnings -e "

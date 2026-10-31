@@ -22,10 +22,13 @@
 //!   outputs are freshly-allocated `Buffer`. The JS wrapper coerces
 //!   `string`/`Uint8Array` before calling into the native layer.
 //! - No plaintext in stats — same rule as `MatchEvent` in core.
-//! - No panic crosses the boundary: the `catch_unwind` feature on the
-//!   `napi` crate wraps every `#[napi]`-exported function in
-//!   `std::panic::catch_unwind` and converts panics to JS exceptions.
-//!   This relies on the workspace-wide `panic = "unwind"` profile.
+//! - No panic crosses the boundary: every `#[napi]`-exported function in
+//!   this crate carries the `catch_unwind` attribute — napi-rs wraps
+//!   it in `std::panic::catch_unwind` and converts panics to JS
+//!   exceptions (there is no crate-level feature for this; skipping
+//!   the attribute on a future export would let a panic abort the
+//!   process). This relies on the workspace-wide `panic = "unwind"`
+//!   profile.
 
 #![allow(unsafe_code)]
 
