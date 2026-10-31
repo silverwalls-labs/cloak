@@ -18,6 +18,12 @@ type Stats struct {
 	BytesProcessed int `json:"bytes_processed"`
 	// Matches maps rule ID → match count.
 	Matches map[string]int `json:"matches"`
+	// NearMisses maps rule ID → near-miss count (F13): candidates that
+	// matched the rule's shape (prefix, length, character class) but
+	// failed checksum validation (CRC32, Luhn). A spike from zero
+	// signals upstream format drift. Nil when no near-miss occurred —
+	// the core JSON omits the field when empty.
+	NearMisses map[string]int `json:"near_misses,omitempty"`
 }
 
 // RedactResult is the output of a one-shot Redact or a Finish.

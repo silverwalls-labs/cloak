@@ -5,7 +5,7 @@ pub(crate) mod pem;
 // for the receipts protocol (docs/04-performance.md).
 pub mod scanner;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use crate::config::{self, Config};
@@ -152,6 +152,7 @@ impl Engine {
             bytes_processed: 0,
             matches: BTreeMap::new(),
             near_misses: BTreeMap::new(),
+            first_confirms: BTreeSet::new(),
             carry_over: Vec::new(),
             carry_abs: 0,
             ctx_len: 0,
@@ -180,6 +181,26 @@ pub struct Session<'e> {
     /// Per-rule near-miss counts (F13): candidates that matched a rule's
     /// shape but failed checksum/structural validation (CRC32, Luhn).
     near_misses: BTreeMap<crate::types::RuleId, u64>,
+    /// Candidates whose first confirm already ran (F13), keyed by
+    /// `(rule index, absolute anchor offset)`. A candidate that stays in
+    /// the carry across pushes is re-confirmed by every scan; the memo
+    /// makes the FIRST confirmation authoritative for the near-miss
+    /// counter — the only evaluation guaranteed to run with full backward
+    /// context (the emission boundary never crosses the backward window
+    /// of an unresolved candidate, so a candidate can only become
+    /// `truncated` after an earlier full-context evaluation; post-PEM
+    /// candidates re-enter behind a context prefix that covers every
+    /// rule's backward reach, so their first evaluation is complete
+    /// too). Counting at the first confirm — instead of only at
+    /// `finish` — keeps mid-stream near-misses whose bytes flushed as
+    /// clean text (anything farther than `max_window` from EOF), while
+    /// the memo blocks both double counts and truncated-context
+    /// phantoms: a full-context Reject can re-derive as a NearMiss once
+    /// the backward bytes that failed its guard have flushed, and must
+    /// not be counted. Pruned to `>= carry_abs` each scan, mirroring
+    /// `pem_decisions`: a flushed anchor can never be re-confirmed, so
+    /// the set stays bounded by the carry size.
+    first_confirms: BTreeSet<(usize, u64)>,
     /// Trailing bytes from the previous push that could not yet be flushed.
     carry_over: Vec<u8>,
     /// Absolute stream offset of `carry_over[0]` (bytes flushed so far).
@@ -634,6 +655,11 @@ impl Session<'_> {
 
         // 3. Confirm resolvable REGULAR candidates, skipping PEM body regions
         //    and the body of a streaming entry (it is hashed, not scanned).
+        // F13: prune the first-confirm memo — anchors whose bytes left the
+        // carry (abs < carry_abs) can never be re-confirmed, so their
+        // entries are dead weight.
+        self.first_confirms
+            .retain(|&(_, abs)| abs >= self.carry_abs);
         for cand in &self.candidates {
             if cand.rule == self.engine.pem_rule_idx {
                 continue;
@@ -676,6 +702,12 @@ impl Session<'_> {
             let truncated = self.carry_abs > 0 && cand.start < rule.back;
             let resolvable = is_final || cand.start + rule.window <= combined_len;
             if resolvable {
+                // F13: this candidate's first confirm is the authoritative
+                // one — see `first_confirms`. Recording it before the
+                // confirm makes re-derivations (and only re-derivations)
+                // hit the memo.
+                let abs = self.carry_abs + cand.start as u64;
+                let first_confirm = self.first_confirms.insert((cand.rule, abs));
                 match confirm::confirm(rule, &self.carry_over, cand.start) {
                     ConfirmOutcome::Match(cm) => {
                         if truncated && cm.match_start < CLOAK_TAG_MAX {
@@ -691,23 +723,15 @@ impl Session<'_> {
                     }
                     ConfirmOutcome::NearMiss => {
                         // F13: count shape-matched but checksum-rejected
-                        // candidates. Only counted in the final flush to
-                        // avoid double-counting: non-final scans may
-                        // re-confirm the same candidate across pushes
-                        // (it stays in the carry until finish drains it).
-                        // Matches avoid this because they are counted at
-                        // EMIT time (step 7), not confirm time — near-misses
-                        // have no span to emit, so the final-only gate is
-                        // the simplest correct approach. The `truncated`
-                        // guard used for matches is NOT applied here:
-                        // matches have the `retained` list as a fallback
-                        // for truncated candidates, but near-misses have
-                        // no retention mechanism — dropping a truncated
-                        // near-miss at finish loses the count permanently.
-                        // At finish, every candidate is confirmed with
-                        // whatever backward context the carry holds, which
-                        // is sufficient for the operational counter.
-                        if is_final {
+                        // candidates, once per stream candidate — at the
+                        // first (full-context) confirmation. Counting at
+                        // every confirm would double-count re-derivations;
+                        // counting only at `finish` would drop every
+                        // near-miss whose bytes an earlier push flushed
+                        // as clean text (anything farther than
+                        // `max_window` from EOF — the common case for
+                        // real streams).
+                        if first_confirm {
                             *self.near_misses.entry(rule.id.clone()).or_insert(0) += 1;
                         }
                     }
@@ -1944,13 +1968,12 @@ mod tests {
 
     #[test]
     fn f13_near_miss_credit_card_streaming_parity() {
-        // Credit-card has back=30 (CLOAK_TAG_MAX), so a Luhn-invalid card
-        // near the start of the carry buffer at finish time exercises the
-        // truncation path. The near-miss must still be counted — unlike
-        // matches, near-misses have no retention fallback.
+        // A Luhn-invalid card padded past the jwt window (2048) so the
+        // pushes flush clean bytes ahead of it: the near-miss must be
+        // counted even though the card's bytes leave the carry before
+        // `finish` runs (whole-buffer and every chunk size agree).
         let engine = test_engine();
         // 4539578763621487: Visa IIN, 16 digits, Luhn-INVALID (last digit wrong).
-        // Pad with enough clean text to push the card into carry territory.
         let mut input = vec![b'x'; 3000];
         input.extend_from_slice(b" 4539578763621487 ");
         let (_, whole_stats) = push_all(&engine, &input);
@@ -1986,5 +2009,81 @@ mod tests {
             !json.contains("near_misses"),
             "empty near_misses must be absent from JSON: {json}"
         );
+    }
+
+    #[test]
+    fn f13_near_miss_counted_after_mid_stream_flush() {
+        // Regression (review of the final-flush-only gate): a near-miss
+        // confirmed during a non-final scan has its bytes flushed as
+        // clean text long before `finish` — counting only in the final
+        // flush silently dropped it. Two CRC-invalid tokens sit well
+        // past the max window (2048, jwt) from EOF; every chunking must
+        // count both, exactly once each.
+        let engine = test_engine();
+        let mut input = Vec::new();
+        input.extend_from_slice(&vec![b'x'; 4_000]);
+        input.extend_from_slice(b" ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf ");
+        input.extend_from_slice(&vec![b'x'; 4_000]);
+        input.extend_from_slice(b" ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf ");
+        input.extend_from_slice(&vec![b'x'; 4_000]);
+
+        let expected = Some(&2);
+        let (_, whole) = push_all(&engine, &input);
+        assert_eq!(
+            whole.near_misses.get(&RuleId::new("github-token")),
+            expected,
+            "whole push must count both mid-stream near-misses"
+        );
+
+        // 64 KiB mirrors the CLI's streaming read size; 1 byte forces
+        // the boundary to creep through each token byte by byte,
+        // re-confirming the surviving candidate on every push.
+        for cs in [1usize, 97, 64 * 1024] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(cs) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert_eq!(
+                stats.near_misses.get(&RuleId::new("github-token")),
+                expected,
+                "chunk size {cs}: both mid-stream near-misses must be counted"
+            );
+        }
+    }
+
+    #[test]
+    fn f13_truncated_rederivation_of_reject_not_counted() {
+        // A digit run prefixed with a stray digit: every IIN anchor is
+        // interior, so the full-context confirm is a Reject. Once the
+        // flush creeps past the prefix digit (1-byte chunks), the
+        // re-derivation runs with truncated backward context — the
+        // guard no longer sees the prefix digit and the shape alone
+        // would confirm as a near-miss (16 Visa digits, Luhn-invalid).
+        // The first-confirm memo must block that phantom: no count.
+        let engine = test_engine();
+        let mut input = b"94539578763621487".to_vec();
+        input.extend_from_slice(&vec![b'x'; 3_000]);
+
+        let (_, whole) = push_all(&engine, &input);
+        assert!(
+            !whole.near_misses.contains_key(&RuleId::new("credit-card")),
+            "interior-digit run is a full-context Reject, not a near-miss"
+        );
+
+        for cs in [1usize, 64, 1024] {
+            let mut session = engine.session();
+            let mut out = Vec::new();
+            for chunk in input.chunks(cs) {
+                session.push(chunk, &mut out).unwrap();
+            }
+            let stats = session.finish(&mut out).unwrap();
+            assert!(
+                !stats.near_misses.contains_key(&RuleId::new("credit-card")),
+                "chunk size {cs}: truncated re-derivation of a Reject \
+                 must not be counted as a near-miss"
+            );
+        }
     }
 }

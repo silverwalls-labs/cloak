@@ -79,6 +79,22 @@ def test_redact_returns_stats(engine: CloakEngine) -> None:
     assert stats["matches"]["github-token"] >= 1
 
 
+def test_stats_near_miss_on_crc_invalid_token(engine: CloakEngine) -> None:
+    # F13: shape matches (ghp_ + 36 base62) but the CRC32 tail is wrong
+    # → not redacted, counted as a near-miss; the key is absent when no
+    # near-miss occurred (skip-serialized for byte-identical empty JSON).
+    invalid = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf"
+    result = engine.redact(invalid)
+    assert result.output == invalid.encode(), "CRC-invalid token must pass through"
+    assert "github-token" not in result.stats["matches"]
+    assert result.stats["near_misses"]["github-token"] == 1
+
+    valid = "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"
+    result = engine.redact(valid)
+    assert result.stats["matches"]["github-token"] == 1
+    assert "near_misses" not in result.stats, "no near-miss → key omitted"
+
+
 # ── Input coercion ─────────────────────────────────────────────────
 # int is the dangerous one: bytes(1_000_000) is a megabyte of zeros,
 # not an error — a naive bytes(data) fallback would silently scan it
