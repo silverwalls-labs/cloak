@@ -8,7 +8,7 @@
 
 use std::fmt::Write as _;
 
-use rand::Rng;
+use rand::RngExt;
 use rand::rngs::StdRng;
 
 use cloak_core::vectors;
