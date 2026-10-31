@@ -12,7 +12,7 @@ requires-python = ">=3.13"
 dependencies = [
   # Tracks wasmtime's monthly majors — pin one major, uv.lock pins exact.
   # Keep roughly in sync with the Rust-side wasmtime used by crates/wasm-parity
-  # so throughput receipts stay comparable. (50.x while Rust sits on 49.0.4:
+  # so throughput receipts stay comparable. (50.x while Rust sits on 49.0.5:
   # RUSTSEC-2026-0378/0379 — no patched 49.x wheel exists on PyPI.)
   "wasmtime>=50,<51",
 ]
