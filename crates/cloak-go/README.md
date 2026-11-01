@@ -40,11 +40,14 @@ go get github.com/silverwalls-labs/cloak/crates/cloak-go
 ## Quick start
 
 Set the digest key first — with `CLOAK_DIGEST_KEY` unset the engine
-still works but falls back to an ephemeral per-process key, so tags
-don't correlate across runs:
+still works but falls back to an ephemeral key drawn **per engine
+construction**, so tags correlate neither across runs nor across
+engines in the same process. Generate a deployment-specific key once,
+store it like any other secret, and reuse it across runs — anyone
+holding the key can test candidate secrets against your tags:
 
 ```sh
-export CLOAK_DIGEST_KEY="my-stable-key"
+export CLOAK_DIGEST_KEY="$(openssl rand -hex 32)"  # generate once, store securely, reuse
 ```
 
 ```go
