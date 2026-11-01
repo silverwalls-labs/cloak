@@ -65,6 +65,22 @@ func TestConfigToTOMLStringEscaping(t *testing.T) {
 	}
 }
 
+func TestConfigToTOMLControlCharEscaping(t *testing.T) {
+	// Raw control characters are invalid in TOML basic strings — the
+	// serializer must emit \uXXXX escapes (mirrors the Python binding)
+	// instead of handing the Rust parser a malformed string.
+	toml, err := cloak.ConfigToTOML(cloak.Config{
+		Redaction: cloak.RedactionConfig{DigestKey: "a\x00b\x1bc\x7fd"},
+	})
+	if err != nil {
+		t.Fatalf("ConfigToTOML: %v", err)
+	}
+	want := `digest_key = "a\u0000b\u001bc\u007fd"`
+	if !strings.Contains(toml, want) {
+		t.Errorf("control-char escaping mismatch:\n  got:  %q\n  want: %q", toml, want)
+	}
+}
+
 func TestConfigToTOMLRejectsInvalidRuleIDs(t *testing.T) {
 	invalid := []string{
 		"Phone",

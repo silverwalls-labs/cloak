@@ -77,14 +77,15 @@ func goBytes(buf C.CloakBuf) []byte {
 	return data
 }
 
-// takeErr reads an error CloakBuf as a string and frees it.
+// takeErr reads an error CloakBuf as a string and frees it. Reuses
+// goBytes so the unsafe read-then-free dance lives in exactly one
+// place.
 func takeErr(buf C.CloakBuf) string {
-	if buf.len == 0 {
+	msg := goBytes(buf)
+	if msg == nil {
 		return "(no error message)"
 	}
-	msg := string(unsafe.Slice((*byte)(unsafe.Pointer(buf.ptr)), buf.len))
-	C.cloak_buf_free(buf)
-	return msg
+	return string(msg)
 }
 
 // parseStats decodes the stats JSON the ABI returns (same shape as
@@ -113,6 +114,10 @@ type ffiEngine struct {
 	ptr *C.CloakEngine
 }
 
+// valid reports whether the handle still points at a live engine
+// (false once free succeeded or a caught ABI panic poisoned it).
+func (e *ffiEngine) valid() bool { return e.ptr != nil }
+
 func ffiEngineNew(configTOML string) (*ffiEngine, error) {
 	cfg := []byte(configTOML)
 	var errBuf C.CloakBuf
@@ -124,14 +129,23 @@ func ffiEngineNew(configTOML string) (*ffiEngine, error) {
 }
 
 // free releases the engine. The ABI refuses — engine still valid,
-// retryable — while sessions are live or scans are in flight.
+// retryable — while sessions are live or scans are in flight. A
+// caught panic (CLOAK_ERR_PANIC) is different: the ABI documents the
+// pointer as invalid afterwards, so the handle is poisoned (ptr set
+// to nil) — a retried free must become a no-op, never a re-free of a
+// dead pointer.
 func (e *ffiEngine) free() error {
 	var errBuf C.CloakBuf
-	if C.cloak_engine_free(e.ptr, &errBuf) != C.CLOAK_OK {
+	switch rc := C.cloak_engine_free(e.ptr, &errBuf); rc {
+	case C.CLOAK_OK:
+		e.ptr = nil
+		return nil
+	case C.CLOAK_ERR_PANIC:
+		e.ptr = nil
+		return cloakErrorf("engine_free: %s", takeErr(errBuf))
+	default:
 		return cloakErrorf("engine_free: %s", takeErr(errBuf))
 	}
-	e.ptr = nil
-	return nil
 }
 
 // redact is the one-shot scan: output bytes + stats in one C call.

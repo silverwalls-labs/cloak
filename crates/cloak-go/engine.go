@@ -178,6 +178,14 @@ func (e *Engine) Close() error {
 		return errEngineClosed()
 	}
 	if err := e.ffi.free(); err != nil {
+		// The live-session refusal leaves the engine valid (ptr still
+		// set) — retryable. A caught panic in the ABI invalidates the
+		// pointer and ffi.free poisons it (ptr nil): mark the engine
+		// closed so a retried Close is "engine is closed", never a
+		// re-free of a dead pointer.
+		if !e.ffi.valid() {
+			e.closed = true
+		}
 		return err
 	}
 	e.closed = true

@@ -77,11 +77,13 @@ func TestConcurrentSessionsIndependent(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(samples))
 	for _, v := range samples {
+		// Decode on the test goroutine — fromHex calls t.Fatalf, which
+		// must never run on a spawned goroutine.
+		input := fromHex(t, v.Input)
+		expected := fromHex(t, v.Expected)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			input := fromHex(t, v.Input)
-			expected := fromHex(t, v.Expected)
 
 			session, err := engine.Session()
 			if err != nil {
