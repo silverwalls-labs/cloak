@@ -1,0 +1,12 @@
+{
+  "name": "cloak-node-native-darwin-arm64",
+  "version": "0.1.0",
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "main": "cloak-node-native.darwin-arm64.node",
+  "files": ["cloak-node-native.darwin-arm64.node"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  }
+}

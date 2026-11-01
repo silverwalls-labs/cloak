@@ -1,0 +1,89 @@
+/**
+ * Web Streams API `TransformStream` that redacts secrets on the fly.
+ *
+ * Same shape as the Node `Transform` stream but using the platform
+ * `TransformStream` class (available in Node 18+ globally). Useful for
+ * `fetch` response bodies, `ReadableStream.pipeThrough()`, and
+ * frameworks that speak Web Streams.
+ *
+ * @example
+ * ```ts
+ * import { createEngine, createCloakTransformStream } from 'cloak-node-native';
+ *
+ * const engine = createEngine();
+ * const redactor = createCloakTransformStream(engine);
+ * const redacted = someReadable.pipeThrough(redactor);
+ * ```
+ */
+
+import type { CloakEngine, CloakSession } from "./engine.ts";
+
+/**
+ * Create a Web `TransformStream` that redacts secrets via cloak.
+ *
+ * Operates on `Uint8Array` chunks. The engine must outlive the stream.
+ */
+export function createCloakTransformStream(
+  engine: CloakEngine,
+): TransformStream<Uint8Array, Uint8Array> {
+  let session: CloakSession | null = engine.session();
+
+  // The Transformer type in @types/node omits `cancel` even though the
+  // Web Streams spec includes it and Node implements it. We define the
+  // object with `cancel` and assert the type so tsc accepts it.
+  const transformer: Transformer<Uint8Array, Uint8Array> & {
+    cancel?(): void;
+  } = {
+    transform(
+      chunk: Uint8Array,
+      controller: TransformStreamDefaultController<Uint8Array>,
+    ): void {
+      if (!session) {
+        controller.error(new Error("cloak transform already finished"));
+        return;
+      }
+      try {
+        // Zero-copy view over the chunk's ArrayBuffer — the native
+        // push is synchronous and never retains input bytes.
+        const out = session.push(
+          Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+        );
+        // `out` is a freshly-allocated Buffer — enqueue it directly
+        // (a Buffer is a Uint8Array), no second copy.
+        if (out.length > 0) controller.enqueue(out);
+      } catch (err) {
+        // `transformer.cancel()` is NOT invoked when `transform()` throws,
+        // so release the session here or it blocks `engine.dispose()`.
+        session.abort();
+        session = null;
+        throw err;
+      }
+    },
+
+    flush(
+      controller: TransformStreamDefaultController<Uint8Array>,
+    ): void {
+      if (!session) return;
+      try {
+        const { output } = session.finish();
+        // `output` is a freshly-allocated Buffer — enqueue directly.
+        if (output.length > 0) controller.enqueue(output);
+      } catch (err) {
+        // Release the session so `engine.dispose()` is not blocked.
+        session.abort();
+        throw err;
+      } finally {
+        session = null;
+      }
+    },
+
+    cancel(): void {
+      if (session) {
+        session.abort();
+        session = null;
+      }
+    },
+  };
+
+  return new TransformStream<Uint8Array, Uint8Array>(transformer);
+}

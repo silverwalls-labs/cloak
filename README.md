@@ -55,7 +55,8 @@ cloak is one engine deployed at three points of the pipeline:
 One engine (`cloak-core`), many frontends: the v0.1 CLI, then the v0.2 embedding
 milestone ([design](docs/06-embedding.md)) — **WASM first** (one artifact, runs in
 Go/wazero, Python/wasmtime, Node/WASI), then dedicated native bindings for
-performance: Python (pyo3), Node.js (napi-rs), Go (C ABI/cgo) on demand.
+performance: Python ([`cloak-py`](crates/cloak-py), pyo3), Node.js
+([`cloak-node`](crates/cloak-node), napi-rs), Go (C ABI/cgo) on demand.
 
 Kubernetes deployment patterns (in-container pipe, sidecar over a shared
 volume): [examples/k8s-log-processor.yaml](examples/k8s-log-processor.yaml).

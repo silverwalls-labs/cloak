@@ -1,0 +1,54 @@
+{
+  "name": "cloak-node-native",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native Node.js binding for cloak — guarantee-grade secrets redaction via napi-rs",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build-native": "napi build --release --platform --esm",
+    "build-native:debug": "napi build --platform --esm",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --no-warnings --test test/*.test.ts",
+    "bench": "CLOAK_DIGEST_KEY=bench-key node --experimental-strip-types --no-warnings bench/throughput.ts",
+    "example:basic": "node --experimental-strip-types --no-warnings examples/basic-redact.ts",
+    "example:transform": "node --experimental-strip-types --no-warnings examples/transform-pipe.ts"
+  },
+  "napi": {
+    "binaryName": "cloak-node-native",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3",
+    "@types/node": "^26",
+    "typescript": "^7.0.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/silverwalls-labs/cloak",
+    "directory": "crates/cloak-node"
+  }
+}

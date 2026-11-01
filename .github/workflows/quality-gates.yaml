@@ -736,6 +736,193 @@ jobs:
           name: cloak-py-wheel-${{ matrix.target }}
           path: crates/cloak-py/dist/*.whl
 
+  # ── cloak-node native binding (E6) ────────────────────────────────
+  # No `needs: wasm-build` — cloak-node binds cloak-core directly; the
+  # native module is compiled by napi-rs through `npm run build-native`.
+
+  cloak-node-parity:
+    name: cloak-node Parity
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: "24"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Verify vectors.json freshness
+        run: |
+          cargo run --example export-vectors -p cloak-core > /tmp/vectors-fresh.json
+          diff crates/cloak-node/test/fixtures/vectors.json /tmp/vectors-fresh.json \
+            || { echo "::error::vectors.json is stale — regenerate with: cargo run --example export-vectors -p cloak-core > crates/cloak-node/test/fixtures/vectors.json"; exit 1; }
+
+      - name: Install dependencies
+        working-directory: crates/cloak-node
+        run: npm ci
+
+      - name: Build native module (release)
+        working-directory: crates/cloak-node
+        run: npm run build-native
+
+      # Mirrors node-parity's F17 step: the test runner type-strips
+      # without checking, so only tsc guards js/, test/, bench/ and
+      # examples/. Requires the napi-generated index.d.ts from the
+      # build step above (js/engine.ts imports ../index.js for types).
+      - name: TypeScript type check
+        working-directory: crates/cloak-node
+        run: npm run typecheck
+
+      - name: Parity + streaming + config + transform tests
+        working-directory: crates/cloak-node
+        run: |
+          node --experimental-strip-types --no-warnings --test test/*.test.ts
+
+      - name: npm pack + install-from-tarball smoke
+        # The packed tarball is what a consumer installs — verify it is
+        # complete and functional from a clean directory outside the
+        # source tree. prepack compiles js/ to dist/ (plain ESM JS:
+        # Node refuses to type-strip .ts files under node_modules),
+        # so the installed package runs without any TypeScript flags.
+        working-directory: crates/cloak-node
+        run: |
+          npm run build
+          npm pack --pack-destination /tmp
+          SMOKE_DIR=$(mktemp -d)
+          cd "$SMOKE_DIR"
+          npm init -y >/dev/null
+          npm install --no-save /tmp/cloak-node-native-*.tgz
+          node --input-type=module -e "
+            import { createEngine } from 'cloak-node-native';
+            const engine = createEngine();
+            const { output } = engine.redact('token=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');
+            if (output.includes('ghp_Ab')) throw new Error('secret leaked through packed artifact');
+            if (!output.includes('[CLOAK:github-token:')) throw new Error('expected a CLOAK tag, got: ' + output.toString());
+            console.log('packed-artifact smoke ok:', output.toString().trim());
+            engine.dispose();
+          "
+
+  cloak-node-prebuilds:
+    name: cloak-node Prebuild (${{ matrix.target }})
+    needs: cloak-node-parity
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            # Linux prebuilds link against the napi cross toolchain's
+            # glibc 2.17 sysroot, not the runner's glibc 2.39: Node 22
+            # supports glibc >= 2.28, and a runner-glibc binary fails
+            # to load on older distros (missing GLIBC_2.34 symbols).
+            napi-cross: --use-napi-cross
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            napi-cross: --use-napi-cross
+          - os: macos-15
+            target: aarch64-apple-darwin
+            napi-cross: ""
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: "24"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master 2026-09-03
+        with:
+          toolchain: 1.98.1
+
+      - name: Cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install dependencies
+        working-directory: crates/cloak-node
+        run: npm ci
+
+      - name: Build native prebuild (release)
+        working-directory: crates/cloak-node
+        run: npx napi build --release --platform --esm ${{ matrix.napi-cross }} --target ${{ matrix.target }}
+
+      # The distribution artifacts must load on every system Node 22
+      # supports — Node's own Linux floor is glibc 2.28, so gate the
+      # Linux prebuilts on their highest required GLIBC symbol version.
+      - name: Verify Linux glibc floor (<= 2.28)
+        if: ${{ contains(matrix.target, 'linux') }}
+        working-directory: crates/cloak-node
+        run: |
+          NODE_FILE=$(ls cloak-node-native.linux-*.node)
+          MAX_GLIBC=$(readelf --version-info "$NODE_FILE" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "highest required GLIBC symbol: ${MAX_GLIBC:-none}"
+          if printf '%s\n' "${MAX_GLIBC:-GLIBC_2.0}" "GLIBC_2.28" | sort -V | tail -1 | grep -q 'GLIBC_2.28'; then
+            echo "glibc floor OK (${MAX_GLIBC:-no GLIBC requirements} <= 2.28)"
+          else
+            echo "::error::prebuild requires ${MAX_GLIBC} but Node 22 supports glibc >= 2.28 — build Linux targets with the napi cross toolchain"
+            exit 1
+          fi
+
+      # Runs on every matrix leg: each job builds for its host platform,
+      # so the artifact can always be loaded in-place. If a cross-compile
+      # target is ever added to the matrix, this smoke needs a real
+      # target-vs-runner.arch gate (the previous `if:` was always true
+      # and gated nothing).
+      - name: Prebuild install smoke
+        working-directory: crates/cloak-node
+        run: |
+          node --experimental-strip-types --no-warnings -e "
+            import { createEngine } from './js/index.ts';
+            const engine = createEngine();
+            const { output } = engine.redact('token=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');
+            if (output.includes('ghp_Ab')) throw new Error('secret leaked through prebuild');
+            if (!output.includes('[CLOAK:github-token:')) throw new Error('expected a CLOAK tag, got: ' + output.toString());
+            console.log('prebuild smoke ok:', output.toString().trim());
+            engine.dispose();
+          "
+
+      # The distributed artifact is what consumers run — exercise the
+      # full parity vector suite against it, not just the smoke above.
+      - name: Prebuild full test suite (parity vectors + streaming + transforms)
+        working-directory: crates/cloak-node
+        run: node --experimental-strip-types --no-warnings --test test/*.test.ts
+
+      # The parity-job tarball is a same-runner-arch smoke artifact —
+      # it carries whatever .node the arm64 parity runner built and is
+      # not portable. Pack a complete, installable tarball per target
+      # (compiled dist/ wrapper + loader + this target's .node) so a
+      # consumer installs a ready package from this job's artifact.
+      - name: Pack per-target installable package
+        working-directory: crates/cloak-node
+        run: |
+          npm run build
+          npm pack --pack-destination .
+
+      - name: Upload prebuild artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloak-node-prebuild-${{ matrix.target }}
+          path: crates/cloak-node/*.node
+
+      - name: Upload packed package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloak-node-package-${{ matrix.target }}
+          path: crates/cloak-node/cloak-node-native-*.tgz
+
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
   # main.rs coverage via instrumented binary + inherited LLVM_PROFILE_FILE).
@@ -764,11 +951,12 @@ jobs:
       - name: Unit Tests with Coverage
         run: |
           mkdir -p coverage
-          # cloak-py is excluded: it has no Rust tests by design (test =
-          # false — all behavior is pytest-covered in cloak-py-parity), so
-          # its lines would only deflate the unit denominator.
+          # cloak-py and cloak-node are excluded: they have no Rust tests
+          # by design (test = false — all behavior is covered by pytest /
+          # node:test respectively), so their lines would only deflate the
+          # unit denominator.
           cargo llvm-cov --workspace --lib --lcov --output-path coverage/unit.lcov \
-            --ignore-filename-regex 'crates/cloak-py/'
+            --ignore-filename-regex 'crates/(cloak-py|cloak-node)/'
 
       - name: Upload Coverage
         if: ${{ !cancelled() }}
