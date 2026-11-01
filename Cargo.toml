@@ -57,7 +57,11 @@ wasmtime = { version = "50", default-features = false, features = [
 wasmtime-wasi = { version = "50", features = ["p1"] }
 pyo3 = "0.30"
 pyo3-build-config = "0.30"
-napi = { version = "3", default-features = false, features = ["napi10"] }
+# napi9 (Node-API 9), not napi10: this binding uses no Node-API 10
+# APIs, and Node-API 10 only shipped in Node 22.14.0+ / 23.6.0+ — with
+# napi9 the addon loads on every Node satisfying the `engines` range
+# (">=22") declared in crates/cloak-node/package.json.
+napi = { version = "3", default-features = false, features = ["napi9"] }
 napi-derive = "3"
 napi-build = "2"
 

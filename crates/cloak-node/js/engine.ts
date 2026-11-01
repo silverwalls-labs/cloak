@@ -115,19 +115,27 @@ function toBytes(input: string | Buffer | Uint8Array): Buffer {
  *
  * When `env` is provided, `process.env` is temporarily swapped to
  * `env` during construction (the native engine reads env vars exactly
- * once, in its constructor). The swap is safe on the main thread (no
- * concurrent JS can observe the intermediate state within a single
- * tick), but `process.env` is backed by the OS environment, which
- * `worker_threads` share — if a worker calls `createEngine` with
- * `env` while another thread reads `process.env`, the other thread
- * may see the swapped values. Create engines with custom `env` on
- * only one thread, or pass the digest key inline instead of via
- * `env:` indirection.
+ * once, in its constructor). On the main thread the swap works: Node
+ * writes `process.env` assignments through to the OS environment
+ * (`setenv`), which is what the native constructor reads back.
+ *
+ * `worker_threads` are different, in both directions:
+ * - A **default Worker** owns a private copy of `process.env`;
+ *   assigning to it does NOT reach the OS environment, so the native
+ *   constructor never sees the swapped values — a digest key passed
+ *   via `env` inside a default Worker is silently ignored (the engine
+ *   falls back to the real environment or an ephemeral key). Create
+ *   engines on the main thread, or pass `SHARE_ENV` to the Worker
+ *   when the environment must be shared.
+ * - Conversely, an assignment made on the main thread DOES land in the
+ *   OS environment, which is process-wide: native code in other
+ *   threads reads it. Treat the `env` parameter as main-thread only.
  *
  * @param config  Engine configuration (JS object serialized to TOML,
  *                or a raw TOML string).
  * @param env     Environment variables visible during engine construction.
- *                Defaults to the current `process.env`.
+ *                Defaults to the current `process.env`. Main thread only
+ *                — see the `worker_threads` note above.
  *
  * @example
  * ```ts

@@ -32,8 +32,12 @@ not quotes.
 
 Run-to-run stability: a second pass measured 127 / 66 / 30 MiB/s —
 one-shot and 256 B within ~7%, streaming 1 KiB within ~14%. Treat
-deltas in that range as noise; the gate margin (1.21× at 1 KiB) is
-still well above unity even at the lower measurement.
+deltas in that range as noise. At the lower 1 KiB measurement the
+native row (66 MiB/s) still exceeds the same-session WASM row
+(64 MiB/s), but only by 1.03× — parity level. The gate's 1.21× at
+1 KiB rests on the first-pass same-session pairing; the second pass
+did not re-measure the WASM rows, so treat the 1 KiB margin as the
+least-settled of the three.
 
 ## Host overhead
 
@@ -51,9 +55,10 @@ native path eliminates all of that.
 
 Small chunks still magnify per-call cost — at 256 B the push boundary
 work (~3 µs × 16 pushes per iteration) adds up. Both paths lose
-roughly the same factor from one-shot to 256 B chunks (native 4.3×,
-WASM 3.7×); the native advantage comes from the lower absolute
-per-call cost, not from a flatter slope.
+roughly the same factor from one-shot to 256 B chunks (native 4.2×,
+WASM 3.8× — 120.2/28.5 µs and 145.2/38.3 µs); the native advantage
+comes from the lower absolute per-call cost, not from a flatter slope
+(the native path actually loses slightly more).
 
 ## Methodology
 

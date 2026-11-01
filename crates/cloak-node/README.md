@@ -19,6 +19,32 @@ npm run build-native           # builds the .node binary (release)
 npm run build                  # compiles js/ → dist/ (for npm pack)
 ```
 
+### Installing the prebuilts
+
+The `cloak-node-prebuilds` CI job uploads two artifacts per target:
+
+- `cloak-node-prebuild-<target>` — the raw `.node` binary.
+- `cloak-node-package-<target>` — a complete `npm pack` tarball
+  (`cloak-node-native-0.1.0.tgz`) with that target's `.node`, the
+  generated loader, and the compiled `dist/` wrapper already inside.
+
+For a ready-to-run package, download the `cloak-node-package-*`
+artifact matching your platform and install from the tarball:
+
+```sh
+npm install --no-save cloak-node-native-0.1.0.tgz
+```
+
+The tarball packed in the `cloak-node-parity` job is a smoke artifact
+only — it carries whatever `.node` the (linux arm64) parity runner
+built, so it is not platform-portable. Use the per-target package
+artifacts instead. The `npm/<platform>/package.json` manifests are
+scaffolding for a possible future npm-publish path (`optionalDependencies`
+wiring); they are not part of the artifact distribution today.
+
+Requires Node >= 22 (the addon requests Node-API 9, which every Node
+22.x provides).
+
 ## Usage
 
 Bytes in, bytes out — `string` input is encoded as UTF-8 at the
@@ -85,11 +111,15 @@ it.
 
 ```sh
 npm ci                                 # install dev deps
-npx napi build                         # debug build of native module
+npm run build-native:debug             # debug build of native module + loader
 npm test                               # parity vectors, streaming, config, transforms
 CLOAK_DIGEST_KEY=bench-key \
   node --experimental-strip-types --no-warnings bench/throughput.ts
 ```
+
+Always build through the `build-native` scripts — the bare
+`npx napi build` command without `--platform --esm` does not generate
+the loader (`index.js`/`index.d.ts`) that `js/` imports.
 
 The parity fixture `test/fixtures/vectors.json` is generated from core
 (`cargo run --example export-vectors -p cloak-core`) and checked for

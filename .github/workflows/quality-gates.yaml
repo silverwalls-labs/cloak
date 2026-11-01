@@ -870,11 +870,28 @@ jobs:
             engine.dispose();
           "
 
+      # The parity-job tarball is a same-runner-arch smoke artifact —
+      # it carries whatever .node the arm64 parity runner built and is
+      # not portable. Pack a complete, installable tarball per target
+      # (compiled dist/ wrapper + loader + this target's .node) so a
+      # consumer installs a ready package from this job's artifact.
+      - name: Pack per-target installable package
+        working-directory: crates/cloak-node
+        run: |
+          npm run build
+          npm pack --pack-destination .
+
       - name: Upload prebuild artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cloak-node-prebuild-${{ matrix.target }}
           path: crates/cloak-node/*.node
+
+      - name: Upload packed package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloak-node-package-${{ matrix.target }}
+          path: crates/cloak-node/cloak-node-native-*.tgz
 
   # ── Coverage (single platform, instrumented) ─────────────────────
   # cargo-llvm-cov captures subprocess coverage (verified: e2e reports
