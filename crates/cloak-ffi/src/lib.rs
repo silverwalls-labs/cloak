@@ -105,6 +105,11 @@ pub struct CloakSession {
 /// buffer exactly once with [`cloak_buf_free`]. Never release `ptr`
 /// with `free()`/`delete`.
 ///
+/// The out-parameters of one call must not alias (two of them must
+/// not point at the same `CloakBuf`): a later write overwrites the
+/// earlier one, leaking its allocation and misattributing which
+/// buffer holds which result.
+///
 /// Messages written into `err_out` parameters are UTF-8 but NOT
 /// NUL-terminated — `len` is authoritative.
 #[repr(C)]
