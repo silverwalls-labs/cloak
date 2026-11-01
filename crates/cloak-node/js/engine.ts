@@ -101,7 +101,9 @@ export type { CloakConfig };
 function toBytes(input: string | Buffer | Uint8Array): Buffer {
   if (typeof input === "string") return Buffer.from(input, "utf-8");
   if (Buffer.isBuffer(input)) return input;
-  return Buffer.from(input);
+  // Zero-copy view over the caller's ArrayBuffer — safe because the
+  // native push/redact is synchronous and never retains input bytes.
+  return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
 }
 
 // ── Factory ────────────────────────────────────────────────────────

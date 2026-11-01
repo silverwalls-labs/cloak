@@ -42,8 +42,19 @@ artifacts instead. The `npm/<platform>/package.json` manifests are
 scaffolding for a possible future npm-publish path (`optionalDependencies`
 wiring); they are not part of the artifact distribution today.
 
-Requires Node >= 22 (the addon requests Node-API 9, which every Node
-22.x provides).
+The Linux prebuilts are linked against the napi cross toolchain's
+glibc 2.17 sysroot (CI gates them at `GLIBC <= 2.28` — Node 22's own
+Linux floor), so they load on every glibc system Node 22 supports.
+
+**Runtime** requirement: Node >= 22 — the installed package is plain
+ESM plus an addon requesting Node-API 9, which every Node 22.x
+provides.
+
+**Development** (this crate: `npm ci`, `build-native`, `npm test`)
+needs a newer Node than the runtime floor: the type-stripping test
+runner needs Node >= 22.6.0 (`--experimental-strip-types`), and the
+locked `@napi-rs/cli` declares `^20.17.0 || ^22.13.0 || >= 23.5.0`.
+CI runs Node 24 — use Node 24 for development.
 
 ## Usage
 

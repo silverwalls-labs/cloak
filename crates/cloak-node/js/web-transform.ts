@@ -43,8 +43,14 @@ export function createCloakTransformStream(
         return;
       }
       try {
-        const out = session.push(Buffer.from(chunk));
-        if (out.length > 0) controller.enqueue(new Uint8Array(out));
+        // Zero-copy view over the chunk's ArrayBuffer — the native
+        // push is synchronous and never retains input bytes.
+        const out = session.push(
+          Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+        );
+        // `out` is a freshly-allocated Buffer — enqueue it directly
+        // (a Buffer is a Uint8Array), no second copy.
+        if (out.length > 0) controller.enqueue(out);
       } catch (err) {
         // `transformer.cancel()` is NOT invoked when `transform()` throws,
         // so release the session here or it blocks `engine.dispose()`.
@@ -60,7 +66,8 @@ export function createCloakTransformStream(
       if (!session) return;
       try {
         const { output } = session.finish();
-        if (output.length > 0) controller.enqueue(new Uint8Array(output));
+        // `output` is a freshly-allocated Buffer — enqueue directly.
+        if (output.length > 0) controller.enqueue(output);
       } catch (err) {
         // Release the session so `engine.dispose()` is not blocked.
         session.abort();

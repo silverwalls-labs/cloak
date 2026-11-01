@@ -821,10 +821,17 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            # Linux prebuilds link against the napi cross toolchain's
+            # glibc 2.17 sysroot, not the runner's glibc 2.39: Node 22
+            # supports glibc >= 2.28, and a runner-glibc binary fails
+            # to load on older distros (missing GLIBC_2.34 symbols).
+            napi-cross: --use-napi-cross
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            napi-cross: --use-napi-cross
           - os: macos-15
             target: aarch64-apple-darwin
+            napi-cross: ""
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -850,7 +857,24 @@ jobs:
 
       - name: Build native prebuild (release)
         working-directory: crates/cloak-node
-        run: npx napi build --release --platform --esm --target ${{ matrix.target }}
+        run: npx napi build --release --platform --esm ${{ matrix.napi-cross }} --target ${{ matrix.target }}
+
+      # The distribution artifacts must load on every system Node 22
+      # supports — Node's own Linux floor is glibc 2.28, so gate the
+      # Linux prebuilts on their highest required GLIBC symbol version.
+      - name: Verify Linux glibc floor (<= 2.28)
+        if: ${{ contains(matrix.target, 'linux') }}
+        working-directory: crates/cloak-node
+        run: |
+          NODE_FILE=$(ls cloak-node-native.linux-*.node)
+          MAX_GLIBC=$(readelf --version-info "$NODE_FILE" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "highest required GLIBC symbol: ${MAX_GLIBC:-none}"
+          if printf '%s\n' "${MAX_GLIBC:-GLIBC_2.0}" "GLIBC_2.28" | sort -V | tail -1 | grep -q 'GLIBC_2.28'; then
+            echo "glibc floor OK (${MAX_GLIBC:-no GLIBC requirements} <= 2.28)"
+          else
+            echo "::error::prebuild requires ${MAX_GLIBC} but Node 22 supports glibc >= 2.28 — build Linux targets with the napi cross toolchain"
+            exit 1
+          fi
 
       # Runs on every matrix leg: each job builds for its host platform,
       # so the artifact can always be loaded in-place. If a cross-compile
@@ -869,6 +893,12 @@ jobs:
             console.log('prebuild smoke ok:', output.toString().trim());
             engine.dispose();
           "
+
+      # The distributed artifact is what consumers run — exercise the
+      # full parity vector suite against it, not just the smoke above.
+      - name: Prebuild full test suite (parity vectors + streaming + transforms)
+        working-directory: crates/cloak-node
+        run: node --experimental-strip-types --no-warnings --test test/*.test.ts
 
       # The parity-job tarball is a same-runner-arch smoke artifact —
       # it carries whatever .node the arm64 parity runner built and is
