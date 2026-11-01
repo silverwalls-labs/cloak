@@ -972,8 +972,8 @@ mod tests {
         let mut out = empty_buf();
         let mut err = empty_buf();
         // SAFETY: (null, 0) is a documented valid empty pair.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let status =
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe { cloak_redact(engine, ptr::null(), 0, &mut out, ptr::null_mut(), &mut err) };
         assert_eq!(status, CLOAK_OK, "redact failed: {}", take_err(err));
         assert_eq!(take_buf(out), Vec::<u8>::new());
@@ -1002,8 +1002,8 @@ mod tests {
         let mut out = empty_buf();
         let mut err = empty_buf();
         // SAFETY: documented error path — pointers are checked, not read.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let status =
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe { cloak_redact(engine, ptr::null(), 5, &mut out, ptr::null_mut(), &mut err) };
         assert_eq!(status, CLOAK_ERR);
         assert!(
@@ -1074,8 +1074,8 @@ mod tests {
 
         let mut err = empty_buf();
         // SAFETY: documented error path — out is checked before use.
-        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let status =
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe { cloak_session_push(session, b"x".as_ptr(), 1, ptr::null_mut(), &mut err) };
         assert_eq!(status, CLOAK_ERR);
         assert!(take_err(err).contains("out must not be null"));
