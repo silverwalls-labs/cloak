@@ -103,6 +103,36 @@ func TestRedactReturnsStats(t *testing.T) {
 	}
 }
 
+// F13: a CRC-invalid token passes through but is counted as a near-miss;
+// the field is absent from the stats JSON when no near-miss occurred.
+func TestRedactStatsNearMiss(t *testing.T) {
+	engine := newTestEngine(t)
+
+	invalid := []byte("ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf")
+	res, err := engine.Redact(invalid)
+	if err != nil {
+		t.Fatalf("Redact: %v", err)
+	}
+	if !bytes.Equal(res.Output, invalid) {
+		t.Errorf("CRC-invalid token must pass through, got %q", res.Output)
+	}
+	if res.Stats.Matches["github-token"] != 0 {
+		t.Errorf("CRC-invalid token must not be a match, got %v", res.Stats.Matches)
+	}
+	if res.Stats.NearMisses["github-token"] != 1 {
+		t.Errorf("stats should report one github-token near-miss, got %v", res.Stats.NearMisses)
+	}
+
+	valid := []byte("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")
+	res, err = engine.Redact(valid)
+	if err != nil {
+		t.Fatalf("Redact: %v", err)
+	}
+	if res.Stats.NearMisses != nil {
+		t.Errorf("no near-miss → NearMisses must stay nil, got %v", res.Stats.NearMisses)
+	}
+}
+
 // ── Session lifecycle ──────────────────────────────────────────────
 
 func TestSessionConsumedSemantics(t *testing.T) {

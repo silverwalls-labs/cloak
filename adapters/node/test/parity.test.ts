@@ -153,4 +153,33 @@ describe("parity — edge cases", () => {
       "stats should report github-token match",
     );
   });
+
+  // F13: a CRC-invalid token passes through but is counted as a near-miss;
+  // the key is absent from the stats when no near-miss occurred (the wasm
+  // JSON skip-serializes it).
+  it("redact() counts CRC-invalid tokens as near-misses", () => {
+    const invalid = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+    const invalidResult = engine.redact(invalid);
+    assert.ok(
+      invalidResult.output.equals(Buffer.from(invalid)),
+      "CRC-invalid token must pass through",
+    );
+    assert.ok(
+      !("github-token" in invalidResult.stats.matches),
+      "CRC-invalid token must not be a match",
+    );
+    assert.ok(
+      invalidResult.stats.near_misses?.["github-token"] === 1,
+      `stats should report one github-token near-miss, got ${JSON.stringify(
+        invalidResult.stats,
+      )}`,
+    );
+
+    const valid = "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";
+    const validResult = engine.redact(valid);
+    assert.ok(
+      validResult.stats.near_misses === undefined,
+      "no near-miss → key omitted",
+    );
+  });
 });

@@ -65,7 +65,9 @@ fn consumed_err() -> PyErr {
 }
 
 /// Convert core [`Stats`] to the `CloakStats` dict shape shared by all
-/// bindings: `{"bytes_processed": int, "matches": {rule-id: count}}`.
+/// bindings: `{"bytes_processed": int, "matches": {rule-id: count},
+/// "near_misses": {rule-id: count}}`. The `near_misses` key is only
+/// present when non-empty (F13).
 fn stats_to_dict<'py>(py: Python<'py>, stats: &Stats) -> PyResult<Bound<'py, PyDict>> {
     let matches = PyDict::new(py);
     for (rule, count) in &stats.matches {
@@ -74,6 +76,13 @@ fn stats_to_dict<'py>(py: Python<'py>, stats: &Stats) -> PyResult<Bound<'py, PyD
     let dict = PyDict::new(py);
     dict.set_item("bytes_processed", stats.bytes_processed)?;
     dict.set_item("matches", matches)?;
+    if !stats.near_misses.is_empty() {
+        let near_misses = PyDict::new(py);
+        for (rule, count) in &stats.near_misses {
+            near_misses.set_item(rule.to_string(), *count)?;
+        }
+        dict.set_item("near_misses", near_misses)?;
+    }
     Ok(dict)
 }
 

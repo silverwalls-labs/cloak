@@ -19,6 +19,14 @@ export interface CloakStats {
   bytes_processed: number;
   /** Per-rule match counts (rule-id → count). */
   matches: Record<string, number>;
+  /**
+   * Per-rule near-miss counts (F13): candidates that matched a rule's
+   * shape (prefix, length, character class) but failed checksum
+   * validation (CRC32, Luhn) — a spike from zero signals upstream
+   * format drift. Only present when at least one near-miss occurred
+   * (the wasm JSON omits the field when empty).
+   */
+  near_misses?: Record<string, number>;
 }
 
 /** A scanning session — per-stream state, cheap to create. */

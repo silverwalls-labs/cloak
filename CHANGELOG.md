@@ -9,6 +9,29 @@ a breaking change).
 
 ## [Unreleased]
 
+### Added
+
+- **F13 (#33)** — near-miss observability. `Stats` gains a per-rule
+  `near_misses` counter for candidates that matched a rule's shape
+  (prefix, body length, character class, IIN) but failed checksum
+  validation (CRC32, Luhn) and therefore passed through unredacted.
+  A near-miss spike from zero in operator stats signals upstream
+  format drift — the checksum scheme changed and real tokens are
+  passing through — instead of silent missed redactions. The field is
+  counted at a candidate's first confirmation (memoized by absolute
+  anchor offset, like the PEM decision memo), so mid-stream near-misses
+  whose bytes flushed before `finish` are counted and re-derivations —
+  including truncated-context phantoms of full-context rejects — are
+  not. Serialization skips the field when empty, keeping JSON output
+  byte-identical to pre-F13 when no near-miss occurred; deserialization
+  defaults it for pre-F13 JSON. Custom confirm validators now return
+  `ConfirmOutcome` (`Match`/`NearMiss`/`Reject`) instead of
+  `Option<ConfirmMatch>`. Exposed across all bindings: CLI
+  `--stats-format` text (`total_near_misses`, `per_rule_near_misses`)
+  and JSON, the wasm JSON, the pyo3 `CloakStats` dict
+  (`near_misses`, present only when non-empty), and the Go/Node/Python
+  adapter stats types (optional/nil when empty).
+
 ### Fixed
 
 - **#46** — PEM fused markers are now redacted. When a private-key END

@@ -63,12 +63,25 @@ pub struct Stats {
     pub bytes_processed: u64,
     /// Per-rule match count (BTreeMap for deterministic iteration order).
     pub matches: BTreeMap<RuleId, u64>,
+    /// Per-rule near-miss count: candidates that matched the rule's shape
+    /// (prefix, body length, character class) but failed checksum or
+    /// structural validation (CRC32, Luhn). A spike from zero signals
+    /// upstream format drift — the checksum scheme changed and real tokens
+    /// are passing through unredacted. Empty when no near-misses occurred;
+    /// `skip_serializing_if` keeps existing JSON output byte-identical.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub near_misses: BTreeMap<RuleId, u64>,
 }
 
 impl Stats {
     /// Sum of all per-rule match counts.
     pub fn total_matches(&self) -> u64 {
         self.matches.values().sum()
+    }
+
+    /// Sum of all per-rule near-miss counts.
+    pub fn total_near_misses(&self) -> u64 {
+        self.near_misses.values().sum()
     }
 }
 
@@ -105,5 +118,43 @@ mod tests {
         stats.matches.insert(RuleId::new("rule-a"), 3);
         stats.matches.insert(RuleId::new("rule-b"), 7);
         assert_eq!(stats.total_matches(), 10);
+    }
+
+    #[test]
+    fn stats_near_misses_default_empty() {
+        let stats = Stats::default();
+        assert!(stats.near_misses.is_empty());
+        assert_eq!(stats.total_near_misses(), 0);
+    }
+
+    #[test]
+    fn stats_total_near_misses() {
+        let mut stats = Stats::default();
+        stats.near_misses.insert(RuleId::new("github-token"), 5);
+        stats.near_misses.insert(RuleId::new("npm-token"), 3);
+        assert_eq!(stats.total_near_misses(), 8);
+    }
+
+    #[test]
+    fn stats_json_omits_empty_near_misses() {
+        let stats = Stats::default();
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(
+            !json.contains("near_misses"),
+            "empty near_misses must be omitted from JSON: {json}"
+        );
+    }
+
+    #[test]
+    fn stats_json_includes_nonempty_near_misses() {
+        let mut stats = Stats::default();
+        stats.near_misses.insert(RuleId::new("github-token"), 1);
+        let json = serde_json::to_string(&stats).unwrap();
+        assert!(
+            json.contains("near_misses"),
+            "non-empty near_misses must appear in JSON: {json}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["near_misses"]["github-token"], 1);
     }
 }

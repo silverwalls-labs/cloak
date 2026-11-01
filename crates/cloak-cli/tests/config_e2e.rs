@@ -184,6 +184,79 @@ fn stats_silent_by_default() {
     );
 }
 
+// ── F13: near-miss stats ────────────────────────────────────────────
+
+#[test]
+fn stats_json_near_miss_crc_invalid_github() {
+    // ghp_ + 30 base62 entropy + WRONG 6-byte CRC: shape matches but CRC
+    // fails → near-miss appears in stats JSON.
+    let input = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf";
+    let assert = cloak()
+        .arg("--stats-format")
+        .arg("json")
+        .write_stdin(input)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert_eq!(
+        stdout.trim(),
+        input,
+        "CRC-invalid token must pass through unredacted"
+    );
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap();
+    assert_eq!(
+        v["near_misses"]["github-token"], 1,
+        "CRC-invalid github token must be counted as a near-miss: {stderr}"
+    );
+    assert!(
+        v.get("matches")
+            .and_then(|m| m.get("github-token"))
+            .is_none()
+            || v["matches"]["github-token"] == 0,
+        "CRC-invalid token must NOT be counted as a match: {stderr}"
+    );
+}
+
+#[test]
+fn stats_json_omits_near_misses_when_empty() {
+    // Valid CRC token: near_misses field must not appear in JSON at all.
+    let assert = cloak()
+        .arg("--stats-format")
+        .arg("json")
+        .write_stdin("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")
+        .assert()
+        .success();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("near_misses"),
+        "JSON must omit near_misses when empty: {stderr}"
+    );
+}
+
+#[test]
+fn stats_text_near_miss_crc_invalid_npm() {
+    let assert = cloak()
+        .arg("--stats-format")
+        .arg("text")
+        .write_stdin("npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf")
+        .assert()
+        .success();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("total_near_misses: 1"),
+        "text stats must include total_near_misses: {stderr}"
+    );
+    assert!(
+        stderr.contains("per_rule_near_misses:"),
+        "text stats must include per_rule_near_misses section: {stderr}"
+    );
+    assert!(
+        stderr.contains("npm-token: 1"),
+        "text stats must show npm-token near-miss: {stderr}"
+    );
+}
+
 // ── File args ───────────────────────────────────────────────────────
 
 #[test]

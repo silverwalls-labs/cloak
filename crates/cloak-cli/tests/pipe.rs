@@ -313,6 +313,11 @@ fn pipe_mixed_valid_and_invalid_crc() {
         v["matches"]["github-token"], 2,
         "should count 2 github-token matches (valid classic + pat): {stderr}"
     );
+    // F13: the CRC-invalid classic token is a near-miss.
+    assert_eq!(
+        v["near_misses"]["github-token"], 1,
+        "CRC-invalid classic token must be a near-miss: {stderr}"
+    );
 }
 
 // ── Corpus passthrough (S7) ─────────────────────────────────────────

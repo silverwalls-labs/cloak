@@ -56,6 +56,13 @@ fn emit_stats(stats: &cloak_core::Stats, format: &StatsFormat) -> anyhow::Result
                     writeln!(err, "  {rule}: {count}")?;
                 }
             }
+            if !stats.near_misses.is_empty() {
+                writeln!(err, "total_near_misses: {}", stats.total_near_misses())?;
+                writeln!(err, "per_rule_near_misses:")?;
+                for (rule, count) in &stats.near_misses {
+                    writeln!(err, "  {rule}: {count}")?;
+                }
+            }
         }
     }
     Ok(())

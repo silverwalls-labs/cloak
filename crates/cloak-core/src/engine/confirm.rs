@@ -64,6 +64,56 @@ impl ConfirmMatch {
     }
 }
 
+/// Outcome of a custom confirm function (F13).
+///
+/// Extends the binary pass/fail (`Option<ConfirmMatch>`) with a near-miss
+/// state for candidates that matched a rule's shape (prefix, body length,
+/// character class) but failed checksum or structural validation (CRC32,
+/// Luhn). A near-miss spike in operator stats signals upstream format drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmOutcome {
+    /// Shape and validation both passed — redact this span.
+    Match(ConfirmMatch),
+    /// Shape matched but checksum/structural validation rejected the
+    /// candidate. Not redacted, but counted for drift detection.
+    NearMiss,
+    /// Shape did not match or was structurally invalid — no action.
+    Reject,
+}
+
+impl ConfirmOutcome {
+    /// Returns the confirmed match, if any.
+    pub fn as_match(&self) -> Option<&ConfirmMatch> {
+        match self {
+            ConfirmOutcome::Match(cm) => Some(cm),
+            _ => None,
+        }
+    }
+
+    /// Consumes the outcome and returns the confirmed match, if any.
+    pub fn into_match(self) -> Option<ConfirmMatch> {
+        match self {
+            ConfirmOutcome::Match(cm) => Some(cm),
+            _ => None,
+        }
+    }
+
+    /// True when the outcome is a confirmed match.
+    pub fn is_match(&self) -> bool {
+        matches!(self, ConfirmOutcome::Match(_))
+    }
+
+    /// True when the outcome is a near-miss (shape OK, checksum failed).
+    pub fn is_near_miss(&self) -> bool {
+        matches!(self, ConfirmOutcome::NearMiss)
+    }
+
+    /// True when the outcome is a rejection (shape did not match).
+    pub fn is_reject(&self) -> bool {
+        matches!(self, ConfirmOutcome::Reject)
+    }
+}
+
 /// One catalog rule compiled for matching.
 pub(crate) struct CompiledRule {
     pub id: RuleId,
@@ -79,7 +129,7 @@ pub(crate) struct CompiledRule {
 /// for custom rules.
 enum ConfirmImpl {
     Dfa(Box<dense::DFA<Vec<u32>>>),
-    Custom(fn(&[u8], usize) -> Option<ConfirmMatch>),
+    Custom(fn(&[u8], usize) -> ConfirmOutcome),
 }
 
 /// Compile one catalog spec. Split out of `Engine::new` so the error path is
@@ -116,13 +166,10 @@ pub(crate) fn compile_rule(spec: &RuleSpec) -> Result<CompiledRule, BuildError> 
 }
 
 /// Run the rule's confirm step over the candidate window starting at
-/// `anchor_start`. Returns the redaction span if confirmed, `None` if
-/// rejected.
-pub(crate) fn confirm(
-    rule: &CompiledRule,
-    haystack: &[u8],
-    anchor_start: usize,
-) -> Option<ConfirmMatch> {
+/// `anchor_start`. Returns a [`ConfirmOutcome`]: `Match` with the
+/// redaction span, `NearMiss` for shape-matched but checksum-rejected
+/// candidates (F13), or `Reject` for non-matches.
+pub(crate) fn confirm(rule: &CompiledRule, haystack: &[u8], anchor_start: usize) -> ConfirmOutcome {
     match &rule.confirm_impl {
         ConfirmImpl::Dfa(dfa) => {
             let window_end = anchor_start.saturating_add(rule.window).min(haystack.len());
@@ -130,12 +177,18 @@ pub(crate) fn confirm(
             let input = Input::new(haystack)
                 .range(anchor_start..window_end)
                 .anchored(Anchored::Yes);
-            dfa.try_search_fwd(&input)
+            match dfa
+                .try_search_fwd(&input)
                 // Infallible for our DFAs: no quit bytes (pure ASCII
                 // patterns, no look-around, unicode off) and anchored
                 // starts are compiled in.
                 .expect("dense DFA with no quit bytes cannot fail")
-                .map(|half| ConfirmMatch::full(anchor_start, half.offset()))
+            {
+                Some(half) => {
+                    ConfirmOutcome::Match(ConfirmMatch::full(anchor_start, half.offset()))
+                }
+                None => ConfirmOutcome::Reject,
+            }
         }
         ConfirmImpl::Custom(f) => f(haystack, anchor_start),
     }
@@ -151,8 +204,8 @@ mod tests {
     }
 
     /// Helper: assert a confirm result matches a full-span redaction.
-    fn assert_full_span(result: Option<ConfirmMatch>, anchor: usize, expected_end: usize) {
-        let cm = result.expect("expected a match");
+    fn assert_full_span(result: ConfirmOutcome, anchor: usize, expected_end: usize) {
+        let cm = result.into_match().expect("expected a match");
         assert_eq!(cm.redact_start, anchor);
         assert_eq!(cm.redact_end, expected_end);
     }
@@ -173,9 +226,9 @@ mod tests {
     #[test]
     fn github_classic_wrong_crc_rejects() {
         let rule = compiled(0);
-        assert_eq!(
-            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0),
-            None
+        assert!(
+            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0).is_near_miss(),
+            "CRC-invalid classic token must be a near-miss, not a reject"
         );
     }
 
@@ -197,20 +250,14 @@ mod tests {
     #[test]
     fn github_classic_body_too_short_rejects() {
         let rule = compiled(0);
-        assert_eq!(
-            confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0),
-            None
-        );
+        assert!(confirm(&rule, b"ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0).is_reject());
     }
 
     #[test]
     fn charset_break_stops_the_match() {
         let rule = compiled(0);
         // 20 valid body chars, then '-' — below the 36 minimum.
-        assert_eq!(
-            confirm(&rule, b"ghp_abcdefghij0123456789-abcdefghij0123456789", 0),
-            None
-        );
+        assert!(confirm(&rule, b"ghp_abcdefghij0123456789-abcdefghij0123456789", 0).is_reject());
     }
 
     #[test]
@@ -252,7 +299,7 @@ mod tests {
         let rule = compiled(1);
         assert_full_span(confirm(&rule, b"glpat-ab-cd_ef-gh_ij-kl_mn-qrs", 0), 0, 30);
         assert_full_span(confirm(&rule, b"glrt-abcdefghij0123456789", 0), 0, 25);
-        assert_eq!(confirm(&rule, b"glpat-abcdefghij012345678", 0), None);
+        assert!(confirm(&rule, b"glpat-abcdefghij012345678", 0).is_reject());
     }
 
     // ── npm-token: CRC-validated ──
@@ -282,19 +329,16 @@ mod tests {
     #[test]
     fn npm_wrong_crc_rejects() {
         let rule = compiled(2);
-        assert_eq!(
-            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0),
-            None
+        assert!(
+            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz01232piBxf", 0).is_near_miss(),
+            "CRC-invalid npm token must be a near-miss, not a reject"
         );
     }
 
     #[test]
     fn npm_body_too_short() {
         let rule = compiled(2);
-        assert_eq!(
-            confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0),
-            None
-        );
+        assert!(confirm(&rule, b"npm_AbCdEfGhIjKlMnOpQrStUvWxYz012345678", 0).is_reject());
     }
 
     #[test]
@@ -303,15 +347,15 @@ mod tests {
         let input = b"xx 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";
         assert_full_span(confirm(&rule, input, 3), 3, 43);
         // Anchored: searching from 0 must NOT skip ahead to the token.
-        assert_eq!(confirm(&rule, input, 0), None);
+        assert!(confirm(&rule, input, 0).is_reject());
     }
 
     #[test]
     fn window_clamps_at_haystack_end() {
         let rule = compiled(0);
         // Anchor 3 bytes before EOF: window clamps, no match, no panic.
-        assert_eq!(confirm(&rule, b"end ghp", 4), None);
-        assert_eq!(confirm(&rule, b"ghp_", 0), None);
+        assert!(confirm(&rule, b"end ghp", 4).is_reject());
+        assert!(confirm(&rule, b"ghp_", 0).is_reject());
     }
 
     #[test]

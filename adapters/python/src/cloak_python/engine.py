@@ -11,7 +11,7 @@ the stats read. Use one engine per thread, or guard with your own lock.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import NamedTuple, TypedDict
+from typing import NamedTuple, NotRequired, TypedDict
 
 from ._bridge import CloakError, WasmBridge
 from .config import CloakConfig, config_to_toml
@@ -37,6 +37,13 @@ class CloakStats(TypedDict):
     """Total bytes pushed through the session."""
     matches: dict[str, int]
     """Per-rule match counts (rule-id → count)."""
+    near_misses: NotRequired[dict[str, int]]
+    """Per-rule near-miss counts (F13): candidates that matched a rule's
+    shape (prefix, length, character class) but failed checksum
+    validation (CRC32, Luhn) — a spike from zero signals upstream format
+    drift. Present only when at least one near-miss occurred, mirroring
+    the core JSON schema (``skip_serializing_if`` keeps empty output
+    byte-identical to pre-F13)."""
 
 
 class RedactResult(NamedTuple):
@@ -60,10 +67,15 @@ def _read_stats(bridge: WasmBridge) -> CloakStats:
     raw = bridge.finish_stats()
     if raw is None:
         return {"bytes_processed": 0, "matches": {}}
-    return {
+    stats: CloakStats = {
         "bytes_processed": int(raw.get("bytes_processed", 0)),
         "matches": dict(raw.get("matches", {})),
     }
+    # F13: present only when non-empty (core skip-serializes the field).
+    near_misses = raw.get("near_misses")
+    if isinstance(near_misses, dict):
+        stats["near_misses"] = dict(near_misses)
+    return stats
 
 
 class CloakSession:
