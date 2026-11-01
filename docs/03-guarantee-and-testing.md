@@ -157,10 +157,13 @@ toolchain, and the macOS acceptance criterion is scoped to stable Rust.*
 
 ### Deferred, with triggers (recorded, not forgotten)
 
-- **Miri + sanitizers (ASAN/LSAN)** — near-zero value while the workspace is 100 %
-  safe Rust on maintained crates. Becomes a **blocking gate** the day `unsafe`
-  enters: hand-rolled SIMD kernels ([ledger F7](05-roadmap.md#follow-ups-ledger))
-  and `cloak-ffi` ([E7](06-embedding.md#e7--cloak-ffi-c-abi--on-demand)).
+- **Miri + sanitizers (ASAN/LSAN)** — **active since E7**: `cloak-ffi` brought
+  `unsafe` across a real C boundary, so the `cloak-ffi-miri` and
+  `cloak-ffi-sanitizers` jobs run the FFI boundary tests on every PR as
+  blocking gates ([E7](06-embedding.md#e7--cloak-ffi-c-abi--on-demand)).
+  Still deferred for hand-rolled SIMD kernels
+  ([ledger F7](05-roadmap.md#follow-ups-ledger)) — that unsafe would live in
+  core's hot path and gets its own gate when it lands.
 - **MSRV build check** — lands automatically once S1 pins the MSRV policy.
 - **Loom / model checking** — only if lock-free concurrency ever appears in core.
   Not currently planned.

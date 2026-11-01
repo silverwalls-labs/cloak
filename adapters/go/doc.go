@@ -2,8 +2,9 @@
 // applications via the shared cloak_wasm.wasm artifact, driven by
 // wazero (pure Go, no cgo).
 //
-// This is the supported Go path until the native cloak-go binding
-// (E7/E8 in docs/06-embedding.md) lands. The API mirrors the Node and
+// This is the zero-cgo Go path; for native throughput use the cgo
+// binding (crates/cloak-go, over the cloak-ffi C ABI — E7/E8 in
+// docs/06-embedding.md). The API mirrors the Node and
 // Python adapters: Engine(config) → Session() → Push(bytes) →
 // Finish() → (bytes, stats), plus one-shot Redact — bytes in, bytes
 // out, byte-identical to cloak-core for the shared vector corpus.
