@@ -22,6 +22,12 @@ type Writer struct {
 	target  io.Writer
 	stats   *Stats
 	closed  bool
+	// err is the first terminal failure (push or forward in Write,
+	// finish or tail-write in Close), latched so a caller that ignored
+	// the Write error still learns from Close that redacted output was
+	// truncated (bufio.Writer precedent). nil after a clean Close or a
+	// user-called Abort.
+	err error
 }
 
 var _ io.WriteCloser = (*Writer)(nil)
@@ -65,15 +71,20 @@ func (w *Writer) writeAll(data []byte) error {
 // Mirrors the Node transform's destroy-on-error path.
 func (w *Writer) Write(p []byte) (int, error) {
 	if w.closed {
+		if w.err != nil {
+			return 0, w.err
+		}
 		return 0, &CloakError{msg: "write on closed cloak.Writer"}
 	}
 	out, err := w.session.Push(p)
 	if err != nil {
+		w.err = err
 		_ = w.Abort()
 		return 0, err
 	}
 	if len(out) > 0 {
 		if err := w.writeAll(out); err != nil {
+			w.err = err
 			_ = w.Abort()
 			// The scanner consumed all of p before the forward failed —
 			// report n accordingly so byte accounting stays correct.
@@ -85,19 +96,24 @@ func (w *Writer) Write(p []byte) (int, error) {
 
 // Close finishes the session, writes the tail, and populates Stats.
 //
-// Idempotent. On failure the session is already released (Finish
-// consumes it either way), so the engine can still be closed.
+// Idempotent on the success path; after a terminal failure the latched
+// error is returned again, so a caller that ignored the Write error
+// still sees the truncation. Returns nil after a user-called Abort.
+// On failure the session is already released (Finish consumes it
+// either way), so the engine can still be closed.
 func (w *Writer) Close() error {
 	if w.closed {
-		return nil
+		return w.err
 	}
 	w.closed = true
 	res, err := w.session.Finish()
 	if err != nil {
+		w.err = err
 		return err
 	}
 	if len(res.Output) > 0 {
 		if err := w.writeAll(res.Output); err != nil {
+			w.err = err
 			return err
 		}
 	}
@@ -107,7 +123,8 @@ func (w *Writer) Close() error {
 }
 
 // Abort drops the session without flushing (broken-pipe path).
-// Idempotent.
+// Idempotent. A user-called Abort is a clean teardown: it latches no
+// error, so a later Close returns nil (only Write/Close failures do).
 func (w *Writer) Abort() error {
 	if w.closed {
 		return nil

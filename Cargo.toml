@@ -11,7 +11,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/cloak-core", "crates/cloak-cli", "crates/cloak-wasm", "crates/cloak-py", "crates/cloak-node", "crates/wasm-parity", "crates/bench-gate"]
+members = ["crates/cloak-core", "crates/cloak-cli", "crates/cloak-wasm", "crates/cloak-py", "crates/cloak-node", "crates/cloak-ffi", "crates/wasm-parity", "crates/bench-gate"]
 # The fuzz crate is deliberately outside the workspace (standard cargo-fuzz
 # layout): it needs the nightly toolchain + libFuzzer link flags and must not
 # drag libfuzzer-sys into cargo-deny/workspace builds. CI runs fmt/clippy on
@@ -71,6 +71,9 @@ napi-build = "2"
 # unwinds at every #[pymethods] boundary and raises PanicException.
 # cloak-node as well: every #[napi] export there carries catch_unwind
 # and converts panics to JS exceptions.
+# cloak-ffi too: every extern "C" entry wraps its body in catch_unwind
+# and translates panics to CLOAK_ERR_PANIC — under panic=abort a panic
+# would tear down the embedding process (Go, C, …) instead.
 # Explicit (the current default on every workspace target) so a future
 # toolchain or profile change cannot silently flip the strategy.
 [profile.release]

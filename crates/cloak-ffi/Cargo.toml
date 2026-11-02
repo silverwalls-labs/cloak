@@ -1,0 +1,35 @@
+# E7 (docs/06-embedding.md): C ABI over cloak-core — staticlib + cdylib
+# plus a committed cbindgen header (include/cloak.h, CI-freshness-checked).
+[package]
+name = "cloak-ffi"
+description = "C ABI over cloak-core — staticlib/cdylib + cbindgen header for FFI embedders (cloak-go, ctypes/cffi, …)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io: the artifact is the header + library pair
+# built from this repo (CI uploads them per target; releases are manual).
+publish = false
+
+[lib]
+name = "cloak_ffi"
+# staticlib: what cloak-go links (self-contained binary, no library
+#            search-path or rpath concerns).
+# cdylib:    the E7 "header + cdylib" artifact for dlopen/ctypes/cffi
+#            consumers.
+crate-type = ["staticlib", "cdylib"]
+# Unlike cloak-py/cloak-node (whose behavior is covered by host-language
+# suites), this crate keeps Rust-side tests: they call the extern "C"
+# entry points directly and are the surface the Miri/ASAN/LSAN blocking
+# gates run on (docs/03 §deferred — active since E7).
+test = true
+# cdylib + doctests don't mix; usage examples live in the generated
+# header's documentation blocks instead.
+doctest = false
+
+[dependencies]
+cloak-core = { path = "../cloak-core" }
+# Stats cross the boundary as JSON — the exact serde shape cloak-wasm
+# ships and every adapter already parses.
+serde_json = { workspace = true }

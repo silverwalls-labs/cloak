@@ -131,11 +131,13 @@ func TestWriterSurfacesShortWrites(t *testing.T) {
 	}
 
 	// Clean bulk input flushes on push; the tail flushes on close —
-	// whichever path forwards bytes first must report the short write.
+	// whichever path forwards bytes first reports the short write, and
+	// the latch guarantees Close surfaces it either way (a caller that
+	// ignored the Write error must still see the truncation).
 	_, writeErr := w.Write(bytes.Repeat([]byte("clean line\n"), 1024))
 	closeErr := w.Close()
-	if !errors.Is(writeErr, io.ErrShortWrite) && !errors.Is(closeErr, io.ErrShortWrite) {
-		t.Errorf("short write not surfaced (write=%v, close=%v)", writeErr, closeErr)
+	if !errors.Is(closeErr, io.ErrShortWrite) {
+		t.Errorf("Close must surface the short write (write=%v, close=%v)", writeErr, closeErr)
 	}
 
 	// Terminal state: the session was released either way.
@@ -158,8 +160,12 @@ func TestWriterAbortsOnTargetError(t *testing.T) {
 
 	_, writeErr := w.Write(bytes.Repeat([]byte("clean line\n"), 1024))
 	closeErr := w.Close()
-	if !errors.Is(writeErr, targetErr) && !errors.Is(closeErr, targetErr) {
-		t.Errorf("target error not surfaced (write=%v, close=%v)", writeErr, closeErr)
+	if !errors.Is(closeErr, targetErr) {
+		t.Errorf("Close must surface the latched target error (write=%v, close=%v)", writeErr, closeErr)
+	}
+	// The latch is sticky: a second Close repeats the same cause.
+	if err := w.Close(); !errors.Is(err, targetErr) {
+		t.Errorf("second Close must repeat the latched error, got %v", err)
 	}
 	if err := engine.Close(); err != nil {
 		t.Errorf("engine.Close after target failure: %v", err)

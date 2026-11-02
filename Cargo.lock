@@ -386,6 +386,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cloak-ffi"
+version = "0.1.0"
+dependencies = [
+ "cloak-core",
+ "serde_json",
+]
+
+[[package]]
 name = "cloak-node"
 version = "0.1.0"
 dependencies = [

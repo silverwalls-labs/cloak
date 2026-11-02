@@ -46,16 +46,38 @@ func Bool(v bool) *bool { return &v }
 
 // ── Serialization ──────────────────────────────────────────────────
 
-// tomlString escapes a TOML basic string value.
+// tomlString escapes a TOML basic string value. Raw control
+// characters are invalid in TOML basic strings (only tab may appear
+// unescaped) — emit the remaining C0 range and DEL as \uXXXX escapes
+// instead of producing a TOML string the Rust parser rejects with a
+// confusing "invalid config" error (mirrors the Python binding's
+// serializer).
 func tomlString(value string) string {
-	replacer := strings.NewReplacer(
-		"\\", "\\\\",
-		"\"", "\\\"",
-		"\n", "\\n",
-		"\r", "\\r",
-		"\t", "\\t",
-	)
-	return "\"" + replacer.Replace(value) + "\""
+	var b strings.Builder
+	b.Grow(len(value) + 2)
+	b.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r < 0x20 || r == 0x7F {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // Cloak rule IDs are kebab-case identifiers from a fixed catalog

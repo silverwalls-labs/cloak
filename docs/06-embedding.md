@@ -91,11 +91,14 @@ correctness lives in core.
 ## C ABI design constraints (`cloak-ffi`)
 
 - `cloak_engine_new(config_toml, len, err_out)` / `cloak_engine_free`,
-  `cloak_session_new` / `cloak_session_push(in, in_len, out_cb)` /
+  `cloak_session_new` / `cloak_session_push(in, in_len, out, err_out)` /
   `cloak_session_finish` — session lifecycle mirrors core exactly.
-- Output via caller-provided callback or cloak-allocated buffer + `cloak_buf_free`
-  (decided at implementation; ownership must be single-owner and documented in the
-  header).
+- Output via cloak-allocated buffer + `cloak_buf_free` (decided at
+  implementation: no callbacks — calling back into Go/host code from Rust is
+  slow and complicates every binding; single-owner rules documented in the
+  header). Errors are per-call out-parameters, never a global/TLS slot (a TLS
+  slot breaks under cgo thread migration — and per-call errors are what let
+  cloak-go drop the engine-wide mutex the wazero adapter needs).
 - Thread-safety contract explicit: `Engine` shareable across threads, `Session` is
   not (matches core).
 - ABI versioned (`cloak_abi_version()`); `cdylib` + generated header (cbindgen).
